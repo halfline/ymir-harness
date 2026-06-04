@@ -225,6 +225,7 @@ class ScoreCollectionEntry:
     actual_path: Path | None
     status: ScoreCollectionStatus
     headline: bool
+    headline_reason: str | None = None
     score: ScoreReport | None = None
     reason: str | None = None
 
@@ -238,6 +239,8 @@ class ScoreCollectionEntry:
             "status": self.status,
             "headline": self.headline,
         }
+        if self.headline_reason:
+            payload["headline_reason"] = self.headline_reason
         if self.reason:
             payload["reason"] = self.reason
         if self.score is not None:

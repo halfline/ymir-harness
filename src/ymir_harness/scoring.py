@@ -278,7 +278,8 @@ def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> Score
     case_id = _case_id_from_expected_path(expected_path)
     case_type = _string_or_none(expected.get("case_type"))
     case_status = _string_or_none(expected.get("case_status"))
-    headline = _is_headline_case(expected)
+    headline_reason = _headline_exclusion_reason(expected)
+    headline = headline_reason is None
 
     if case_status == "excluded":
         return ScoreCollectionEntry(
@@ -289,7 +290,8 @@ def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> Score
             actual_path=None,
             status="skipped",
             headline=False,
-            reason="case_status is excluded",
+            headline_reason=headline_reason,
+            reason=_string_or_none(expected.get("case_status_reason")) or "case_status is excluded",
         )
 
     actual_path = _find_actual_result_file(actual_results_dir, case_id)
@@ -302,6 +304,7 @@ def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> Score
             actual_path=None,
             status="missing",
             headline=headline,
+            headline_reason=headline_reason,
             reason="actual result file is missing",
         )
 
@@ -314,6 +317,7 @@ def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> Score
         actual_path=actual_path,
         status="passed" if score.passed else "failed",
         headline=headline,
+        headline_reason=headline_reason,
         score=score,
     )
 
@@ -334,13 +338,19 @@ def _case_id_from_expected_path(expected_path: Path) -> str:
     return expected_path.name.removesuffix(".expected.json")
 
 
-def _is_headline_case(expected: Mapping[str, Any]) -> bool:
-    return (
-        expected.get("case_status", "active") == "active"
-        and expected.get("ground_truth_confidence") != "low"
-        and expected.get("answer_leakage") != "explicit"
-        and expected.get("network_mode") != "live_non_reproducible"
-    )
+def _headline_exclusion_reason(expected: Mapping[str, Any]) -> str | None:
+    case_status = expected.get("case_status", "active")
+    if case_status == "excluded":
+        return "case_status is excluded"
+    if case_status == "quarantined":
+        return "case_status is quarantined"
+    if expected.get("ground_truth_confidence") == "low":
+        return "ground_truth_confidence is low"
+    if expected.get("answer_leakage") == "explicit":
+        return "answer_leakage is explicit"
+    if expected.get("network_mode") == "live_non_reproducible":
+        return "network_mode is live_non_reproducible"
+    return None
 
 
 def _compare(
