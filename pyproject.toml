@@ -21,6 +21,7 @@ classifiers = [
 ]
 
 [project.scripts]
+benchmark = "ymir_harness.cli:main"
 ymir-harness = "ymir_harness.cli:main"
 
 [dependency-groups]
