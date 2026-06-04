@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -27,6 +28,13 @@ from ymir_harness.models import (
     ValidationIssue,
     ValidationReport,
 )
+
+
+@dataclass(frozen=True)
+class ReferencePatchTarget:
+    repo_path: Path
+    pre_fix_ref: str
+    mock_path: Path
 
 
 def validate_case_directory(cases_dir: Path, *, phase: int = 1) -> ValidationReport:
@@ -71,6 +79,7 @@ def _validate_case(cases_dir: Path, case_id: str, phase: int) -> CaseValidationR
     result = CaseValidationResult(case_id=case_id)
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
     expected = _load_json_object(expected_path, result, required=True)
+    mock_paths = sorted((cases_dir / "mock_data").glob(f"*/{case_id}.json"))
 
     if expected is not None:
         _validate_expected_metadata(expected, expected_path, result, phase)
@@ -78,10 +87,11 @@ def _validate_case(cases_dir: Path, case_id: str, phase: int) -> CaseValidationR
         result.case_status = _string_or_none(expected.get("case_status"))
         _validate_network_policy(cases_dir, expected, result, phase)
         _validate_source_cache(cases_dir, expected, result, phase)
-        _validate_reference_patch(cases_dir, expected, result, phase)
 
-    mock_paths = sorted((cases_dir / "mock_data").glob(f"*/{case_id}.json"))
-    _validate_mock_fixtures(mock_paths, expected, result, phase)
+    reference_patch_targets = _validate_mock_fixtures(mock_paths, expected, result, phase)
+
+    if expected is not None:
+        _validate_reference_patch(cases_dir, expected, result, phase, reference_patch_targets)
 
     if expected is not None:
         _validate_case_consistency(cases_dir, expected, result)
@@ -470,6 +480,7 @@ def _validate_reference_patch(
     expected: Mapping[str, Any],
     result: CaseValidationResult,
     phase: int,
+    _source_targets: list[ReferencePatchTarget],
 ) -> None:
     if phase < 2 or not _implementation_case_requires_reference_patch(expected):
         return
@@ -572,7 +583,7 @@ def _validate_mock_fixtures(
     expected: Mapping[str, Any] | None,
     result: CaseValidationResult,
     phase: int,
-) -> None:
+) -> list[ReferencePatchTarget]:
     expected_package = expected.get("package") if expected else None
     expected_case_type = expected.get("case_type") if expected else None
     expected_target_branch = None
@@ -580,6 +591,7 @@ def _validate_mock_fixtures(
         expected_target_branch = expected.get("target_branch") or expected.get("fix_version")
     packages_seen: set[str] = set()
     branches_seen: set[str] = set()
+    reference_patch_targets: list[ReferencePatchTarget] = []
 
     if not mock_paths:
         result.issues.append(
@@ -590,7 +602,7 @@ def _validate_mock_fixtures(
                 case_id=result.case_id,
             )
         )
-        return
+        return reference_patch_targets
 
     for mock_path in mock_paths:
         config = _load_json_object(mock_path, result, required=True)
@@ -631,9 +643,13 @@ def _validate_mock_fixtures(
                     )
                 )
                 continue
-            packages, branches = _validate_mock_repo_entry(repo, index, mock_path, result)
+            packages, branches, reference_patch_target = _validate_mock_repo_entry(
+                repo, index, mock_path, result
+            )
             packages_seen.update(packages)
             branches_seen.update(branches)
+            if reference_patch_target is not None:
+                reference_patch_targets.append(reference_patch_target)
 
     if expected_package and packages_seen and expected_package not in packages_seen:
         result.issues.append(
@@ -666,15 +682,18 @@ def _validate_mock_fixtures(
             )
         )
 
+    return reference_patch_targets
+
 
 def _validate_mock_repo_entry(
     repo: Mapping[str, Any],
     index: int,
     mock_path: Path,
     result: CaseValidationResult,
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], ReferencePatchTarget | None]:
     packages_seen: set[str] = set()
     branches_seen: set[str] = set()
+    reference_patch_target = None
     for field in ("package", "remote_url", "pre_fix_ref", "branch"):
         _require_field(repo, field, mock_path, result, context=f"repos[{index}]")
 
@@ -689,9 +708,15 @@ def _validate_mock_repo_entry(
     remote_url = repo.get("remote_url")
     pre_fix_ref = repo.get("pre_fix_ref")
     if isinstance(remote_url, str) and isinstance(pre_fix_ref, str):
-        _validate_local_pre_fix_ref(remote_url, pre_fix_ref, mock_path, result)
+        repo_path = _validate_local_pre_fix_ref(remote_url, pre_fix_ref, mock_path, result)
+        if repo_path is not None:
+            reference_patch_target = ReferencePatchTarget(
+                repo_path=repo_path,
+                pre_fix_ref=pre_fix_ref,
+                mock_path=mock_path,
+            )
 
-    return packages_seen, branches_seen
+    return packages_seen, branches_seen, reference_patch_target
 
 
 def _zstream_override_branches(config: Mapping[str, Any]) -> set[str]:
@@ -706,7 +731,7 @@ def _validate_local_pre_fix_ref(
     pre_fix_ref: str,
     mock_path: Path,
     result: CaseValidationResult,
-) -> None:
+) -> Path | None:
     repo_path = _local_repo_path(remote_url)
     if repo_path is None:
         result.issues.append(
@@ -718,7 +743,7 @@ def _validate_local_pre_fix_ref(
                 path=str(mock_path),
             )
         )
-        return
+        return None
 
     if not repo_path.exists():
         result.issues.append(
@@ -730,7 +755,7 @@ def _validate_local_pre_fix_ref(
                 path=str(mock_path),
             )
         )
-        return
+        return None
 
     command = ["git", "-C", str(repo_path), "cat-file", "-e", f"{pre_fix_ref}^{{commit}}"]
     completed = subprocess.run(
@@ -750,6 +775,9 @@ def _validate_local_pre_fix_ref(
                 path=str(mock_path),
             )
         )
+        return None
+
+    return repo_path
 
 
 def _local_repo_path(remote_url: str) -> Path | None:
