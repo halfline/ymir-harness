@@ -165,6 +165,8 @@ The initial `run` command writes validation reports first, then writes
 `benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
 It does not invoke Ymir workflows yet, so each runnable case repetition is
 marked `not_run`.
+Runnable entries reserve `actual_path` under
+`benchmark_cases/reports/runs/RUN_ID/repeat-N/actual-results/CASE_ID.actual.json`.
 
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
