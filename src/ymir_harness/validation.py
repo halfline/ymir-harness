@@ -582,6 +582,9 @@ def _validate_source_cache(
                 path=str(lookaside_dir),
             )
         )
+        return
+
+    _validate_lookaside_artifacts(lookaside_dir, result)
 
 
 def _validate_upstream_source_archives(
@@ -597,6 +600,23 @@ def _validate_upstream_source_archives(
                     message="implementation case source archive is not readable",
                     case_id=result.case_id,
                     path=str(archive_path),
+                )
+            )
+
+
+def _validate_lookaside_artifacts(
+    lookaside_dir: Path,
+    result: CaseValidationResult,
+) -> None:
+    for artifact_path in _lookaside_artifacts(lookaside_dir):
+        if not _has_read_permission(artifact_path):
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message="implementation case lookaside artifact is not readable",
+                    case_id=result.case_id,
+                    path=str(artifact_path),
                 )
             )
 
