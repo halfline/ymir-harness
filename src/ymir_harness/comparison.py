@@ -34,6 +34,34 @@ def compare_result_payloads(
     )
 
 
+def render_comparison_markdown(report: ComparisonReport) -> str:
+    summary = report.summary()
+    lines = [
+        "# Result Comparison",
+        "",
+        f"- Baseline: `{report.baseline_path}`",
+        f"- Candidate: `{report.candidate_path}`",
+        f"- Headline cases: `{summary['headline_total']}`",
+        f"- Headline wins: `{summary['wins']}`",
+        f"- Headline regressions: `{summary['regressions']}`",
+        f"- Non-headline cases: `{summary['non_headline']}`",
+        "",
+        "| Case | Type | Headline | Baseline | Candidate | Delta |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for entry in report.entries:
+        lines.append(
+            "| "
+            f"{entry.case_id} | "
+            f"{entry.case_type or ''} | "
+            f"{_yes_no(entry.headline)} | "
+            f"{entry.baseline_status or ''} | "
+            f"{entry.candidate_status or ''} | "
+            f"{entry.delta} |"
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _case_map(payload: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     cases = payload.get("cases")
     if not isinstance(cases, list):
@@ -115,3 +143,7 @@ def _status(case: Mapping[str, Any] | None) -> str | None:
     if isinstance(status, str):
         return status
     return None
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
