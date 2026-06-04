@@ -100,6 +100,30 @@ def test_score_case_fails_replay_violations() -> None:
     ]
 
 
+def test_score_case_fails_missing_required_artifacts() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "required_artifacts": ["fix.patch", "dnsmasq.spec"],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "generated_artifacts": ["fix.patch"],
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["required_artifacts"].actual == ["fix.patch"]
+    assert failed["required_artifacts"].notes == "missing required artifacts: dnsmasq.spec"
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
