@@ -179,6 +179,7 @@ def _write_replay_case(
     zstream_override: dict[str, str] | None = None,
     requires_source_cache: bool = False,
     reference_patch_mode: str | None = None,
+    reference_patch_exists: bool = True,
 ) -> None:
     case_id = "RHEL-12345"
     case_type = "cve_backport"
@@ -219,6 +220,15 @@ def _write_replay_case(
     if zstream_override is not None:
         mock_data["zstream_override"] = zstream_override
     _write_json(cases_dir / "mock_data" / "triage" / f"{case_id}.json", mock_data)
+    if reference_patch_exists:
+        reference_patch_path = (
+            cases_dir / "mock_data" / "triage" / "reference_patches" / f"{case_id}.patch"
+        )
+        reference_patch_path.parent.mkdir(parents=True, exist_ok=True)
+        reference_patch_path.write_text(
+            "diff --git a/source.c b/source.c\n",
+            encoding="utf-8",
+        )
     _write_json(
         cases_dir / "web_cache" / case_id / "manifest.json",
         {
