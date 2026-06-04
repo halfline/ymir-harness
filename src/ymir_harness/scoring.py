@@ -65,7 +65,14 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
     return ScoreReport(case_id=case_id, case_type=case_type, metrics=metrics)
 
 
-def score_result_directory(cases_dir: Path, actual_results_dir: Path) -> ScoreCollectionReport:
+def score_result_directory(
+    cases_dir: Path,
+    actual_results_dir: Path,
+    *,
+    run_id: str | None = None,
+    ymir_sha: str | None = None,
+    variant: str | None = None,
+) -> ScoreCollectionReport:
     cases_dir = cases_dir.resolve()
     actual_results_dir = actual_results_dir.resolve()
     entries = [
@@ -76,6 +83,9 @@ def score_result_directory(cases_dir: Path, actual_results_dir: Path) -> ScoreCo
         cases_dir=cases_dir,
         actual_results_dir=actual_results_dir,
         entries=entries,
+        run_id=run_id,
+        ymir_sha=ymir_sha,
+        variant=variant,
     )
 
 
