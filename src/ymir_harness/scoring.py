@@ -51,6 +51,12 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
             _normalize_token(expected.get("resolution")),
             normalized_actual["resolution"],
         ),
+        _compare(
+            "affectedness",
+            _normalize_affectedness(expected.get("affectedness")),
+            _normalize_affectedness(_actual_result_field(actual, "affectedness")),
+            optional=True,
+        ),
         _compare("package", expected.get("package"), normalized_actual["package"]),
         _compare(
             "target_branch",
@@ -295,6 +301,20 @@ def _normalize_token(value: Any) -> str | None:
     if "." in token:
         token = token.rsplit(".", maxsplit=1)[-1]
     return token.lower().replace("-", "_")
+
+
+def _normalize_affectedness(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "affected" if value else "not_affected"
+
+    token = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if token in {"true", "yes", "affected", "vulnerable"}:
+        return "affected"
+    if token in {"false", "no", "not_affected", "unaffected", "not_vulnerable"}:
+        return "not_affected"
+    return token
 
 
 def _string_or_none(value: Any) -> str | None:
