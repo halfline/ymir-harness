@@ -199,6 +199,50 @@ def test_cli_run_writes_placeholder_report(
     assert (cases_dir / "reports" / "fixture-validation.json").is_file()
 
 
+def test_cli_run_uses_cases_manifest(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    output_path = tmp_path / "reports" / "run.json"
+    for case_id, package in (("RHEL-12345", "dnsmasq"), ("RHEL-23456", "libtiff")):
+        _write_json(
+            cases_dir / "expected" / f"{case_id}.expected.json",
+            {
+                "schema_version": 1,
+                "case_id": case_id,
+                "case_type": "not_affected",
+                "resolution": "not_affected",
+                "package": package,
+                "expected_basis": "maintainer_decision",
+                "ground_truth_confidence": "high",
+                "answer_leakage": "none",
+                "case_status": "active",
+                "network_mode": "network_denied",
+            },
+        )
+    (cases_dir / "cases.yaml").write_text("cases:\n  - RHEL-23456\n", encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "run",
+                "--cases",
+                str(cases_dir),
+                "--variant",
+                "baseline",
+                "--output",
+                str(output_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert [case["case_id"] for case in output["cases"]] == ["RHEL-23456"]
+
+
 def test_cli_run_blocks_invalid_fixtures(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

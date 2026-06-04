@@ -3,7 +3,36 @@ from __future__ import annotations
 from pathlib import Path
 
 from ymir_harness.models import CaseValidationResult, ValidationReport
-from ymir_harness.runner import build_run_report, select_validation_cases
+from ymir_harness.runner import build_run_report, load_case_manifest, select_validation_cases
+
+
+def test_load_case_manifest_reads_case_ids(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    cases_dir.mkdir()
+    (cases_dir / "cases.yaml").write_text(
+        "cases:\n  - RHEL-23456\n  - case_id: RHEL-12345\n",
+        encoding="utf-8",
+    )
+
+    case_ids, issues = load_case_manifest(cases_dir)
+
+    assert case_ids == ["RHEL-23456", "RHEL-12345"]
+    assert issues == []
+
+
+def test_load_case_manifest_reports_schema_errors(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    cases_dir.mkdir()
+    (cases_dir / "cases.yaml").write_text(
+        "cases:\n  - package: dnsmasq\n",
+        encoding="utf-8",
+    )
+
+    case_ids, issues = load_case_manifest(cases_dir)
+
+    assert case_ids == []
+    assert len(issues) == 1
+    assert issues[0].category == "schema_mismatch"
 
 
 def test_select_validation_cases_filters_in_request_order(tmp_path: Path) -> None:
