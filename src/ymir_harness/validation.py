@@ -288,13 +288,14 @@ def _validate_expected_metadata(
         )
 
     if phase >= 2:
+        reference_patch_mode_required = _implementation_case_requires_reference_patch(expected)
         _validate_allowed_value(
             expected.get("reference_patch_mode"),
             ALLOWED_REFERENCE_PATCH_MODES,
             "reference_patch_mode",
             expected_path,
             result,
-            required=False,
+            required=reference_patch_mode_required,
         )
 
 
