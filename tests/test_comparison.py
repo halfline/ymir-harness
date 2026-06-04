@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ymir_harness.comparison import compare_result_payloads
+from ymir_harness.comparison import compare_result_payloads, render_comparison_markdown
 
 
 def test_compare_result_payloads_classifies_headline_deltas(tmp_path: Path) -> None:
@@ -39,6 +39,21 @@ def test_compare_result_payloads_classifies_headline_deltas(tmp_path: Path) -> N
     assert report.has_headline_regressions
     assert report.summary()["wins"] == 1
     assert report.summary()["regressions"] == 1
+
+
+def test_render_comparison_markdown_lists_case_deltas(tmp_path: Path) -> None:
+    report = compare_result_payloads(
+        {"cases": [_case("RHEL-1", "failed", True)]},
+        {"cases": [_case("RHEL-1", "passed", True)]},
+        tmp_path / "baseline.json",
+        tmp_path / "candidate.json",
+    )
+
+    markdown = render_comparison_markdown(report)
+
+    assert "# Result Comparison" in markdown
+    assert "Headline wins: `1`" in markdown
+    assert "| RHEL-1 | cve_backport | yes | failed | passed | win |" in markdown
 
 
 def _case(case_id: str, status: str, headline: bool) -> dict[str, object]:
