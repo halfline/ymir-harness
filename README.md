@@ -74,6 +74,10 @@ Expected results may declare `spec_patches`. Scoring compares that list with
 `spec_patches` in the actual result to check expected RPM spec patch
 declarations.
 
+Expected results may declare `changelog_entries`. Scoring compares that list
+with `changelog_entries` in the actual result to check Jira, CVE, or NVR
+references captured from the spec changelog.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
