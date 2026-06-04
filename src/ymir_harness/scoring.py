@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ymir_harness import __version__
 from ymir_harness.models import (
     ScoreCollectionEntry,
     ScoreCollectionReport,
@@ -158,6 +159,7 @@ def score_result_directory(
         run_id=run_id,
         ymir_sha=ymir_sha,
         variant=variant,
+        harness_version=__version__,
     )
 
 
