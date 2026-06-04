@@ -1,0 +1,745 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from collections.abc import Iterable, Mapping
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from ymir_harness.jira_mock import (
+    JiraMockMaterializationError,
+    build_ymir_jira_mock_issue,
+    has_structured_jira_fixture,
+    structured_jira_fixture_dir,
+)
+from ymir_harness.models import (
+    ALLOWED_ANSWER_LEAKAGE,
+    ALLOWED_CASE_STATUSES,
+    ALLOWED_CASE_TYPES,
+    ALLOWED_EXPECTED_BASES,
+    ALLOWED_GROUND_TRUTH_CONFIDENCE,
+    ALLOWED_NETWORK_MODES,
+    ALLOWED_RESOLUTIONS,
+    SUPPORTED_SCHEMA_VERSIONS,
+    CaseValidationResult,
+    ValidationIssue,
+    ValidationReport,
+)
+
+
+def validate_case_directory(cases_dir: Path, *, phase: int = 1) -> ValidationReport:
+    if phase not in {1, 2}:
+        msg = f"unsupported validation phase: {phase}"
+        raise ValueError(msg)
+
+    cases_dir = cases_dir.resolve()
+    report = ValidationReport(cases_dir=cases_dir, phase=phase)
+    if not cases_dir.is_dir():
+        report.global_issues.append(
+            ValidationIssue(
+                severity="error",
+                category="missing_metadata",
+                message="cases directory does not exist or is not a directory",
+                path=str(cases_dir),
+            )
+        )
+        return report
+
+    case_ids = _discover_case_ids(cases_dir)
+    if not case_ids:
+        report.global_issues.append(
+            ValidationIssue(
+                severity="error",
+                category="missing_metadata",
+                message="no benchmark cases found",
+                path=str(cases_dir),
+            )
+        )
+        return report
+
+    for case_id in case_ids:
+        case_result = _validate_case(cases_dir, case_id, phase)
+        case_result.finalize()
+        report.cases.append(case_result)
+
+    return report
+
+
+def _validate_case(cases_dir: Path, case_id: str, phase: int) -> CaseValidationResult:
+    result = CaseValidationResult(case_id=case_id)
+    expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
+    expected = _load_json_object(expected_path, result, required=True)
+
+    if expected is not None:
+        _validate_expected_metadata(expected, expected_path, result, phase)
+        result.case_type = _string_or_none(expected.get("case_type"))
+        result.case_status = _string_or_none(expected.get("case_status"))
+        _validate_network_policy(cases_dir, expected, result, phase)
+
+    mock_paths = sorted((cases_dir / "mock_data").glob(f"*/{case_id}.json"))
+    _validate_mock_fixtures(mock_paths, expected, result, phase)
+
+    if expected is not None:
+        _validate_case_consistency(cases_dir, expected, result)
+
+    _validate_ymir_jira_mock(cases_dir, result)
+
+    return result
+
+
+def _discover_case_ids(cases_dir: Path) -> list[str]:
+    case_ids: set[str] = set()
+
+    for path in (cases_dir / "expected").glob("*.expected.json"):
+        case_ids.add(path.name.removesuffix(".expected.json"))
+
+    for path in (cases_dir / "mock_data").glob("*/*.json"):
+        case_ids.add(path.stem)
+
+    for path in (cases_dir / "web_cache").glob("*/manifest.json"):
+        case_ids.add(path.parent.name)
+
+    for path in (cases_dir / "jiras").glob("*"):
+        if path.is_dir():
+            case_ids.add(path.name)
+
+    return sorted(case_ids)
+
+
+def _load_json_object(
+    path: Path,
+    result: CaseValidationResult,
+    *,
+    required: bool,
+) -> dict[str, Any] | None:
+    if not path.is_file():
+        if required:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="missing_metadata",
+                    message="required JSON file is missing",
+                    case_id=result.case_id,
+                    path=str(path),
+                )
+            )
+        return None
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="schema_mismatch",
+                message=f"invalid JSON: {exc.msg}",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+        return None
+
+    if not isinstance(data, dict):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="schema_mismatch",
+                message="JSON file must contain an object",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+        return None
+
+    return data
+
+
+def _validate_expected_metadata(
+    expected: Mapping[str, Any],
+    expected_path: Path,
+    result: CaseValidationResult,
+    phase: int,
+) -> None:
+    _require_schema_metadata(expected, expected_path, result, strict=True)
+    _require_equal(expected.get("case_id"), result.case_id, "case_id", expected_path, result)
+
+    _validate_allowed_value(
+        expected.get("case_type"),
+        ALLOWED_CASE_TYPES,
+        "case_type",
+        expected_path,
+        result,
+        required=True,
+    )
+    _validate_allowed_value(
+        expected.get("resolution"),
+        ALLOWED_RESOLUTIONS,
+        "resolution",
+        expected_path,
+        result,
+        required=True,
+    )
+
+    _require_field(expected, "package", expected_path, result)
+    if expected.get("resolution") in {"backport", "rebase", "rebuild"}:
+        if expected.get("target_branch") is None and expected.get("fix_version") is None:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="missing_metadata",
+                    message="expected result must include target_branch or fix_version",
+                    case_id=result.case_id,
+                    path=str(expected_path),
+                )
+            )
+
+    _validate_allowed_value(
+        expected.get("expected_basis"),
+        ALLOWED_EXPECTED_BASES,
+        "expected_basis",
+        expected_path,
+        result,
+        required=True,
+    )
+    _validate_allowed_value(
+        expected.get("ground_truth_confidence"),
+        ALLOWED_GROUND_TRUTH_CONFIDENCE,
+        "ground_truth_confidence",
+        expected_path,
+        result,
+        required=True,
+    )
+    if expected.get("ground_truth_confidence") == "low":
+        result.issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="ground_truth_ambiguous",
+                message="low-confidence cases should be excluded from headline scoring",
+                case_id=result.case_id,
+                path=str(expected_path),
+            )
+        )
+
+    _validate_allowed_value(
+        expected.get("case_status"),
+        ALLOWED_CASE_STATUSES,
+        "case_status",
+        expected_path,
+        result,
+        required=True,
+    )
+    if expected.get("case_status") in {"quarantined", "excluded"} and not expected.get(
+        "case_status_reason"
+    ):
+        result.issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="ground_truth_ambiguous",
+                message="quarantined or excluded cases should include case_status_reason",
+                case_id=result.case_id,
+                path=str(expected_path),
+            )
+        )
+
+    _validate_allowed_value(
+        expected.get("network_mode"),
+        ALLOWED_NETWORK_MODES,
+        "network_mode",
+        expected_path,
+        result,
+        required=True,
+    )
+
+    answer_leakage_required = phase >= 2
+    _validate_allowed_value(
+        expected.get("answer_leakage"),
+        ALLOWED_ANSWER_LEAKAGE,
+        "answer_leakage",
+        expected_path,
+        result,
+        required=answer_leakage_required,
+        missing_severity="error" if answer_leakage_required else "warning",
+    )
+    if expected.get("answer_leakage") == "explicit" and expected.get("case_status") == "active":
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="ground_truth_ambiguous",
+                message="explicit answer leakage cases must be quarantined or excluded",
+                case_id=result.case_id,
+                path=str(expected_path),
+            )
+        )
+
+
+def _validate_network_policy(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+    phase: int,
+) -> None:
+    network_mode = expected.get("network_mode")
+    case_status = expected.get("case_status")
+
+    if network_mode == "live_non_reproducible" and case_status == "active":
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="network_policy_invalid",
+                message="live network cases must be quarantined or excluded",
+                case_id=result.case_id,
+            )
+        )
+
+    if network_mode == "replay_only":
+        _validate_web_cache_manifest(cases_dir, expected, result)
+    elif phase >= 2 and network_mode == "network_denied":
+        web_manifest = cases_dir / "web_cache" / result.case_id / "manifest.json"
+        if web_manifest.exists():
+            result.issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="network_policy_invalid",
+                    message="network_denied case has a web cache manifest that will not be used",
+                    case_id=result.case_id,
+                    path=str(web_manifest),
+                )
+            )
+
+
+def _validate_web_cache_manifest(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+) -> None:
+    manifest_path = cases_dir / "web_cache" / result.case_id / "manifest.json"
+    manifest = _load_json_object(manifest_path, result, required=True)
+    if manifest is None:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="web_cache_incomplete",
+                message="replay_only case must include web_cache manifest.json",
+                case_id=result.case_id,
+                path=str(manifest_path),
+            )
+        )
+        return
+
+    _require_schema_metadata(manifest, manifest_path, result, strict=True)
+    _require_equal(manifest.get("case_id"), result.case_id, "case_id", manifest_path, result)
+    if expected.get("case_type") is not None:
+        _require_equal(
+            manifest.get("case_type"),
+            expected.get("case_type"),
+            "case_type",
+            manifest_path,
+            result,
+        )
+
+    required_urls = manifest.get("required_urls")
+    recorded_files = manifest.get("recorded_files")
+    if not isinstance(required_urls, list):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="web_cache_incomplete",
+                message="manifest required_urls must be a list",
+                case_id=result.case_id,
+                path=str(manifest_path),
+            )
+        )
+        required_urls = []
+    if not isinstance(recorded_files, dict):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="web_cache_incomplete",
+                message="manifest recorded_files must be an object",
+                case_id=result.case_id,
+                path=str(manifest_path),
+            )
+        )
+        recorded_files = {}
+
+    for url in required_urls:
+        if not isinstance(url, str) or not url:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message="manifest required_urls entries must be non-empty strings",
+                    case_id=result.case_id,
+                    path=str(manifest_path),
+                )
+            )
+            continue
+        recorded = recorded_files.get(url)
+        if not isinstance(recorded, str) or not recorded:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"required URL has no recorded file: {url}",
+                    case_id=result.case_id,
+                    path=str(manifest_path),
+                )
+            )
+            continue
+
+        recorded_path = manifest_path.parent / recorded
+        if not recorded_path.is_file():
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"recorded file is missing for URL: {url}",
+                    case_id=result.case_id,
+                    path=str(recorded_path),
+                )
+            )
+            continue
+        if recorded_path.stat().st_size == 0:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"recorded file is empty for URL: {url}",
+                    case_id=result.case_id,
+                    path=str(recorded_path),
+                )
+            )
+
+
+def _validate_mock_fixtures(
+    mock_paths: list[Path],
+    expected: Mapping[str, Any] | None,
+    result: CaseValidationResult,
+    phase: int,
+) -> None:
+    expected_package = expected.get("package") if expected else None
+    expected_case_type = expected.get("case_type") if expected else None
+    packages_seen: set[str] = set()
+
+    if not mock_paths:
+        result.issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="mock_repo_mismatch",
+                message="no mock_data fixture found for case",
+                case_id=result.case_id,
+            )
+        )
+        return
+
+    for mock_path in mock_paths:
+        config = _load_json_object(mock_path, result, required=True)
+        if config is None:
+            continue
+
+        _require_schema_metadata(config, mock_path, result, strict=phase >= 2)
+        if config.get("case_id") is not None:
+            _require_equal(config.get("case_id"), result.case_id, "case_id", mock_path, result)
+        if expected_case_type is not None and config.get("case_type") is not None:
+            _require_equal(
+                config.get("case_type"), expected_case_type, "case_type", mock_path, result
+            )
+
+        repos = config.get("repos")
+        if not isinstance(repos, list) or not repos:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="mock_repo_mismatch",
+                    message="mock fixture must include a non-empty repos list",
+                    case_id=result.case_id,
+                    path=str(mock_path),
+                )
+            )
+            continue
+
+        for index, repo in enumerate(repos):
+            if not isinstance(repo, dict):
+                result.issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="mock_repo_mismatch",
+                        message=f"repos[{index}] must be an object",
+                        case_id=result.case_id,
+                        path=str(mock_path),
+                    )
+                )
+                continue
+            packages_seen.update(_validate_mock_repo_entry(repo, index, mock_path, result))
+
+    if expected_package and packages_seen and expected_package not in packages_seen:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="mock_repo_mismatch",
+                message=(
+                    "expected.package does not match any mock repo package "
+                    f"({expected_package!r} not in {sorted(packages_seen)!r})"
+                ),
+                case_id=result.case_id,
+            )
+        )
+
+
+def _validate_mock_repo_entry(
+    repo: Mapping[str, Any],
+    index: int,
+    mock_path: Path,
+    result: CaseValidationResult,
+) -> set[str]:
+    packages_seen: set[str] = set()
+    for field in ("package", "remote_url", "pre_fix_ref", "branch"):
+        _require_field(repo, field, mock_path, result, context=f"repos[{index}]")
+
+    package = repo.get("package")
+    if isinstance(package, str) and package:
+        packages_seen.add(package)
+
+    remote_url = repo.get("remote_url")
+    pre_fix_ref = repo.get("pre_fix_ref")
+    if isinstance(remote_url, str) and isinstance(pre_fix_ref, str):
+        _validate_local_pre_fix_ref(remote_url, pre_fix_ref, mock_path, result)
+
+    return packages_seen
+
+
+def _validate_local_pre_fix_ref(
+    remote_url: str,
+    pre_fix_ref: str,
+    mock_path: Path,
+    result: CaseValidationResult,
+) -> None:
+    repo_path = _local_repo_path(remote_url)
+    if repo_path is None:
+        result.issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="invalid_pre_fix_ref",
+                message="pre_fix_ref was not checked because remote_url is not local",
+                case_id=result.case_id,
+                path=str(mock_path),
+            )
+        )
+        return
+
+    if not repo_path.exists():
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="invalid_pre_fix_ref",
+                message=f"local mock repo does not exist: {repo_path}",
+                case_id=result.case_id,
+                path=str(mock_path),
+            )
+        )
+        return
+
+    command = ["git", "-C", str(repo_path), "cat-file", "-e", f"{pre_fix_ref}^{{commit}}"]
+    completed = subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="invalid_pre_fix_ref",
+                message=f"pre_fix_ref does not resolve in local repo: {pre_fix_ref}",
+                case_id=result.case_id,
+                path=str(mock_path),
+            )
+        )
+
+
+def _local_repo_path(remote_url: str) -> Path | None:
+    parsed = urlparse(remote_url)
+    if parsed.scheme == "file":
+        return Path(parsed.path)
+    if parsed.scheme in {"http", "https", "ssh", "git"}:
+        return None
+
+    path = Path(remote_url)
+    if path.is_absolute() or path.exists():
+        return path
+    return None
+
+
+def _validate_case_consistency(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+) -> None:
+    for json_path in _case_json_paths(cases_dir, result.case_id):
+        if json_path.name.endswith(".expected.json"):
+            continue
+        data = _load_json_object(json_path, result, required=False)
+        if data is None:
+            continue
+        if data.get("case_id") is not None:
+            _require_equal(data.get("case_id"), result.case_id, "case_id", json_path, result)
+        if data.get("case_type") is not None and expected.get("case_type") is not None:
+            _require_equal(
+                data.get("case_type"), expected.get("case_type"), "case_type", json_path, result
+            )
+
+
+def _case_json_paths(cases_dir: Path, case_id: str) -> Iterable[Path]:
+    yield from (cases_dir / "mock_data").glob(f"*/{case_id}.json")
+    manifest = cases_dir / "web_cache" / case_id / "manifest.json"
+    if manifest.exists():
+        yield manifest
+    for jira_file in (cases_dir / "jiras" / case_id).glob("*.json"):
+        yield jira_file
+
+
+def _validate_ymir_jira_mock(cases_dir: Path, result: CaseValidationResult) -> None:
+    if not has_structured_jira_fixture(cases_dir, result.case_id):
+        return
+
+    try:
+        build_ymir_jira_mock_issue(cases_dir, result.case_id)
+    except JiraMockMaterializationError as exc:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="jira_mock_invalid",
+                message=str(exc),
+                case_id=result.case_id,
+                path=str(structured_jira_fixture_dir(cases_dir, result.case_id)),
+            )
+        )
+
+
+def _require_schema_metadata(
+    data: Mapping[str, Any],
+    path: Path,
+    result: CaseValidationResult,
+    *,
+    strict: bool,
+) -> None:
+    missing = [
+        field for field in ("schema_version", "case_id", "case_type") if data.get(field) is None
+    ]
+    if missing:
+        result.issues.append(
+            ValidationIssue(
+                severity="error" if strict else "warning",
+                category="missing_metadata",
+                message=f"missing schema metadata: {', '.join(missing)}",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+        return
+
+    schema_version = data.get("schema_version")
+    if not isinstance(schema_version, int) or schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="schema_mismatch",
+                message=f"unsupported schema_version: {schema_version!r}",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+
+
+def _require_field(
+    data: Mapping[str, Any],
+    field: str,
+    path: Path,
+    result: CaseValidationResult,
+    *,
+    context: str | None = None,
+) -> None:
+    if data.get(field) is None:
+        prefix = f"{context} " if context else ""
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="missing_metadata",
+                message=f"{prefix}missing required field: {field}",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+
+
+def _validate_allowed_value(
+    value: Any,
+    allowed: set[str],
+    field: str,
+    path: Path,
+    result: CaseValidationResult,
+    *,
+    required: bool,
+    missing_severity: str = "error",
+) -> None:
+    if value is None:
+        if required:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="missing_metadata",
+                    message=f"missing required field: {field}",
+                    case_id=result.case_id,
+                    path=str(path),
+                )
+            )
+        elif missing_severity == "warning":
+            result.issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="missing_metadata",
+                    message=f"missing recommended field: {field}",
+                    case_id=result.case_id,
+                    path=str(path),
+                )
+            )
+        return
+
+    if not isinstance(value, str) or value not in allowed:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="schema_mismatch",
+                message=f"{field} must be one of {sorted(allowed)!r}; got {value!r}",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+
+
+def _require_equal(
+    actual: Any,
+    expected: Any,
+    field: str,
+    path: Path,
+    result: CaseValidationResult,
+) -> None:
+    if actual != expected:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="schema_mismatch",
+                message=f"{field} mismatch: expected {expected!r}, got {actual!r}",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)

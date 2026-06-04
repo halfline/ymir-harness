@@ -51,6 +51,7 @@ FAILURE_CATEGORIES = {
     "source_cache_incomplete",
     "ground_truth_ambiguous",
     "network_policy_invalid",
+    "jira_mock_invalid",
 }
 
 IssueSeverity = Literal["error", "warning"]
