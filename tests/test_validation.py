@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from ymir_harness.reports import write_validation_reports
 from ymir_harness.validation import validate_case_directory
 
 
@@ -87,6 +88,23 @@ def test_validate_case_directory_reports_invalid_ymir_jira_mock(tmp_path: Path) 
         issue.category == "jira_mock_invalid" and "fields must be an object" in issue.message
         for issue in issues
     )
+
+
+def test_write_validation_reports(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(cases_dir, repo_path, pre_fix_ref)
+    report = validate_case_directory(cases_dir)
+
+    paths = write_validation_reports(report, cases_dir / "reports")
+
+    assert [path.name for path in paths] == [
+        "fixture-validation.json",
+        "fixture-validation.md",
+        "fixture-validation-errors.md",
+    ]
+    assert json.loads(paths[0].read_text(encoding="utf-8"))["summary"]["valid"] == 1
+    assert "No validation errors." in paths[2].read_text(encoding="utf-8")
 
 
 def _write_replay_case(cases_dir: Path, repo_path: Path, pre_fix_ref: str) -> None:
