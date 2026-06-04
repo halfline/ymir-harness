@@ -87,6 +87,12 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
             _normalize_token(_actual_result_field(actual, "prep_result")),
             optional=True,
         ),
+        _compare(
+            "reference_patch_parse_status",
+            _normalize_token(expected.get("reference_patch_parse_status")),
+            _normalize_token(_actual_result_field(actual, "reference_patch_parse_status")),
+            optional=True,
+        ),
         _compare_list("cve_ids", expected.get("cve_ids"), normalized_actual["cve_ids"]),
         _compare_list("patch_urls", expected.get("patch_urls"), normalized_actual["patch_urls"]),
     ]
