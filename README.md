@@ -42,6 +42,8 @@ benchmark_cases/reports/fixture-validation-errors.md
 ```
 
 Use `--phase 2` once pilot fixtures are ready for stricter metadata checks.
+Phase 2 also checks that an expected `target_branch` or `fix_version` is
+declared by a mock repo `branch`.
 
 `score-results` reads every `benchmark_cases/expected/*.expected.json` file and
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
