@@ -9,7 +9,7 @@ from pathlib import Path
 from ymir_harness import __version__
 from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
 from ymir_harness.reports import write_validation_reports
-from ymir_harness.runner import build_run_report, default_results_dir
+from ymir_harness.runner import build_run_report, default_results_dir, select_validation_cases
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 from ymir_harness.validation import validate_case_directory
 
@@ -101,6 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=1,
         help="number of repetitions to record for each runnable case",
+    )
+    run.add_argument(
+        "--case",
+        dest="case_ids",
+        action="append",
+        default=[],
+        help="run only the named case id; may be provided more than once",
     )
     run.add_argument(
         "--feature",
@@ -212,6 +219,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     run_id = args.run_id or args.variant
     results_dir = args.results_dir or default_results_dir(args.cases, run_id)
     validation_report = validate_case_directory(args.cases, phase=args.phase)
+    validation_report = select_validation_cases(validation_report, args.case_ids)
     validation_reports_dir = args.cases / "reports"
     write_validation_reports(validation_report, validation_reports_dir)
 
