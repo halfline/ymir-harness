@@ -82,6 +82,10 @@ Expected results may declare `build_result`. Scoring compares that token with
 `build_result` in the actual result to check local prep or build outcomes for
 implementation cases.
 
+Expected results may declare `prep_result`. Scoring compares that token with
+`prep_result` in the actual result to check local preparation outcomes before
+implementation cases build.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
