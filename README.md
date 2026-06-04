@@ -21,6 +21,10 @@ ymir-harness score-results benchmark_cases/ reports/actual-results/ \
   --run-id baseline-2026-06-04T120000Z \
   --ymir-sha 6e22912f83d57ddae1031e6207d4716171a99be0 \
   --variant baseline
+ymir-harness run \
+  --cases benchmark_cases/ \
+  --variant baseline \
+  --run-id baseline-2026-06-04T120000Z
 ymir-harness compare-results \
   reports/baseline-results.json \
   reports/enhanced-results.json \
@@ -156,6 +160,9 @@ Phase 3 runner reports use `run_id`, `variant`, optional `ymir_sha`,
 includes `case_id`, `case_type`, `status`, optional `expected_path`, optional
 `actual_path`, and optional `reason`. Initial case status values are `not_run`,
 `passed`, `failed`, `skipped`, and `unsupported`.
+The initial `run` command writes validation reports first, then writes
+`benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
+It does not invoke Ymir workflows yet, so runnable cases are marked `not_run`.
 
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
