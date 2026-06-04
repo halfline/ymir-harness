@@ -146,6 +146,28 @@ def test_phase2_reports_web_cache_missing_expected_patch_url(tmp_path: Path) -> 
     )
 
 
+def test_phase2_reports_network_denied_patch_urls(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        network_mode="network_denied",
+    )
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "network_policy_invalid"
+        and "must not declare patch_urls" in issue.message
+        for issue in issues
+    )
+
+
 def test_phase2_reports_missing_source_cache(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
@@ -580,6 +602,7 @@ def _write_replay_case(
     *,
     zstream_override: dict[str, str] | None = None,
     requires_source_cache: bool = False,
+    network_mode: str = "replay_only",
     reference_patch_mode: str | None = "applies",
     reference_patch_exists: bool = True,
     reference_patch_text: str = (
@@ -610,7 +633,7 @@ def _write_replay_case(
             "answer_leakage": "none",
             "case_status": "active",
             "case_status_reason": None,
-            "network_mode": "replay_only",
+            "network_mode": network_mode,
             "requires_source_cache": requires_source_cache,
             "reference_patch_mode": reference_patch_mode,
         },
