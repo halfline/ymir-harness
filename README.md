@@ -146,6 +146,11 @@ Expected results may declare `reference_patch_apply_status`. Scoring compares
 that token with `reference_patch_apply_status` in the actual result to check
 whether the reference patch applied as expected.
 
+Actual results may include advisory diagnostics such as `runtime_seconds`,
+`token_usage`, `tool_call_count`, `retry_count`, `diff_similarity`,
+`rationale_quality`, or `llm_judge_notes`. Scoring reports carry these as
+`advisory_metrics` without using them for pass/fail status.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
