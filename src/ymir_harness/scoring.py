@@ -65,6 +65,11 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
             optional=True,
         ),
         _touched_files_metric(expected, actual),
+        _compare_list(
+            "spec_patches",
+            expected.get("spec_patches"),
+            _actual_result_field(actual, "spec_patches"),
+        ),
         _compare_list("cve_ids", expected.get("cve_ids"), normalized_actual["cve_ids"]),
         _compare_list("patch_urls", expected.get("patch_urls"), normalized_actual["patch_urls"]),
     ]
