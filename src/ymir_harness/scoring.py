@@ -37,6 +37,7 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
             _replay_violations(actual),
             "actual result reports fixture replay violations",
         ),
+        _required_artifacts_metric(expected, actual),
         _compare("case_id", expected.get("case_id"), actual.get("case_id") or case_id),
         _compare(
             "case_type",
@@ -137,6 +138,30 @@ def _unsafe_operations(actual: Mapping[str, Any]) -> Any:
 
 def _replay_violations(actual: Mapping[str, Any]) -> Any:
     return _actual_result_field(actual, "replay_violations")
+
+
+def _required_artifacts_metric(
+    expected: Mapping[str, Any], actual: Mapping[str, Any]
+) -> ScoreMetric:
+    required = _normalize_list(expected.get("required_artifacts"))
+    generated = _normalize_list(_actual_result_field(actual, "generated_artifacts"))
+    if not required:
+        return ScoreMetric(
+            name="required_artifacts",
+            status="skipped",
+            expected=required,
+            actual=generated,
+            notes="expected result declares no required artifacts",
+        )
+
+    missing = [artifact for artifact in required if artifact not in generated]
+    return ScoreMetric(
+        name="required_artifacts",
+        status="pass" if not missing else "fail",
+        expected=required,
+        actual=generated,
+        notes=f"missing required artifacts: {', '.join(missing)}" if missing else None,
+    )
 
 
 def _actual_result_field(actual: Mapping[str, Any], name: str) -> Any:
