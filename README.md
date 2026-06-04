@@ -166,6 +166,9 @@ The initial `run` command writes validation reports first, then writes
 `benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
 It does not invoke Ymir workflows yet, so each runnable case repetition is
 marked `not_run`.
+When `cases.yaml` is present, `run` uses it as the default case list. It accepts
+a top-level list of case ids or a `cases:` list containing case ids or objects
+with `case_id`.
 Use `--case CASE_ID` more than once to limit a run report to selected cases.
 Runnable entries reserve `actual_path` under
 `benchmark_cases/reports/runs/RUN_ID/repeat-N/actual-results/CASE_ID.actual.json`.
