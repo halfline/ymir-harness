@@ -90,6 +90,21 @@ def test_validate_case_directory_reports_invalid_ymir_jira_mock(tmp_path: Path) 
     )
 
 
+def test_phase2_reports_target_branch_missing_from_mock_fixture(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(cases_dir, repo_path, pre_fix_ref)
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "mock_repo_mismatch" and "target_branch or fix_version" in issue.message
+        for issue in issues
+    )
+
+
 def test_write_validation_reports(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
