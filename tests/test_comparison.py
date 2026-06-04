@@ -10,14 +10,24 @@ def test_compare_result_payloads_classifies_headline_deltas(tmp_path: Path) -> N
         "cases": [
             _case("RHEL-1", "failed", True),
             _case("RHEL-2", "passed", True),
-            _case("RHEL-3", "passed", False),
+            _case(
+                "RHEL-3",
+                "passed",
+                False,
+                headline_reason="case_status is quarantined",
+            ),
         ]
     }
     candidate = {
         "cases": [
             _case("RHEL-1", "passed", True),
             _case("RHEL-2", "failed", True),
-            _case("RHEL-3", "failed", False),
+            _case(
+                "RHEL-3",
+                "failed",
+                False,
+                headline_reason="case_status is quarantined",
+            ),
             _case("RHEL-4", "passed", True),
         ]
     }
@@ -39,6 +49,10 @@ def test_compare_result_payloads_classifies_headline_deltas(tmp_path: Path) -> N
     assert report.has_headline_regressions
     assert report.summary()["wins"] == 1
     assert report.summary()["regressions"] == 1
+    entries = {entry.case_id: entry for entry in report.entries}
+    assert entries["RHEL-3"].headline_reason == "case_status is quarantined"
+    payload_cases = {case["case_id"]: case for case in report.to_json()["cases"]}
+    assert payload_cases["RHEL-3"]["headline_reason"] == "case_status is quarantined"
 
 
 def test_render_comparison_markdown_lists_case_deltas(tmp_path: Path) -> None:
@@ -53,13 +67,22 @@ def test_render_comparison_markdown_lists_case_deltas(tmp_path: Path) -> None:
 
     assert "# Result Comparison" in markdown
     assert "Headline wins: `1`" in markdown
-    assert "| RHEL-1 | cve_backport | yes | failed | passed | win |" in markdown
+    assert "| RHEL-1 | cve_backport | yes |  | failed | passed | win |" in markdown
 
 
-def _case(case_id: str, status: str, headline: bool) -> dict[str, object]:
-    return {
+def _case(
+    case_id: str,
+    status: str,
+    headline: bool,
+    *,
+    headline_reason: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "case_id": case_id,
         "case_type": "cve_backport",
         "status": status,
         "headline": headline,
     }
+    if headline_reason is not None:
+        payload["headline_reason"] = headline_reason
+    return payload
