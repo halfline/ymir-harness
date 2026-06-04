@@ -127,11 +127,15 @@ def _hard_fail_gate(name: str, actual: Any, notes: str) -> ScoreMetric:
 
 
 def _unsafe_operations(actual: Mapping[str, Any]) -> Any:
+    return _actual_result_field(actual, "unsafe_operations")
+
+
+def _actual_result_field(actual: Mapping[str, Any], name: str) -> Any:
     data = actual.get("data")
     nested = data if isinstance(data, Mapping) else {}
-    if actual.get("unsafe_operations") is not None:
-        return actual.get("unsafe_operations")
-    return nested.get("unsafe_operations")
+    if actual.get(name) is not None:
+        return actual.get(name)
+    return nested.get(name)
 
 
 def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> ScoreCollectionEntry:
