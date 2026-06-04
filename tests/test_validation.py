@@ -109,7 +109,13 @@ def test_phase2_reports_target_branch_missing_from_mock_fixture(tmp_path: Path) 
 def test_phase2_accepts_zstream_override_target_branch(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
-    _write_replay_case(cases_dir, repo_path, pre_fix_ref, zstream_override={"8": "rhel-8.10.z"})
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        reference_patch_mode="applies",
+    )
 
     report = validate_case_directory(cases_dir, phase=2)
 
@@ -203,6 +209,35 @@ def test_phase2_reports_reference_patch_without_touched_files(
     assert any(
         issue.category == "reference_patch_invalid" and "touched-file list" in issue.message
         for issue in issues
+    )
+
+
+def test_phase2_reports_reference_patch_apply_failure(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        reference_patch_mode="applies",
+        reference_patch_text=(
+            "diff --git a/source.c b/source.c\n"
+            "index 4447cd3..c8c45c2 100644\n"
+            "--- a/source.c\n"
+            "+++ b/source.c\n"
+            "@@ -1 +1 @@\n"
+            "-int main(void) { return 2; }\n"
+            "+int main(void) { return 1; }\n"
+        ),
+    )
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "reference_patch_invalid" and "apply" in issue.message for issue in issues
     )
 
 
