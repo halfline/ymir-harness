@@ -391,6 +391,30 @@ def test_score_case_reports_dependency_issue_failures() -> None:
     assert failed["dependency_issues"].actual == []
 
 
+def test_score_case_reports_sibling_issue_failures() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "dependency_rebuild",
+        "resolution": "rebuild",
+        "package": "dnsmasq",
+        "sibling_issues": ["RHEL-34567"],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "dependency_rebuild",
+        "resolution": "rebuild",
+        "package": "dnsmasq",
+        "data": {"sibling_issues": []},
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["sibling_issues"].expected == ["RHEL-34567"]
+    assert failed["sibling_issues"].actual == []
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
