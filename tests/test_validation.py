@@ -188,6 +188,30 @@ def test_phase2_reports_empty_source_cache_upstream(tmp_path: Path) -> None:
     )
 
 
+def test_phase2_reports_missing_source_cache_lookaside(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        requires_source_cache=True,
+    )
+    upstream_dir = cases_dir / "source_cache" / "RHEL-12345" / "upstream"
+    upstream_dir.mkdir(parents=True)
+    (upstream_dir / "source.tar.gz").write_text("cached source\n", encoding="utf-8")
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "source_cache_incomplete" and "lookaside" in issue.message
+        for issue in issues
+    )
+
+
 def test_phase2_reports_missing_reference_patch(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
