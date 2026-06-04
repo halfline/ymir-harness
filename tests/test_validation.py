@@ -286,7 +286,7 @@ def _write_replay_case(
     *,
     zstream_override: dict[str, str] | None = None,
     requires_source_cache: bool = False,
-    reference_patch_mode: str | None = None,
+    reference_patch_mode: str | None = "applies",
     reference_patch_exists: bool = True,
     reference_patch_text: str = (
         "diff --git a/source.c b/source.c\n"
