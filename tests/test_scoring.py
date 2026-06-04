@@ -416,6 +416,41 @@ def test_score_case_reports_sibling_issue_failures() -> None:
     assert failed["sibling_issues"].actual == []
 
 
+def test_score_case_records_advisory_metrics_without_failing() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "runtime_seconds": 42.5,
+        "data": {
+            "token_usage": {"input": 1200, "output": 300},
+            "tool_call_count": 7,
+            "retry_count": 1,
+            "llm_judge_notes": "consistent with reference result",
+        },
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+    assert report.summary()["fail"] == 0
+    advisory = {metric["name"]: metric["value"] for metric in report.to_json()["advisory_metrics"]}
+    assert advisory == {
+        "llm_judge_notes": "consistent with reference result",
+        "runtime_seconds": 42.5,
+        "token_usage": {"input": 1200, "output": 300},
+        "tool_call_count": 7,
+        "retry_count": 1,
+    }
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
