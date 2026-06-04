@@ -56,6 +56,8 @@ Upstream source archive files must be readable.
 Implementation source caches must include artifact files under
 `source_cache/CASE_ID/lookaside/`.
 Lookaside artifact files must be readable.
+Expected results may declare `required_source_cache_files` as a list of
+`source_cache/CASE_ID`-relative file paths.
 Expected results may declare `source_cache_checksums` as a mapping from
 `source_cache/CASE_ID`-relative paths to `sha256:<hex>` digests.
 Phase 2 checks those cached files against their declared digests.
