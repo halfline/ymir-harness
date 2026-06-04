@@ -570,6 +570,18 @@ def _validate_source_cache(
                 path=str(lookaside_dir),
             )
         )
+        return
+
+    if not _lookaside_artifacts(lookaside_dir):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="implementation case source_cache lookaside must include artifact files",
+                case_id=result.case_id,
+                path=str(lookaside_dir),
+            )
+        )
 
 
 def _validate_upstream_source_archives(
@@ -587,6 +599,10 @@ def _validate_upstream_source_archives(
                     path=str(archive_path),
                 )
             )
+
+
+def _lookaside_artifacts(lookaside_dir: Path) -> list[Path]:
+    return [child for child in lookaside_dir.iterdir() if child.is_file()]
 
 
 def _contains_upstream_source(upstream_dir: Path) -> bool:
