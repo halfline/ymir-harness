@@ -148,6 +148,29 @@ def test_score_case_fails_missing_required_artifacts() -> None:
     assert failed["required_artifacts"].notes == "missing required artifacts: dnsmasq.spec"
 
 
+def test_score_case_fails_unrelated_source_changes() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "data": {"unrelated_source_changes": ["README.md"]},
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["unrelated_source_changes"].expected == []
+    assert failed["unrelated_source_changes"].actual == ["README.md"]
+
+
 def test_score_case_reports_touched_file_scope_failures() -> None:
     expected = {
         "case_id": "RHEL-12345",
