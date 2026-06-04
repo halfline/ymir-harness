@@ -76,6 +76,7 @@ def _validate_case(cases_dir: Path, case_id: str, phase: int) -> CaseValidationR
         result.case_type = _string_or_none(expected.get("case_type"))
         result.case_status = _string_or_none(expected.get("case_status"))
         _validate_network_policy(cases_dir, expected, result, phase)
+        _validate_source_cache(cases_dir, expected, result, phase)
 
     mock_paths = sorted((cases_dir / "mock_data").glob(f"*/{case_id}.json"))
     _validate_mock_fixtures(mock_paths, expected, result, phase)
@@ -410,6 +411,46 @@ def _validate_web_cache_manifest(
                     path=str(recorded_path),
                 )
             )
+
+
+def _validate_source_cache(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+    phase: int,
+) -> None:
+    if phase < 2 or not _implementation_case_requires_source_cache(expected):
+        return
+
+    source_cache_dir = cases_dir / "source_cache" / result.case_id
+    if not source_cache_dir.is_dir():
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="implementation case must include source_cache directory",
+                case_id=result.case_id,
+                path=str(source_cache_dir),
+            )
+        )
+        return
+
+    if not any(source_cache_dir.iterdir()):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="implementation case source_cache directory is empty",
+                case_id=result.case_id,
+                path=str(source_cache_dir),
+            )
+        )
+
+
+def _implementation_case_requires_source_cache(expected: Mapping[str, Any]) -> bool:
+    if expected.get("requires_source_cache") is False:
+        return False
+    return expected.get("resolution") in {"backport", "rebase", "rebuild"}
 
 
 def _validate_mock_fixtures(
