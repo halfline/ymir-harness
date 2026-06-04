@@ -3,7 +3,38 @@ from __future__ import annotations
 from pathlib import Path
 
 from ymir_harness.models import CaseValidationResult, ValidationReport
-from ymir_harness.runner import build_run_report
+from ymir_harness.runner import build_run_report, select_validation_cases
+
+
+def test_select_validation_cases_filters_in_request_order(tmp_path: Path) -> None:
+    validation_report = ValidationReport(
+        cases_dir=tmp_path / "benchmark_cases",
+        phase=1,
+        cases=[
+            CaseValidationResult(case_id="RHEL-12345", case_type="cve_backport"),
+            CaseValidationResult(case_id="RHEL-23456", case_type="rebase"),
+        ],
+    )
+
+    selected = select_validation_cases(validation_report, ["RHEL-23456", "RHEL-12345"])
+
+    assert [case.case_id for case in selected.cases] == ["RHEL-23456", "RHEL-12345"]
+    assert not selected.has_blocking_errors
+
+
+def test_select_validation_cases_reports_missing_cases(tmp_path: Path) -> None:
+    validation_report = ValidationReport(
+        cases_dir=tmp_path / "benchmark_cases",
+        phase=1,
+        cases=[CaseValidationResult(case_id="RHEL-12345", case_type="cve_backport")],
+    )
+
+    selected = select_validation_cases(validation_report, ["RHEL-99999"])
+
+    assert selected.cases == []
+    assert selected.has_blocking_errors
+    assert selected.global_issues[0].case_id == "RHEL-99999"
+    assert selected.global_issues[0].message == "requested case was not found"
 
 
 def test_build_run_report_assigns_actual_paths(tmp_path: Path) -> None:

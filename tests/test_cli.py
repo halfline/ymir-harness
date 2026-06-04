@@ -125,6 +125,21 @@ def test_cli_run_writes_placeholder_report(
             "network_mode": "network_denied",
         },
     )
+    _write_json(
+        cases_dir / "expected" / "RHEL-23456.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-23456",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "libtiff",
+            "expected_basis": "maintainer_decision",
+            "ground_truth_confidence": "high",
+            "answer_leakage": "none",
+            "case_status": "active",
+            "network_mode": "network_denied",
+        },
+    )
 
     assert (
         main(
@@ -140,6 +155,8 @@ def test_cli_run_writes_placeholder_report(
                 "6e22912f83d57ddae1031e6207d4716171a99be0",
                 "--feature",
                 "YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK",
+                "--case",
+                "RHEL-23456",
                 "--repeat",
                 "3",
                 "--output",
@@ -171,11 +188,12 @@ def test_cli_run_writes_placeholder_report(
                 / "baseline-1"
                 / f"repeat-{repetition}"
                 / "actual-results"
-                / "RHEL-12345.actual.json"
+                / "RHEL-23456.actual.json"
             ).resolve()
         )
         for repetition in (1, 2, 3)
     ]
+    assert {case["case_id"] for case in output["cases"]} == {"RHEL-23456"}
     assert {case["status"] for case in output["cases"]} == {"not_run"}
     assert {case["reason"] for case in output["cases"]} == {"workflow adapters are not wired yet"}
     assert (cases_dir / "reports" / "fixture-validation.json").is_file()
