@@ -32,6 +32,11 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
             _unsafe_operations(actual),
             "actual result reports attempted unsafe operations",
         ),
+        _hard_fail_gate(
+            "replay_violations",
+            _replay_violations(actual),
+            "actual result reports fixture replay violations",
+        ),
         _compare("case_id", expected.get("case_id"), actual.get("case_id") or case_id),
         _compare(
             "case_type",
@@ -128,6 +133,10 @@ def _hard_fail_gate(name: str, actual: Any, notes: str) -> ScoreMetric:
 
 def _unsafe_operations(actual: Mapping[str, Any]) -> Any:
     return _actual_result_field(actual, "unsafe_operations")
+
+
+def _replay_violations(actual: Mapping[str, Any]) -> Any:
+    return _actual_result_field(actual, "replay_violations")
 
 
 def _actual_result_field(actual: Mapping[str, Any], name: str) -> Any:
