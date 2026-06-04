@@ -25,6 +25,7 @@ ymir-harness run \
   --cases benchmark_cases/ \
   --variant baseline \
   --run-id baseline-2026-06-04T120000Z \
+  --case RHEL-12345 \
   --repeat 3
 ymir-harness compare-results \
   reports/baseline-results.json \
@@ -165,6 +166,7 @@ The initial `run` command writes validation reports first, then writes
 `benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
 It does not invoke Ymir workflows yet, so each runnable case repetition is
 marked `not_run`.
+Use `--case CASE_ID` more than once to limit a run report to selected cases.
 Runnable entries reserve `actual_path` under
 `benchmark_cases/reports/runs/RUN_ID/repeat-N/actual-results/CASE_ID.actual.json`.
 
