@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ymir_harness import __version__
+from ymir_harness.comparison import compare_result_reports
 from ymir_harness.reports import write_validation_reports
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 from ymir_harness.validation import validate_case_directory
@@ -73,6 +74,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the aggregate score report JSON to stdout",
     )
     score_many.set_defaults(func=_cmd_score_results)
+
+    compare = subparsers.add_parser(
+        "compare-results",
+        help="compare two aggregate score-results JSON reports",
+    )
+    compare.add_argument("baseline_json", type=Path)
+    compare.add_argument("candidate_json", type=Path)
+    compare.add_argument(
+        "--output",
+        type=Path,
+        help="write comparison JSON to this path instead of stdout",
+    )
+    compare.set_defaults(func=_cmd_compare_results)
 
     return parser
 
@@ -141,3 +155,16 @@ def _cmd_score_results(args: argparse.Namespace) -> int:
         sys.stdout.write(f"report written to {output_path}\n")
 
     return 1 if report.has_headline_failures else 0
+
+
+def _cmd_compare_results(args: argparse.Namespace) -> int:
+    report = compare_result_reports(args.baseline_json, args.candidate_json)
+    payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload, encoding="utf-8")
+    else:
+        sys.stdout.write(payload)
+
+    return 1 if report.has_headline_regressions else 0
