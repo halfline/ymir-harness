@@ -480,6 +480,8 @@ def _validate_reference_patch(
         )
     )
     if patch_paths:
+        for patch_path in patch_paths:
+            _validate_reference_patch_parse(patch_path, result)
         return
 
     patch_pattern = (
@@ -500,6 +502,41 @@ def _implementation_case_requires_reference_patch(expected: Mapping[str, Any]) -
     if expected.get("expected_basis") != "merged_mr":
         return False
     return expected.get("resolution") in {"backport", "rebase", "rebuild"}
+
+
+def _validate_reference_patch_parse(
+    patch_path: Path,
+    result: CaseValidationResult,
+) -> None:
+    if not patch_path.is_file():
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="reference_patch_invalid",
+                message="reference patch path must be a file",
+                case_id=result.case_id,
+                path=str(patch_path),
+            )
+        )
+        return
+
+    completed = subprocess.run(
+        ["git", "apply", "--numstat", str(patch_path)],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if completed.returncode != 0:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="reference_patch_invalid",
+                message="reference patch must parse as a git patch",
+                case_id=result.case_id,
+                path=str(patch_path),
+            )
+        )
 
 
 def _validate_mock_fixtures(
