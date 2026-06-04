@@ -54,6 +54,30 @@ def test_score_case_reports_field_failures() -> None:
     assert failed == {"package"}
 
 
+def test_score_case_reports_affectedness_failures() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "not_affected",
+        "affectedness": "not affected",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "not_affected",
+        "package": "dnsmasq",
+        "data": {"affectedness": True},
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["affectedness"].expected == "not_affected"
+    assert failed["affectedness"].actual == "affected"
+
+
 def test_score_case_fails_unsafe_operation_attempts() -> None:
     expected = {
         "case_id": "RHEL-12345",
