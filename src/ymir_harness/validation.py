@@ -471,6 +471,18 @@ def _validate_source_cache(
             )
         )
 
+    upstream_dir = source_cache_dir / "upstream"
+    if not upstream_dir.is_dir():
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="implementation case source_cache must include upstream directory",
+                case_id=result.case_id,
+                path=str(upstream_dir),
+            )
+        )
+
 
 def _implementation_case_requires_source_cache(expected: Mapping[str, Any]) -> bool:
     if expected.get("requires_source_cache") is False:
