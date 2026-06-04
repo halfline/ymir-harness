@@ -542,6 +542,7 @@ def _validate_source_cache(
             )
         )
 
+    _validate_required_source_cache_files(source_cache_dir, expected, expected_path, result)
     _validate_source_cache_checksums(source_cache_dir, expected, expected_path, result)
 
     upstream_dir = source_cache_dir / "upstream"
@@ -622,6 +623,78 @@ def _validate_source_cache(
         return
 
     _validate_lookaside_artifacts(lookaside_dir, result)
+
+
+def _validate_required_source_cache_files(
+    source_cache_dir: Path,
+    expected: Mapping[str, Any],
+    expected_path: Path,
+    result: CaseValidationResult,
+) -> None:
+    required_files = expected.get("required_source_cache_files")
+    if required_files is None:
+        return
+
+    if not isinstance(required_files, list):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="required_source_cache_files must be a list",
+                case_id=result.case_id,
+                path=str(expected_path),
+            )
+        )
+        return
+
+    for relative_path in required_files:
+        if not isinstance(relative_path, str) or not relative_path:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message="required_source_cache_files entries must be non-empty strings",
+                    case_id=result.case_id,
+                    path=str(expected_path),
+                )
+            )
+            continue
+
+        source_path = _source_cache_relative_path(source_cache_dir, relative_path)
+        if source_path is None:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message=f"required source cache file path escapes case directory: {relative_path}",
+                    case_id=result.case_id,
+                    path=str(expected_path),
+                )
+            )
+            continue
+
+        if not source_path.is_file():
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message=f"required source cache file is missing: {relative_path}",
+                    case_id=result.case_id,
+                    path=str(source_path),
+                )
+            )
+            continue
+
+        if not _has_read_permission(source_path):
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message=f"required source cache file is not readable: {relative_path}",
+                    case_id=result.case_id,
+                    path=str(source_path),
+                )
+            )
 
 
 def _validate_source_cache_checksums(
