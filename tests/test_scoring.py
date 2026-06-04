@@ -200,6 +200,30 @@ def test_score_case_reports_spec_patch_failures() -> None:
     assert failed["spec_patches"].actual == []
 
 
+def test_score_case_reports_changelog_failures() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "changelog_entries": ["- Resolves: RHEL-12345 CVE-2026-0001"],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "data": {"changelog_entries": []},
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["changelog_entries"].expected == ["- Resolves: RHEL-12345 CVE-2026-0001"]
+    assert failed["changelog_entries"].actual == []
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
