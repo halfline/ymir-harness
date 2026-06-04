@@ -453,7 +453,19 @@ def _validate_web_cache_manifest(
             )
             continue
 
-        recorded_path = manifest_path.parent / recorded
+        recorded_path = _recorded_cache_path(manifest_path, recorded)
+        if recorded_path is None:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"recorded file path escapes web_cache case directory for URL: {url}",
+                    case_id=result.case_id,
+                    path=str(manifest_path),
+                )
+            )
+            continue
+
         if not recorded_path.is_file():
             result.issues.append(
                 ValidationIssue(
@@ -475,6 +487,16 @@ def _validate_web_cache_manifest(
                     path=str(recorded_path),
                 )
             )
+
+
+def _recorded_cache_path(manifest_path: Path, recorded: str) -> Path | None:
+    cache_dir = manifest_path.parent
+    recorded_path = cache_dir / recorded
+    try:
+        recorded_path.resolve(strict=False).relative_to(cache_dir.resolve(strict=False))
+    except ValueError:
+        return None
+    return recorded_path
 
 
 def _expected_patch_urls(expected: Mapping[str, Any]) -> list[str]:
