@@ -148,6 +148,34 @@ def test_score_case_fails_missing_required_artifacts() -> None:
     assert failed["required_artifacts"].notes == "missing required artifacts: dnsmasq.spec"
 
 
+def test_score_case_reports_touched_file_scope_failures() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "touched_files": ["SPECS/dnsmasq.spec", "SOURCES/fix.patch"],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "changed_files": ["SOURCES/fix.patch", "SPECS/dnsmasq.spec", "README.md"],
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["touched_files"].actual == [
+        "README.md",
+        "SOURCES/fix.patch",
+        "SPECS/dnsmasq.spec",
+    ]
+    assert failed["touched_files"].notes == "unexpected touched files: README.md"
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
