@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import ymir_harness.validation as validation_module
 from ymir_harness.reports import write_validation_reports
 from ymir_harness.validation import validate_case_directory
 
@@ -171,6 +172,37 @@ def test_phase2_reports_malformed_reference_patch(tmp_path: Path) -> None:
     issues = report.cases[0].issues
     assert any(
         issue.category == "reference_patch_invalid" and "parse" in issue.message for issue in issues
+    )
+
+
+def test_phase2_reports_reference_patch_without_touched_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+    )
+    real_run = validation_module.subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[:3] == ["git", "apply", "--numstat"]:
+            return subprocess.CompletedProcess(command, 0, stdout="1\t1\t\n", stderr="")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(validation_module.subprocess, "run", fake_run)
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "reference_patch_invalid" and "touched-file list" in issue.message
+        for issue in issues
     )
 
 
