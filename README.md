@@ -46,7 +46,7 @@ Phase 2 also checks that an expected `target_branch` or `fix_version` is
 declared by a mock repo `branch` or `zstream_override` value.
 Phase 2 requires implementation cases to include `source_cache/CASE_ID/` unless
 the expected result sets `requires_source_cache` to `false`.
-Implementation source caches must include `source_cache/CASE_ID/upstream/`.
+Implementation source caches must include a non-empty `source_cache/CASE_ID/upstream/`.
 When expected metadata declares `reference_patch_mode`, Phase 2 accepts
 `applies`, `scope_only`, or `semantic_reference`.
 Merged MR implementation cases must declare `reference_patch_mode`.
