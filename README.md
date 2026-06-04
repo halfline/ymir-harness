@@ -82,6 +82,8 @@ actual-results directory. It writes aggregate JSON to
 benchmark run metadata.
 Aggregate score reports also include the Ymir Harness version that produced
 the score.
+They include `fixture_checksum` for fixture inputs under `cases.yaml`,
+`expected/`, `jiras/`, `mock_data/`, `web_cache/`, and `source_cache/`.
 Non-headline aggregate entries include `headline_reason` when case metadata
 excludes them from headline correctness counts.
 
