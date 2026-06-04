@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ymir_harness import __version__
 from ymir_harness.reports import write_validation_reports
+from ymir_harness.scoring import load_json_file, score_case
 from ymir_harness.validation import validate_case_directory
 
 
@@ -42,6 +43,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate.set_defaults(func=_cmd_validate_cases)
 
+    score = subparsers.add_parser(
+        "score-result",
+        help="compare one expected JSON file with one actual result JSON file",
+    )
+    score.add_argument("expected_json", type=Path)
+    score.add_argument("actual_json", type=Path)
+    score.add_argument(
+        "--output",
+        type=Path,
+        help="write the score report JSON to this path instead of stdout",
+    )
+    score.set_defaults(func=_cmd_score_result)
+
     return parser
 
 
@@ -71,3 +85,18 @@ def _cmd_validate_cases(args: argparse.Namespace) -> int:
         sys.stdout.write(f"reports written to {reports_dir}\n")
 
     return 1 if report.has_blocking_errors else 0
+
+
+def _cmd_score_result(args: argparse.Namespace) -> int:
+    expected = load_json_file(args.expected_json)
+    actual = load_json_file(args.actual_json)
+    report = score_case(expected, actual)
+    payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload, encoding="utf-8")
+    else:
+        sys.stdout.write(payload)
+
+    return 0 if report.passed else 1
