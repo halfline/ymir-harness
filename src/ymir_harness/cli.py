@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ymir_harness import __version__
 from ymir_harness.reports import write_validation_reports
-from ymir_harness.scoring import load_json_file, score_case
+from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 from ymir_harness.validation import validate_case_directory
 
 
@@ -56,6 +56,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     score.set_defaults(func=_cmd_score_result)
 
+    score_many = subparsers.add_parser(
+        "score-results",
+        help="score every expected case with actual result files from a directory",
+    )
+    score_many.add_argument("cases_dir", type=Path)
+    score_many.add_argument("actual_results_dir", type=Path)
+    score_many.add_argument(
+        "--output",
+        type=Path,
+        help="write aggregate score JSON to this path; defaults to CASES_DIR/reports/results.json",
+    )
+    score_many.add_argument(
+        "--json",
+        action="store_true",
+        help="print the aggregate score report JSON to stdout",
+    )
+    score_many.set_defaults(func=_cmd_score_results)
+
     return parser
 
 
@@ -100,3 +118,26 @@ def _cmd_score_result(args: argparse.Namespace) -> int:
         sys.stdout.write(payload)
 
     return 0 if report.passed else 1
+
+
+def _cmd_score_results(args: argparse.Namespace) -> int:
+    report = score_result_directory(args.cases_dir, args.actual_results_dir)
+    output_path = args.output or args.cases_dir / "reports" / "results.json"
+    payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(payload, encoding="utf-8")
+
+    if args.json:
+        sys.stdout.write(payload)
+    else:
+        summary = report.summary()
+        sys.stdout.write(
+            "score results: "
+            f"{summary['headline_passed']} headline passed, "
+            f"{summary['headline_failed']} headline failed, "
+            f"{summary['headline_missing']} headline missing, "
+            f"{summary['non_headline']} non-headline\n"
+        )
+        sys.stdout.write(f"report written to {output_path}\n")
+
+    return 1 if report.has_headline_failures else 0
