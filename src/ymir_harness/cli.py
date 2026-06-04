@@ -9,6 +9,7 @@ from pathlib import Path
 from ymir_harness import __version__
 from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
 from ymir_harness.reports import write_validation_reports
+from ymir_harness.runner import build_run_report, default_results_dir
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 from ymir_harness.validation import validate_case_directory
 
@@ -86,6 +87,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="record the benchmark variant name in the aggregate score report",
     )
     score_many.set_defaults(func=_cmd_score_results)
+
+    run = subparsers.add_parser(
+        "run",
+        help="validate benchmark cases and write a placeholder run report",
+    )
+    run.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
+    run.add_argument("--variant", required=True, help="benchmark variant name")
+    run.add_argument("--run-id", help="benchmark run identifier; defaults to VARIANT")
+    run.add_argument("--ymir-sha", help="record the benchmarked Ymir git SHA")
+    run.add_argument(
+        "--feature",
+        dest="features",
+        action="append",
+        default=[],
+        help="record an enabled feature flag; may be provided more than once",
+    )
+    run.add_argument("--phase", type=int, choices=(1, 2), default=1)
+    run.add_argument("--results-dir", type=Path, help="directory for run artifacts")
+    run.add_argument("--output", type=Path, help="write run report JSON to this path")
+    run.add_argument("--json", action="store_true", help="print the run report JSON to stdout")
+    run.set_defaults(func=_cmd_run)
 
     compare = subparsers.add_parser(
         "compare-results",
@@ -178,6 +200,52 @@ def _cmd_score_results(args: argparse.Namespace) -> int:
         sys.stdout.write(f"report written to {output_path}\n")
 
     return 1 if report.has_headline_failures else 0
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    run_id = args.run_id or args.variant
+    results_dir = args.results_dir or default_results_dir(args.cases, run_id)
+    validation_report = validate_case_directory(args.cases, phase=args.phase)
+    validation_reports_dir = args.cases / "reports"
+    write_validation_reports(validation_report, validation_reports_dir)
+
+    if validation_report.has_blocking_errors:
+        summary = validation_report.summary()
+        sys.stdout.write(
+            "benchmark run blocked: "
+            f"{summary['invalid']} invalid, "
+            f"{summary['global_errors']} global errors\n"
+        )
+        sys.stdout.write(f"validation reports written to {validation_reports_dir}\n")
+        return 1
+
+    report = build_run_report(
+        args.cases,
+        results_dir,
+        validation_report=validation_report,
+        run_id=run_id,
+        variant=args.variant,
+        ymir_sha=args.ymir_sha,
+        features=args.features,
+    )
+    output_path = args.output or results_dir / "run.json"
+    payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(payload, encoding="utf-8")
+
+    if args.json:
+        sys.stdout.write(payload)
+    else:
+        summary = report.summary()
+        sys.stdout.write(
+            "benchmark run: "
+            f"{summary['not_run']} not run, "
+            f"{summary['skipped']} skipped, "
+            f"{summary['unsupported']} unsupported\n"
+        )
+        sys.stdout.write(f"run report written to {output_path}\n")
+
+    return 1 if report.has_failures else 0
 
 
 def _cmd_compare_results(args: argparse.Namespace) -> int:
