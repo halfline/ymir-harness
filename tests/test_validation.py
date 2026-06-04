@@ -115,6 +115,24 @@ def test_phase2_accepts_zstream_override_target_branch(tmp_path: Path) -> None:
     assert not report.has_blocking_errors
 
 
+def test_phase2_reports_missing_source_cache(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        requires_source_cache=True,
+    )
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(issue.category == "source_cache_incomplete" for issue in issues)
+
+
 def test_write_validation_reports(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
@@ -138,6 +156,7 @@ def _write_replay_case(
     pre_fix_ref: str,
     *,
     zstream_override: dict[str, str] | None = None,
+    requires_source_cache: bool = False,
 ) -> None:
     case_id = "RHEL-12345"
     case_type = "cve_backport"
@@ -158,6 +177,7 @@ def _write_replay_case(
             "case_status": "active",
             "case_status_reason": None,
             "network_mode": "replay_only",
+            "requires_source_cache": requires_source_cache,
         },
     )
     mock_data = {
