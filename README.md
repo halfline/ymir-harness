@@ -17,6 +17,7 @@ ymir-harness validate-cases benchmark_cases/
 ymir-harness score-result \
   benchmark_cases/expected/RHEL-12345.expected.json \
   reports/RHEL-12345.actual.json
+ymir-harness score-results benchmark_cases/ reports/actual-results/
 ```
 
 The `benchmark` script is an alias for the same CLI:
@@ -34,6 +35,11 @@ benchmark_cases/reports/fixture-validation-errors.md
 ```
 
 Use `--phase 2` once pilot fixtures are ready for stricter metadata checks.
+
+`score-results` reads every `benchmark_cases/expected/*.expected.json` file and
+matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
+actual-results directory. It writes aggregate JSON to
+`benchmark_cases/reports/results.json` unless `--output` is provided.
 
 ## Development
 
