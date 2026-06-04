@@ -336,6 +336,17 @@ def _validate_network_policy(
     if network_mode == "replay_only":
         _validate_web_cache_manifest(cases_dir, expected, result)
     elif phase >= 2 and network_mode == "network_denied":
+        patch_urls = _expected_patch_urls(expected)
+        if patch_urls:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="network_policy_invalid",
+                    message="network_denied case must not declare patch_urls",
+                    case_id=result.case_id,
+                )
+            )
+
         web_manifest = cases_dir / "web_cache" / result.case_id / "manifest.json"
         if web_manifest.exists():
             result.issues.append(
