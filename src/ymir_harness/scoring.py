@@ -27,6 +27,11 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
     normalized_actual = normalize_actual_result(actual)
 
     metrics = [
+        _hard_fail_gate(
+            "unsafe_operations",
+            _unsafe_operations(actual),
+            "actual result reports attempted unsafe operations",
+        ),
         _compare("case_id", expected.get("case_id"), actual.get("case_id") or case_id),
         _compare(
             "case_type",
@@ -107,6 +112,26 @@ def normalize_actual_result(actual: Mapping[str, Any]) -> dict[str, Any]:
         "cve_ids": _normalize_cve_ids(actual, nested),
         "patch_urls": _normalize_list(actual.get("patch_urls") or nested.get("patch_urls")),
     }
+
+
+def _hard_fail_gate(name: str, actual: Any, notes: str) -> ScoreMetric:
+    expected: list[str] = []
+    actual_values = _normalize_list(actual)
+    return ScoreMetric(
+        name=name,
+        status="pass" if actual_values == expected else "fail",
+        expected=expected,
+        actual=actual_values,
+        notes=notes,
+    )
+
+
+def _unsafe_operations(actual: Mapping[str, Any]) -> Any:
+    data = actual.get("data")
+    nested = data if isinstance(data, Mapping) else {}
+    if actual.get("unsafe_operations") is not None:
+        return actual.get("unsafe_operations")
+    return nested.get("unsafe_operations")
 
 
 def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> ScoreCollectionEntry:
