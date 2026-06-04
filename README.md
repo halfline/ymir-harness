@@ -70,6 +70,10 @@ Expected results may declare `dependency_issues`. Scoring compares that list
 with `dependency_issues` in the actual result to check required dependency
 issue handling.
 
+Expected results may declare `sibling_issues`. Scoring compares that list with
+`sibling_issues` in the actual result to check required sibling issue
+handling.
+
 Expected results may declare `affectedness`. Scoring compares that value with
 `affectedness` in the actual result and accepts boolean or token values such as
 `affected` and `not_affected`.
