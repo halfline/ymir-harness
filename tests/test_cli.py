@@ -94,6 +94,47 @@ def test_cli_scores_result_directory(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert json.loads(output_path.read_text(encoding="utf-8"))["summary"]["headline_passed"] == 1
 
 
+def test_cli_compares_result_reports(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    _write_result_report(
+        baseline_path,
+        {
+            "RHEL-12345": ("failed", True),
+        },
+    )
+    _write_result_report(
+        candidate_path,
+        {
+            "RHEL-12345": ("passed", True),
+        },
+    )
+
+    assert main(["compare-results", str(baseline_path), str(candidate_path)]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["summary"]["wins"] == 1
+    assert output["cases"][0]["delta"] == "win"
+
+
+def _write_result_report(path: Path, cases: dict[str, tuple[str, bool]]) -> None:
+    _write_json(
+        path,
+        {
+            "schema_version": 1,
+            "cases": [
+                {
+                    "case_id": case_id,
+                    "case_type": "cve_backport",
+                    "status": status,
+                    "headline": headline,
+                }
+                for case_id, (status, headline) in cases.items()
+            ],
+        },
+    )
+
+
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
