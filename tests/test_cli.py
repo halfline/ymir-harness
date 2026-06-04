@@ -85,13 +85,23 @@ def test_cli_scores_result_directory(tmp_path: Path, capsys: pytest.CaptureFixtu
                 str(actual_dir),
                 "--output",
                 str(output_path),
+                "--run-id",
+                "baseline-1",
+                "--ymir-sha",
+                "6e22912f83d57ddae1031e6207d4716171a99be0",
+                "--variant",
+                "baseline",
             ]
         )
         == 0
     )
 
     assert "1 headline passed" in capsys.readouterr().out
-    assert json.loads(output_path.read_text(encoding="utf-8"))["summary"]["headline_passed"] == 1
+    output = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output["summary"]["headline_passed"] == 1
+    assert output["run_id"] == "baseline-1"
+    assert output["ymir_sha"] == "6e22912f83d57ddae1031e6207d4716171a99be0"
+    assert output["variant"] == "baseline"
 
 
 def test_cli_compares_result_reports(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
