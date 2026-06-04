@@ -47,6 +47,7 @@ declared by a mock repo `branch` or `zstream_override` value.
 Replay web cache manifests must list expected `patch_urls` in `required_urls`.
 Recorded web cache files must stay under `web_cache/CASE_ID/`.
 `network_denied` cases must not declare expected `patch_urls`.
+`network_denied` cases must not include `web_cache/CASE_ID/manifest.json`.
 Phase 2 requires implementation cases to include `source_cache/CASE_ID/` unless
 the expected result sets `requires_source_cache` to `false`.
 Implementation source caches must include `source_cache/CASE_ID/upstream/` with
