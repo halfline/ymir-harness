@@ -133,6 +133,27 @@ def test_phase2_reports_missing_source_cache(tmp_path: Path) -> None:
     assert any(issue.category == "source_cache_incomplete" for issue in issues)
 
 
+def test_phase2_reports_invalid_reference_patch_mode(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        reference_patch_mode="source_tree",
+    )
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "schema_mismatch" and "reference_patch_mode" in issue.message
+        for issue in issues
+    )
+
+
 def test_write_validation_reports(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
@@ -157,6 +178,7 @@ def _write_replay_case(
     *,
     zstream_override: dict[str, str] | None = None,
     requires_source_cache: bool = False,
+    reference_patch_mode: str | None = None,
 ) -> None:
     case_id = "RHEL-12345"
     case_type = "cve_backport"
@@ -178,6 +200,7 @@ def _write_replay_case(
             "case_status_reason": None,
             "network_mode": "replay_only",
             "requires_source_cache": requires_source_cache,
+            "reference_patch_mode": reference_patch_mode,
         },
     )
     mock_data = {
