@@ -8,10 +8,22 @@ from typing import Any
 
 from ymir_harness import __version__
 from ymir_harness.models import (
+    AdvisoryMetric,
     ScoreCollectionEntry,
     ScoreCollectionReport,
     ScoreMetric,
     ScoreReport,
+)
+
+ADVISORY_RESULT_FIELDS = (
+    "diff_similarity",
+    "rationale_quality",
+    "llm_judge_notes",
+    "runtime",
+    "runtime_seconds",
+    "token_usage",
+    "tool_call_count",
+    "retry_count",
 )
 
 
@@ -136,7 +148,12 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
             )
         )
 
-    return ScoreReport(case_id=case_id, case_type=case_type, metrics=metrics)
+    return ScoreReport(
+        case_id=case_id,
+        case_type=case_type,
+        metrics=metrics,
+        advisory_metrics=_advisory_metrics(actual),
+    )
 
 
 def score_result_directory(
@@ -275,6 +292,15 @@ def _actual_result_field(actual: Mapping[str, Any], name: str) -> Any:
     if actual.get(name) is not None:
         return actual.get(name)
     return nested.get(name)
+
+
+def _advisory_metrics(actual: Mapping[str, Any]) -> list[AdvisoryMetric]:
+    metrics: list[AdvisoryMetric] = []
+    for name in ADVISORY_RESULT_FIELDS:
+        value = _actual_result_field(actual, name)
+        if value is not None:
+            metrics.append(AdvisoryMetric(name=name, value=value))
+    return metrics
 
 
 def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> ScoreCollectionEntry:

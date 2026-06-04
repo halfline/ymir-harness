@@ -188,11 +188,24 @@ class ScoreMetric:
         return payload
 
 
+@dataclass(frozen=True)
+class AdvisoryMetric:
+    name: str
+    value: Any
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "value": self.value,
+        }
+
+
 @dataclass
 class ScoreReport:
     case_id: str
     case_type: str | None
     metrics: list[ScoreMetric]
+    advisory_metrics: list[AdvisoryMetric] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -213,6 +226,7 @@ class ScoreReport:
             "case_type": self.case_type,
             "summary": self.summary(),
             "metrics": [metric.to_json() for metric in self.metrics],
+            "advisory_metrics": [metric.to_json() for metric in self.advisory_metrics],
         }
 
 
