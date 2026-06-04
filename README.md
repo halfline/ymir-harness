@@ -62,6 +62,10 @@ Expected results may declare `required_artifacts`. Scoring compares that list
 with `generated_artifacts` in the actual result and fails the case when any
 required artifact is missing.
 
+Expected results may declare `fix_sources`. Scoring compares that list with
+`fix_sources` in the actual result to check required upstream commits,
+advisories, or other declared fix origins.
+
 Expected results may declare `affectedness`. Scoring compares that value with
 `affectedness` in the actual result and accepts boolean or token values such as
 `affected` and `not_affected`.
