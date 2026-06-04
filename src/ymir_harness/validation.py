@@ -420,7 +420,11 @@ def _validate_mock_fixtures(
 ) -> None:
     expected_package = expected.get("package") if expected else None
     expected_case_type = expected.get("case_type") if expected else None
+    expected_target_branch = None
+    if expected:
+        expected_target_branch = expected.get("target_branch") or expected.get("fix_version")
     packages_seen: set[str] = set()
+    branches_seen: set[str] = set()
 
     if not mock_paths:
         result.issues.append(
@@ -471,7 +475,9 @@ def _validate_mock_fixtures(
                     )
                 )
                 continue
-            packages_seen.update(_validate_mock_repo_entry(repo, index, mock_path, result))
+            packages, branches = _validate_mock_repo_entry(repo, index, mock_path, result)
+            packages_seen.update(packages)
+            branches_seen.update(branches)
 
     if expected_package and packages_seen and expected_package not in packages_seen:
         result.issues.append(
@@ -486,14 +492,33 @@ def _validate_mock_fixtures(
             )
         )
 
+    if (
+        phase >= 2
+        and expected_target_branch
+        and branches_seen
+        and expected_target_branch not in branches_seen
+    ):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="mock_repo_mismatch",
+                message=(
+                    "expected target_branch or fix_version is not declared by any mock "
+                    f"repo branch ({expected_target_branch!r} not in {sorted(branches_seen)!r})"
+                ),
+                case_id=result.case_id,
+            )
+        )
+
 
 def _validate_mock_repo_entry(
     repo: Mapping[str, Any],
     index: int,
     mock_path: Path,
     result: CaseValidationResult,
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
     packages_seen: set[str] = set()
+    branches_seen: set[str] = set()
     for field in ("package", "remote_url", "pre_fix_ref", "branch"):
         _require_field(repo, field, mock_path, result, context=f"repos[{index}]")
 
@@ -501,12 +526,16 @@ def _validate_mock_repo_entry(
     if isinstance(package, str) and package:
         packages_seen.add(package)
 
+    branch = repo.get("branch")
+    if isinstance(branch, str) and branch:
+        branches_seen.add(branch)
+
     remote_url = repo.get("remote_url")
     pre_fix_ref = repo.get("pre_fix_ref")
     if isinstance(remote_url, str) and isinstance(pre_fix_ref, str):
         _validate_local_pre_fix_ref(remote_url, pre_fix_ref, mock_path, result)
 
-    return packages_seen
+    return packages_seen, branches_seen
 
 
 def _validate_local_pre_fix_ref(
