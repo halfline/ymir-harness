@@ -76,6 +76,30 @@ def test_score_case_fails_unsafe_operation_attempts() -> None:
     assert failed["unsafe_operations"].actual == ["git push origin HEAD"]
 
 
+def test_score_case_fails_replay_violations() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "data": {"replay_violations": ["unrecorded URL: https://example.invalid/advisory"]},
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["replay_violations"].actual == [
+        "unrecorded URL: https://example.invalid/advisory"
+    ]
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
