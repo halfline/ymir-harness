@@ -70,6 +70,10 @@ Expected results may declare `touched_files`. Scoring compares that file list
 with `touched_files` or `changed_files` in the actual result and fails on
 missing or unexpected paths.
 
+Expected results may declare `spec_patches`. Scoring compares that list with
+`spec_patches` in the actual result to check expected RPM spec patch
+declarations.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
