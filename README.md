@@ -58,6 +58,10 @@ Scoring also treats any `replay_violations` entries as a hard failure gate. Use
 that field for unrecorded external fetches or replay cache misses reported by
 the replay layer.
 
+Expected results may declare `required_artifacts`. Scoring compares that list
+with `generated_artifacts` in the actual result and fails the case when any
+required artifact is missing.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
