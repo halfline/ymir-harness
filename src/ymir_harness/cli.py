@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ymir_harness import __version__
-from ymir_harness.comparison import compare_result_reports
+from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
 from ymir_harness.reports import write_validation_reports
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 from ymir_harness.validation import validate_case_directory
@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         help="write comparison JSON to this path instead of stdout",
+    )
+    compare.add_argument(
+        "--markdown-output",
+        type=Path,
+        help="write a Markdown comparison report to this path",
     )
     compare.set_defaults(func=_cmd_compare_results)
 
@@ -166,5 +171,9 @@ def _cmd_compare_results(args: argparse.Namespace) -> int:
         args.output.write_text(payload, encoding="utf-8")
     else:
         sys.stdout.write(payload)
+
+    if args.markdown_output:
+        args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+        args.markdown_output.write_text(render_comparison_markdown(report), encoding="utf-8")
 
     return 1 if report.has_headline_regressions else 0
