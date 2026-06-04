@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
@@ -544,6 +545,8 @@ def _validate_source_cache(
             )
         )
 
+    _validate_upstream_source_archives(upstream_dir, result)
+
     lookaside_dir = source_cache_dir / "lookaside"
     if not lookaside_dir.is_dir():
         result.issues.append(
@@ -569,6 +572,23 @@ def _validate_source_cache(
         )
 
 
+def _validate_upstream_source_archives(
+    upstream_dir: Path,
+    result: CaseValidationResult,
+) -> None:
+    for archive_path in _upstream_source_archives(upstream_dir):
+        if not _has_read_permission(archive_path):
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message="implementation case source archive is not readable",
+                    case_id=result.case_id,
+                    path=str(archive_path),
+                )
+            )
+
+
 def _contains_upstream_source(upstream_dir: Path) -> bool:
     if _is_git_checkout(upstream_dir) or _is_bare_git_repository(upstream_dir):
         return True
@@ -582,9 +602,24 @@ def _contains_upstream_source(upstream_dir: Path) -> bool:
     return False
 
 
+def _upstream_source_archives(upstream_dir: Path) -> list[Path]:
+    return [
+        child for child in upstream_dir.iterdir() if child.is_file() and _is_source_archive(child)
+    ]
+
+
 def _is_source_archive(path: Path) -> bool:
     name = path.name.lower()
     return any(name.endswith(suffix) for suffix in SOURCE_ARCHIVE_SUFFIXES)
+
+
+def _has_read_permission(path: Path) -> bool:
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return False
+
+    return bool(mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH))
 
 
 def _is_git_checkout(path: Path) -> bool:
