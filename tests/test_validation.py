@@ -199,6 +199,29 @@ def test_phase2_reports_network_denied_patch_urls(tmp_path: Path) -> None:
     )
 
 
+def test_phase2_reports_network_denied_web_cache_manifest(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        network_mode="network_denied",
+        patch_urls=[],
+    )
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "network_policy_invalid"
+        and "must not include web_cache manifest" in issue.message
+        for issue in issues
+    )
+
+
 def test_phase2_reports_missing_source_cache(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
@@ -634,6 +657,7 @@ def _write_replay_case(
     zstream_override: dict[str, str] | None = None,
     requires_source_cache: bool = False,
     network_mode: str = "replay_only",
+    patch_urls: list[str] | None = None,
     reference_patch_mode: str | None = "applies",
     reference_patch_exists: bool = True,
     reference_patch_text: str = (
@@ -648,6 +672,8 @@ def _write_replay_case(
 ) -> None:
     case_id = "RHEL-12345"
     case_type = "cve_backport"
+    if patch_urls is None:
+        patch_urls = ["https://example.invalid/fix.patch"]
     _write_json(
         cases_dir / "expected" / f"{case_id}.expected.json",
         {
@@ -658,7 +684,7 @@ def _write_replay_case(
             "package": "dnsmasq",
             "target_branch": "rhel-8.10.z",
             "cve_ids": ["CVE-2026-0001"],
-            "patch_urls": ["https://example.invalid/fix.patch"],
+            "patch_urls": patch_urls,
             "expected_basis": "merged_mr",
             "ground_truth_confidence": "high",
             "answer_leakage": "none",
