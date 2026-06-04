@@ -46,8 +46,8 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         f"- Headline regressions: `{summary['regressions']}`",
         f"- Non-headline cases: `{summary['non_headline']}`",
         "",
-        "| Case | Type | Headline | Baseline | Candidate | Delta |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| Case | Type | Headline | Reason | Baseline | Candidate | Delta |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for entry in report.entries:
         lines.append(
@@ -55,6 +55,7 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
             f"{entry.case_id} | "
             f"{entry.case_type or ''} | "
             f"{_yes_no(entry.headline)} | "
+            f"{entry.headline_reason or ''} | "
             f"{entry.baseline_status or ''} | "
             f"{entry.candidate_status or ''} | "
             f"{entry.delta} |"
@@ -87,6 +88,7 @@ def _compare_case(
     baseline_status = _status(baseline)
     candidate_status = _status(candidate)
     delta = _delta(headline, baseline_status, candidate_status)
+    headline_reason = None if headline else _headline_reason(baseline, candidate)
     return ComparisonEntry(
         case_id=case_id,
         case_type=case_type,
@@ -94,6 +96,7 @@ def _compare_case(
         baseline_status=baseline_status,
         candidate_status=candidate_status,
         delta=delta,
+        headline_reason=headline_reason,
     )
 
 
@@ -134,6 +137,24 @@ def _headline(case: Mapping[str, Any] | None) -> bool:
     if case is None:
         return False
     return case.get("headline") is True
+
+
+def _headline_reason(*cases: Mapping[str, Any] | None) -> str | None:
+    reasons = []
+    seen: set[str] = set()
+    for label, case in zip(("baseline", "candidate"), cases, strict=True):
+        if case is None:
+            continue
+        reason = case.get("headline_reason")
+        if isinstance(reason, str) and reason and reason not in seen:
+            seen.add(reason)
+            reasons.append(f"{label}: {reason}")
+
+    if not reasons:
+        return None
+    if len(reasons) == 1:
+        return reasons[0].split(": ", 1)[1]
+    return "; ".join(reasons)
 
 
 def _status(case: Mapping[str, Any] | None) -> str | None:

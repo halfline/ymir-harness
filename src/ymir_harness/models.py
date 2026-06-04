@@ -307,9 +307,10 @@ class ComparisonEntry:
     baseline_status: str | None
     candidate_status: str | None
     delta: ComparisonDelta
+    headline_reason: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        payload = {
             "case_id": self.case_id,
             "case_type": self.case_type,
             "headline": self.headline,
@@ -317,6 +318,9 @@ class ComparisonEntry:
             "candidate_status": self.candidate_status,
             "delta": self.delta,
         }
+        if self.headline_reason:
+            payload["headline_reason"] = self.headline_reason
+        return payload
 
 
 @dataclass
