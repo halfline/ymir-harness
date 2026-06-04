@@ -523,7 +523,7 @@ def _validate_reference_patch_parse(
     completed = subprocess.run(
         ["git", "apply", "--numstat", str(patch_path)],
         check=False,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
     )
@@ -537,6 +537,34 @@ def _validate_reference_patch_parse(
                 path=str(patch_path),
             )
         )
+        return
+
+    if not _reference_patch_touched_paths(completed.stdout):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="reference_patch_invalid",
+                message="reference patch touched-file list cannot be extracted",
+                case_id=result.case_id,
+                path=str(patch_path),
+            )
+        )
+
+
+def _reference_patch_touched_paths(numstat_output: str) -> list[str]:
+    paths: list[str] = []
+    for line in numstat_output.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            return []
+
+        path = parts[2].strip()
+        if not path:
+            return []
+
+        paths.append(path)
+
+    return paths
 
 
 def _validate_mock_fixtures(
