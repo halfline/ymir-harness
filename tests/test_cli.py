@@ -104,6 +104,108 @@ def test_cli_scores_result_directory(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert output["variant"] == "baseline"
 
 
+def test_cli_run_writes_placeholder_report(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    output_path = tmp_path / "reports" / "run.json"
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+            "expected_basis": "maintainer_decision",
+            "ground_truth_confidence": "high",
+            "answer_leakage": "none",
+            "case_status": "active",
+            "network_mode": "network_denied",
+        },
+    )
+
+    assert (
+        main(
+            [
+                "run",
+                "--cases",
+                str(cases_dir),
+                "--variant",
+                "baseline",
+                "--run-id",
+                "baseline-1",
+                "--ymir-sha",
+                "6e22912f83d57ddae1031e6207d4716171a99be0",
+                "--feature",
+                "YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK",
+                "--output",
+                str(output_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output == written
+    assert output["run_id"] == "baseline-1"
+    assert output["variant"] == "baseline"
+    assert output["ymir_sha"] == "6e22912f83d57ddae1031e6207d4716171a99be0"
+    assert output["harness_version"] == __version__
+    assert output["features"] == ["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"]
+    assert output["fixture_checksum"].startswith("sha256:")
+    assert output["summary"]["not_run"] == 1
+    assert output["cases"][0]["status"] == "not_run"
+    assert output["cases"][0]["reason"] == "workflow adapters are not wired yet"
+    assert (cases_dir / "reports" / "fixture-validation.json").is_file()
+
+
+def test_cli_run_blocks_invalid_fixtures(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    output_path = tmp_path / "reports" / "run.json"
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 99,
+            "case_id": "RHEL-99999",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+            "expected_basis": "maintainer_decision",
+            "ground_truth_confidence": "high",
+            "answer_leakage": "none",
+            "case_status": "active",
+            "network_mode": "network_denied",
+        },
+    )
+
+    assert (
+        main(
+            [
+                "run",
+                "--cases",
+                str(cases_dir),
+                "--variant",
+                "baseline",
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 1
+    )
+
+    output = capsys.readouterr().out
+    assert "benchmark run blocked" in output
+    assert not output_path.exists()
+    assert (cases_dir / "reports" / "fixture-validation-errors.md").is_file()
+
+
 def test_cli_compares_result_reports(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     baseline_path = tmp_path / "baseline.json"
     candidate_path = tmp_path / "candidate.json"
