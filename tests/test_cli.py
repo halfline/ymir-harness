@@ -97,6 +97,7 @@ def test_cli_scores_result_directory(tmp_path: Path, capsys: pytest.CaptureFixtu
 def test_cli_compares_result_reports(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     baseline_path = tmp_path / "baseline.json"
     candidate_path = tmp_path / "candidate.json"
+    markdown_path = tmp_path / "comparison.md"
     _write_result_report(
         baseline_path,
         {
@@ -110,11 +111,23 @@ def test_cli_compares_result_reports(tmp_path: Path, capsys: pytest.CaptureFixtu
         },
     )
 
-    assert main(["compare-results", str(baseline_path), str(candidate_path)]) == 0
+    assert (
+        main(
+            [
+                "compare-results",
+                str(baseline_path),
+                str(candidate_path),
+                "--markdown-output",
+                str(markdown_path),
+            ]
+        )
+        == 0
+    )
 
     output = json.loads(capsys.readouterr().out)
     assert output["summary"]["wins"] == 1
     assert output["cases"][0]["delta"] == "win"
+    assert "RHEL-12345" in markdown_path.read_text(encoding="utf-8")
 
 
 def _write_result_report(path: Path, cases: dict[str, tuple[str, bool]]) -> None:
