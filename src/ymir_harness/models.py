@@ -249,6 +249,9 @@ class ScoreCollectionReport:
     cases_dir: Path
     actual_results_dir: Path
     entries: list[ScoreCollectionEntry]
+    run_id: str | None = None
+    ymir_sha: str | None = None
+    variant: str | None = None
 
     @property
     def has_headline_failures(self) -> bool:
@@ -282,6 +285,9 @@ class ScoreCollectionReport:
     def to_json(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "ymir_sha": self.ymir_sha,
+            "variant": self.variant,
             "cases_dir": str(self.cases_dir),
             "actual_results_dir": str(self.actual_results_dir),
             "summary": self.summary(),
