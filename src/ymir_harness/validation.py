@@ -506,6 +506,18 @@ def _validate_source_cache(
                 path=str(lookaside_dir),
             )
         )
+        return
+
+    if not any(lookaside_dir.iterdir()):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="implementation case source_cache lookaside directory is empty",
+                case_id=result.case_id,
+                path=str(lookaside_dir),
+            )
+        )
 
 
 def _implementation_case_requires_source_cache(expected: Mapping[str, Any]) -> bool:
