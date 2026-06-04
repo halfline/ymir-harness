@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -103,7 +104,7 @@ def _validate_case(cases_dir: Path, case_id: str, phase: int) -> CaseValidationR
         result.case_type = _string_or_none(expected.get("case_type"))
         result.case_status = _string_or_none(expected.get("case_status"))
         _validate_network_policy(cases_dir, expected, result, phase)
-        _validate_source_cache(cases_dir, expected, result, phase)
+        _validate_source_cache(cases_dir, expected, expected_path, result, phase)
 
     reference_patch_targets = _validate_mock_fixtures(mock_paths, expected, result, phase)
 
@@ -510,6 +511,7 @@ def _expected_patch_urls(expected: Mapping[str, Any]) -> list[str]:
 def _validate_source_cache(
     cases_dir: Path,
     expected: Mapping[str, Any],
+    expected_path: Path,
     result: CaseValidationResult,
     phase: int,
 ) -> None:
@@ -539,6 +541,8 @@ def _validate_source_cache(
                 path=str(source_cache_dir),
             )
         )
+
+    _validate_source_cache_checksums(source_cache_dir, expected, expected_path, result)
 
     upstream_dir = source_cache_dir / "upstream"
     if not upstream_dir.is_dir():
@@ -618,6 +622,137 @@ def _validate_source_cache(
         return
 
     _validate_lookaside_artifacts(lookaside_dir, result)
+
+
+def _validate_source_cache_checksums(
+    source_cache_dir: Path,
+    expected: Mapping[str, Any],
+    expected_path: Path,
+    result: CaseValidationResult,
+) -> None:
+    checksums = expected.get("source_cache_checksums")
+    if checksums is None:
+        return
+
+    if not isinstance(checksums, Mapping):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="source_cache_checksums must be an object",
+                case_id=result.case_id,
+                path=str(expected_path),
+            )
+        )
+        return
+
+    for relative_path, expected_checksum in checksums.items():
+        if not isinstance(relative_path, str) or not relative_path:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message="source_cache_checksums paths must be non-empty strings",
+                    case_id=result.case_id,
+                    path=str(expected_path),
+                )
+            )
+            continue
+
+        digest = _parse_sha256_checksum(expected_checksum)
+        if digest is None:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message="source_cache_checksums values must use sha256:<hex>",
+                    case_id=result.case_id,
+                    path=str(expected_path),
+                )
+            )
+            continue
+
+        source_path = _source_cache_relative_path(source_cache_dir, relative_path)
+        if source_path is None:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message=f"source cache checksum path escapes case directory: {relative_path}",
+                    case_id=result.case_id,
+                    path=str(expected_path),
+                )
+            )
+            continue
+
+        if not source_path.is_file():
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message=f"source cache checksum file is missing: {relative_path}",
+                    case_id=result.case_id,
+                    path=str(source_path),
+                )
+            )
+            continue
+
+        if not _has_read_permission(source_path):
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message=f"source cache checksum file is not readable: {relative_path}",
+                    case_id=result.case_id,
+                    path=str(source_path),
+                )
+            )
+            continue
+
+        actual_checksum = _sha256_file(source_path)
+        if actual_checksum != digest:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message=f"source cache checksum mismatch: {relative_path}",
+                    case_id=result.case_id,
+                    path=str(source_path),
+                )
+            )
+
+
+def _parse_sha256_checksum(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    prefix = "sha256:"
+    if not value.startswith(prefix):
+        return None
+
+    digest = value.removeprefix(prefix).lower()
+    if len(digest) != 64:
+        return None
+    if any(char not in "0123456789abcdef" for char in digest):
+        return None
+    return digest
+
+
+def _source_cache_relative_path(source_cache_dir: Path, relative_path: str) -> Path | None:
+    artifact_path = source_cache_dir / relative_path
+    try:
+        artifact_path.resolve(strict=False).relative_to(source_cache_dir.resolve(strict=False))
+    except ValueError:
+        return None
+    return artifact_path
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _validate_upstream_source_archives(
