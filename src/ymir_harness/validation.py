@@ -20,6 +20,7 @@ from ymir_harness.models import (
     ALLOWED_EXPECTED_BASES,
     ALLOWED_GROUND_TRUTH_CONFIDENCE,
     ALLOWED_NETWORK_MODES,
+    ALLOWED_REFERENCE_PATCH_MODES,
     ALLOWED_RESOLUTIONS,
     SUPPORTED_SCHEMA_VERSIONS,
     CaseValidationResult,
@@ -271,6 +272,16 @@ def _validate_expected_metadata(
                 case_id=result.case_id,
                 path=str(expected_path),
             )
+        )
+
+    if phase >= 2:
+        _validate_allowed_value(
+            expected.get("reference_patch_mode"),
+            ALLOWED_REFERENCE_PATCH_MODES,
+            "reference_patch_mode",
+            expected_path,
+            result,
+            required=False,
         )
 
 
