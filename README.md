@@ -50,6 +50,10 @@ actual-results directory. It writes aggregate JSON to
 `--run-id`, `--ymir-sha`, and `--variant` to stamp the aggregate report with
 benchmark run metadata.
 
+Scoring treats any `unsafe_operations` entries in an actual result as a hard
+failure gate. Use that field for blocked write attempts such as Jira mutation,
+GitLab push, or build-system submission calls captured during a run.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
