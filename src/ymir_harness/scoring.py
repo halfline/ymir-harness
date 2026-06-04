@@ -5,7 +5,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ymir_harness.models import ScoreMetric, ScoreReport
+from ymir_harness.models import (
+    ScoreCollectionEntry,
+    ScoreCollectionReport,
+    ScoreMetric,
+    ScoreReport,
+)
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
@@ -60,6 +65,20 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
     return ScoreReport(case_id=case_id, case_type=case_type, metrics=metrics)
 
 
+def score_result_directory(cases_dir: Path, actual_results_dir: Path) -> ScoreCollectionReport:
+    cases_dir = cases_dir.resolve()
+    actual_results_dir = actual_results_dir.resolve()
+    entries = [
+        _score_expected_file(expected_path, actual_results_dir)
+        for expected_path in _expected_result_files(cases_dir)
+    ]
+    return ScoreCollectionReport(
+        cases_dir=cases_dir,
+        actual_results_dir=actual_results_dir,
+        entries=entries,
+    )
+
+
 def normalize_actual_result(actual: Mapping[str, Any]) -> dict[str, Any]:
     data = actual.get("data")
     nested = data if isinstance(data, Mapping) else {}
@@ -78,6 +97,76 @@ def normalize_actual_result(actual: Mapping[str, Any]) -> dict[str, Any]:
         "cve_ids": _normalize_cve_ids(actual, nested),
         "patch_urls": _normalize_list(actual.get("patch_urls") or nested.get("patch_urls")),
     }
+
+
+def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> ScoreCollectionEntry:
+    expected = load_json_file(expected_path)
+    case_id = _case_id_from_expected_path(expected_path)
+    case_type = _string_or_none(expected.get("case_type"))
+    case_status = _string_or_none(expected.get("case_status"))
+    headline = _is_headline_case(expected)
+
+    if case_status == "excluded":
+        return ScoreCollectionEntry(
+            case_id=case_id,
+            case_type=case_type,
+            case_status=case_status,
+            expected_path=expected_path,
+            actual_path=None,
+            status="skipped",
+            headline=False,
+            reason="case_status is excluded",
+        )
+
+    actual_path = _find_actual_result_file(actual_results_dir, case_id)
+    if actual_path is None:
+        return ScoreCollectionEntry(
+            case_id=case_id,
+            case_type=case_type,
+            case_status=case_status,
+            expected_path=expected_path,
+            actual_path=None,
+            status="missing",
+            headline=headline,
+            reason="actual result file is missing",
+        )
+
+    score = score_case(expected, load_json_file(actual_path))
+    return ScoreCollectionEntry(
+        case_id=case_id,
+        case_type=case_type,
+        case_status=case_status,
+        expected_path=expected_path,
+        actual_path=actual_path,
+        status="passed" if score.passed else "failed",
+        headline=headline,
+        score=score,
+    )
+
+
+def _expected_result_files(cases_dir: Path) -> list[Path]:
+    return sorted((cases_dir / "expected").glob("*.expected.json"))
+
+
+def _find_actual_result_file(actual_results_dir: Path, case_id: str) -> Path | None:
+    for name in (f"{case_id}.actual.json", f"{case_id}.json"):
+        path = actual_results_dir / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _case_id_from_expected_path(expected_path: Path) -> str:
+    return expected_path.name.removesuffix(".expected.json")
+
+
+def _is_headline_case(expected: Mapping[str, Any]) -> bool:
+    return (
+        expected.get("case_status", "active") == "active"
+        and expected.get("ground_truth_confidence") != "low"
+        and expected.get("answer_leakage") != "explicit"
+        and expected.get("network_mode") != "live_non_reproducible"
+    )
 
 
 def _compare(
