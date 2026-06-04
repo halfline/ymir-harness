@@ -296,6 +296,30 @@ def test_score_case_reports_reference_patch_parse_failures() -> None:
     assert failed["reference_patch_parse_status"].actual == "failed"
 
 
+def test_score_case_reports_reference_patch_apply_failures() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "reference_patch_apply_status": "applied",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "data": {"reference_patch_apply_status": "failed"},
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["reference_patch_apply_status"].expected == "applied"
+    assert failed["reference_patch_apply_status"].actual == "failed"
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
