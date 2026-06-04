@@ -479,6 +479,14 @@ def test_score_result_directory_records_run_metadata(tmp_path: Path) -> None:
     assert payload["ymir_sha"] == "6e22912f83d57ddae1031e6207d4716171a99be0"
     assert payload["variant"] == "baseline"
     assert payload["harness_version"] == __version__
+    fixture_checksum = payload["fixture_checksum"]
+    assert isinstance(fixture_checksum, str)
+    assert fixture_checksum.startswith("sha256:")
+    assert len(fixture_checksum) == len("sha256:") + 64
+
+    _write_json(cases_dir / "reports" / "results.json", {"generated": True})
+    repeated_payload = score_result_directory(cases_dir, actual_dir).to_json()
+    assert repeated_payload["fixture_checksum"] == fixture_checksum
 
 
 def test_score_result_directory_records_headline_reasons(tmp_path: Path) -> None:
