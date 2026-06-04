@@ -201,6 +201,15 @@ def _write_replay_case(
     requires_source_cache: bool = False,
     reference_patch_mode: str | None = None,
     reference_patch_exists: bool = True,
+    reference_patch_text: str = (
+        "diff --git a/source.c b/source.c\n"
+        "index 4447cd3..c8c45c2 100644\n"
+        "--- a/source.c\n"
+        "+++ b/source.c\n"
+        "@@ -1 +1 @@\n"
+        "-int main(void) { return 0; }\n"
+        "+int main(void) { return 1; }\n"
+    ),
 ) -> None:
     case_id = "RHEL-12345"
     case_type = "cve_backport"
@@ -246,10 +255,7 @@ def _write_replay_case(
             cases_dir / "mock_data" / "triage" / "reference_patches" / f"{case_id}.patch"
         )
         reference_patch_path.parent.mkdir(parents=True, exist_ok=True)
-        reference_patch_path.write_text(
-            "diff --git a/source.c b/source.c\n",
-            encoding="utf-8",
-        )
+        reference_patch_path.write_text(reference_patch_text, encoding="utf-8")
     _write_json(
         cases_dir / "web_cache" / case_id / "manifest.json",
         {
