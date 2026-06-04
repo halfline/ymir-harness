@@ -479,12 +479,82 @@ def test_score_result_directory_records_run_metadata(tmp_path: Path) -> None:
     assert payload["variant"] == "baseline"
 
 
+def test_score_result_directory_records_headline_reasons(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    actual_dir = tmp_path / "actual-results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        package="dnsmasq",
+        case_status="quarantined",
+        case_status_reason="requires human judgment",
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-23456",
+        package="libtiff",
+        case_status="active",
+        ground_truth_confidence="low",
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-34567",
+        package="openssl",
+        case_status="active",
+        answer_leakage="explicit",
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-45678",
+        package="kernel",
+        case_status="active",
+        network_mode="live_non_reproducible",
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-56789",
+        package="zlib",
+        case_status="excluded",
+        case_status_reason="fixture cannot be replayed",
+    )
+    for case_id, package in (
+        ("RHEL-12345", "dnsmasq"),
+        ("RHEL-23456", "libtiff"),
+        ("RHEL-34567", "openssl"),
+        ("RHEL-45678", "kernel"),
+    ):
+        _write_json(
+            actual_dir / f"{case_id}.actual.json",
+            {
+                "case_id": case_id,
+                "resolution": "backport",
+                "package": package,
+            },
+        )
+
+    report = score_result_directory(cases_dir, actual_dir)
+
+    entries = {entry.case_id: entry for entry in report.entries}
+    assert entries["RHEL-12345"].headline_reason == "case_status is quarantined"
+    assert entries["RHEL-23456"].headline_reason == "ground_truth_confidence is low"
+    assert entries["RHEL-34567"].headline_reason == "answer_leakage is explicit"
+    assert entries["RHEL-45678"].headline_reason == "network_mode is live_non_reproducible"
+    assert entries["RHEL-56789"].headline_reason == "case_status is excluded"
+    assert entries["RHEL-56789"].reason == "fixture cannot be replayed"
+    payload_cases = {case["case_id"]: case for case in report.to_json()["cases"]}
+    assert payload_cases["RHEL-12345"]["headline_reason"] == "case_status is quarantined"
+
+
 def _write_expected(
     cases_dir: Path,
     case_id: str,
     *,
     package: str,
     case_status: str,
+    ground_truth_confidence: str = "high",
+    answer_leakage: str = "none",
+    network_mode: str = "replay_only",
+    case_status_reason: str | None = None,
 ) -> None:
     _write_json(
         cases_dir / "expected" / f"{case_id}.expected.json",
@@ -495,10 +565,11 @@ def _write_expected(
             "resolution": "backport",
             "package": package,
             "expected_basis": "merged_mr",
-            "ground_truth_confidence": "high",
-            "answer_leakage": "none",
+            "ground_truth_confidence": ground_truth_confidence,
+            "answer_leakage": answer_leakage,
             "case_status": case_status,
-            "network_mode": "replay_only",
+            "case_status_reason": case_status_reason,
+            "network_mode": network_mode,
         },
     )
 
