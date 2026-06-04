@@ -793,6 +793,21 @@ def _validate_reference_patch_application(
     if not source_targets:
         return
 
+    if any(
+        _reference_patch_applies_to_target(patch_path, target, reverse=True)
+        for target in source_targets
+    ):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="fix_already_present",
+                message="reference patch reverse-applies to pre-fix source tree",
+                case_id=result.case_id,
+                path=str(patch_path),
+            )
+        )
+        return
+
     if any(_reference_patch_applies_to_target(patch_path, target) for target in source_targets):
         return
 
@@ -810,6 +825,8 @@ def _validate_reference_patch_application(
 def _reference_patch_applies_to_target(
     patch_path: Path,
     target: ReferencePatchTarget,
+    *,
+    reverse: bool = False,
 ) -> bool:
     with tempfile.TemporaryDirectory(prefix="ymir-harness-index-") as temp_dir:
         env = os.environ.copy()
@@ -826,8 +843,20 @@ def _reference_patch_applies_to_target(
         if read_tree.returncode != 0:
             return False
 
+        command = [
+            "git",
+            "-C",
+            str(target.repo_path),
+            "apply",
+            "--check",
+            "--cached",
+            str(patch_path),
+        ]
+        if reverse:
+            command.insert(-1, "--reverse")
+
         completed = subprocess.run(
-            ["git", "-C", str(target.repo_path), "apply", "--check", "--cached", str(patch_path)],
+            command,
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
