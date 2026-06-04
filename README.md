@@ -18,6 +18,7 @@ ymir-harness score-result \
   benchmark_cases/expected/RHEL-12345.expected.json \
   reports/RHEL-12345.actual.json
 ymir-harness score-results benchmark_cases/ reports/actual-results/
+ymir-harness compare-results reports/baseline-results.json reports/enhanced-results.json
 ```
 
 The `benchmark` script is an alias for the same CLI:
@@ -40,6 +41,10 @@ Use `--phase 2` once pilot fixtures are ready for stricter metadata checks.
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
 actual-results directory. It writes aggregate JSON to
 `benchmark_cases/reports/results.json` unless `--output` is provided.
+
+`compare-results` reads two aggregate score reports and emits a per-case delta
+table in JSON. A headline regression or missing candidate case returns a nonzero
+exit status.
 
 ## Development
 
