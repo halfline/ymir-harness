@@ -37,6 +37,11 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
             _replay_violations(actual),
             "actual result reports fixture replay violations",
         ),
+        _hard_fail_gate(
+            "unrelated_source_changes",
+            _unrelated_source_changes(actual),
+            "actual result reports unrelated source changes",
+        ),
         _required_artifacts_metric(expected, actual),
         _compare("case_id", expected.get("case_id"), actual.get("case_id") or case_id),
         _compare(
@@ -179,6 +184,10 @@ def _unsafe_operations(actual: Mapping[str, Any]) -> Any:
 
 def _replay_violations(actual: Mapping[str, Any]) -> Any:
     return _actual_result_field(actual, "replay_violations")
+
+
+def _unrelated_source_changes(actual: Mapping[str, Any]) -> Any:
+    return _actual_result_field(actual, "unrelated_source_changes")
 
 
 def _required_artifacts_metric(
