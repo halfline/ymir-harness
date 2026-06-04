@@ -146,6 +146,8 @@ whether the reference patch applied as expected.
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
 status.
+Comparison output carries `headline_reason` for non-headline cases when the
+aggregate inputs provide it.
 
 ## Development
 
