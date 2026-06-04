@@ -14,6 +14,10 @@ def default_results_dir(cases_dir: Path, run_id: str) -> Path:
     return cases_dir / "reports" / "runs" / run_id
 
 
+def actual_result_path(results_dir: Path, case_id: str, repetition: int) -> Path:
+    return results_dir / f"repeat-{repetition}" / "actual-results" / f"{case_id}.actual.json"
+
+
 def build_run_report(
     cases_dir: Path,
     results_dir: Path,
@@ -37,6 +41,7 @@ def build_run_report(
                 case.case_type,
                 case.status,
                 repetition,
+                results_dir,
             )
             for repetition in range(1, repeat + 1)
             for case in validation_report.cases
@@ -57,6 +62,7 @@ def _run_case_result(
     case_type: str | None,
     validation_status: str,
     repetition: int,
+    results_dir: Path,
 ) -> RunCaseResult:
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
     if validation_status == "skipped":
@@ -75,5 +81,6 @@ def _run_case_result(
         status="not_run",
         repetition=repetition,
         expected_path=expected_path if expected_path.is_file() else None,
+        actual_path=actual_result_path(results_dir, case_id, repetition),
         reason=RUNNER_NOT_WIRED_REASON,
     )
