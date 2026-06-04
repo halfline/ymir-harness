@@ -257,6 +257,7 @@ class ScoreCollectionReport:
     ymir_sha: str | None = None
     variant: str | None = None
     harness_version: str | None = None
+    fixture_checksum: str | None = None
 
     @property
     def has_headline_failures(self) -> bool:
@@ -294,6 +295,7 @@ class ScoreCollectionReport:
             "ymir_sha": self.ymir_sha,
             "variant": self.variant,
             "harness_version": self.harness_version,
+            "fixture_checksum": self.fixture_checksum,
             "cases_dir": str(self.cases_dir),
             "actual_results_dir": str(self.actual_results_dir),
             "summary": self.summary(),

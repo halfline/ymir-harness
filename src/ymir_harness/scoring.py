@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -160,6 +161,7 @@ def score_result_directory(
         ymir_sha=ymir_sha,
         variant=variant,
         harness_version=__version__,
+        fixture_checksum=_fixture_checksum(cases_dir),
     )
 
 
@@ -326,6 +328,32 @@ def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> Score
 
 def _expected_result_files(cases_dir: Path) -> list[Path]:
     return sorted((cases_dir / "expected").glob("*.expected.json"))
+
+
+def _fixture_checksum(cases_dir: Path) -> str:
+    digest = hashlib.sha256()
+    for path in _fixture_checksum_files(cases_dir):
+        relative_path = path.relative_to(cases_dir).as_posix()
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _fixture_checksum_files(cases_dir: Path) -> list[Path]:
+    paths: list[Path] = []
+    cases_yaml = cases_dir / "cases.yaml"
+    if cases_yaml.is_file():
+        paths.append(cases_yaml)
+
+    for directory_name in ("expected", "jiras", "mock_data", "web_cache", "source_cache"):
+        directory = cases_dir / directory_name
+        if not directory.is_dir():
+            continue
+        paths.extend(path for path in directory.rglob("*") if path.is_file())
+
+    return sorted(paths, key=lambda path: path.relative_to(cases_dir).as_posix())
 
 
 def _find_actual_result_file(actual_results_dir: Path, case_id: str) -> Path | None:
