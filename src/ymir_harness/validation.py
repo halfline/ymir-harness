@@ -78,6 +78,7 @@ def _validate_case(cases_dir: Path, case_id: str, phase: int) -> CaseValidationR
         result.case_status = _string_or_none(expected.get("case_status"))
         _validate_network_policy(cases_dir, expected, result, phase)
         _validate_source_cache(cases_dir, expected, result, phase)
+        _validate_reference_patch(cases_dir, expected, result, phase)
 
     mock_paths = sorted((cases_dir / "mock_data").glob(f"*/{case_id}.json"))
     _validate_mock_fixtures(mock_paths, expected, result, phase)
@@ -460,6 +461,43 @@ def _validate_source_cache(
 
 def _implementation_case_requires_source_cache(expected: Mapping[str, Any]) -> bool:
     if expected.get("requires_source_cache") is False:
+        return False
+    return expected.get("resolution") in {"backport", "rebase", "rebuild"}
+
+
+def _validate_reference_patch(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+    phase: int,
+) -> None:
+    if phase < 2 or not _implementation_case_requires_reference_patch(expected):
+        return
+
+    patch_paths = sorted(
+        (cases_dir / "mock_data").glob(
+            f"*/reference_patches/{result.case_id}.patch",
+        )
+    )
+    if patch_paths:
+        return
+
+    patch_pattern = (
+        cases_dir / "mock_data" / "*" / "reference_patches" / (f"{result.case_id}.patch")
+    )
+    result.issues.append(
+        ValidationIssue(
+            severity="error",
+            category="reference_patch_invalid",
+            message="merged_mr implementation case must include reference patch",
+            case_id=result.case_id,
+            path=str(patch_pattern),
+        )
+    )
+
+
+def _implementation_case_requires_reference_patch(expected: Mapping[str, Any]) -> bool:
+    if expected.get("expected_basis") != "merged_mr":
         return False
     return expected.get("resolution") in {"backport", "rebase", "rebuild"}
 
