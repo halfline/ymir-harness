@@ -70,6 +70,9 @@ Expected results may declare `touched_files`. Scoring compares that file list
 with `touched_files` or `changed_files` in the actual result and fails on
 missing or unexpected paths.
 
+Scoring expects `unrelated_source_changes` in an actual result to be empty. Use
+that field for source paths changed outside the expected implementation scope.
+
 Expected results may declare `spec_patches`. Scoring compares that list with
 `spec_patches` in the actual result to check expected RPM spec patch
 declarations.
