@@ -23,6 +23,7 @@ def build_run_report(
     variant: str,
     ymir_sha: str | None = None,
     features: Sequence[str] = (),
+    repeat: int = 1,
 ) -> RunReport:
     cases_dir = cases_dir.resolve()
     results_dir = results_dir.resolve()
@@ -30,7 +31,14 @@ def build_run_report(
         cases_dir=cases_dir,
         results_dir=results_dir,
         entries=[
-            _run_case_result(cases_dir, case.case_id, case.case_type, case.status)
+            _run_case_result(
+                cases_dir,
+                case.case_id,
+                case.case_type,
+                case.status,
+                repetition,
+            )
+            for repetition in range(1, repeat + 1)
             for case in validation_report.cases
         ],
         run_id=run_id,
@@ -39,6 +47,7 @@ def build_run_report(
         harness_version=__version__,
         fixture_checksum=_fixture_checksum(cases_dir),
         features=list(features),
+        repeat=repeat,
     )
 
 
@@ -47,6 +56,7 @@ def _run_case_result(
     case_id: str,
     case_type: str | None,
     validation_status: str,
+    repetition: int,
 ) -> RunCaseResult:
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
     if validation_status == "skipped":
@@ -54,6 +64,7 @@ def _run_case_result(
             case_id=case_id,
             case_type=case_type,
             status="skipped",
+            repetition=repetition,
             expected_path=expected_path if expected_path.is_file() else None,
             reason="case is excluded by fixture metadata",
         )
@@ -62,6 +73,7 @@ def _run_case_result(
         case_id=case_id,
         case_type=case_type,
         status="not_run",
+        repetition=repetition,
         expected_path=expected_path if expected_path.is_file() else None,
         reason=RUNNER_NOT_WIRED_REASON,
     )

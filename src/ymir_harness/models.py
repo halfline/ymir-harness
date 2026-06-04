@@ -323,6 +323,7 @@ class RunCaseResult:
     case_id: str
     case_type: str | None
     status: RunCaseStatus
+    repetition: int = 1
     expected_path: Path | None = None
     actual_path: Path | None = None
     reason: str | None = None
@@ -332,6 +333,7 @@ class RunCaseResult:
             "case_id": self.case_id,
             "case_type": self.case_type,
             "status": self.status,
+            "repetition": self.repetition,
             "expected_path": str(self.expected_path) if self.expected_path else None,
             "actual_path": str(self.actual_path) if self.actual_path else None,
         }
@@ -351,6 +353,7 @@ class RunReport:
     harness_version: str | None = None
     fixture_checksum: str | None = None
     features: list[str] = field(default_factory=list)
+    repeat: int = 1
 
     @property
     def has_failures(self) -> bool:
@@ -379,6 +382,7 @@ class RunReport:
             "harness_version": self.harness_version,
             "fixture_checksum": self.fixture_checksum,
             "features": self.features,
+            "repeat": self.repeat,
             "cases_dir": str(self.cases_dir),
             "results_dir": str(self.results_dir),
             "summary": self.summary(),

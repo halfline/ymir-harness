@@ -97,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id", help="benchmark run identifier; defaults to VARIANT")
     run.add_argument("--ymir-sha", help="record the benchmarked Ymir git SHA")
     run.add_argument(
+        "--repeat",
+        type=_positive_int,
+        default=1,
+        help="number of repetitions to record for each runnable case",
+    )
+    run.add_argument(
         "--feature",
         dest="features",
         action="append",
@@ -227,6 +233,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         variant=args.variant,
         ymir_sha=args.ymir_sha,
         features=args.features,
+        repeat=args.repeat,
     )
     output_path = args.output or results_dir / "run.json"
     payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
@@ -246,6 +253,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
         sys.stdout.write(f"run report written to {output_path}\n")
 
     return 1 if report.has_failures else 0
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        msg = f"invalid positive integer: {value}"
+        raise argparse.ArgumentTypeError(msg) from exc
+    if parsed < 1:
+        msg = f"invalid positive integer: {value}"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
 
 
 def _cmd_compare_results(args: argparse.Namespace) -> int:
