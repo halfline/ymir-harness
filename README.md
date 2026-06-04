@@ -46,6 +46,8 @@ Phase 2 also checks that an expected `target_branch` or `fix_version` is
 declared by a mock repo `branch` or `zstream_override` value.
 Phase 2 requires implementation cases to include `source_cache/CASE_ID/` unless
 the expected result sets `requires_source_cache` to `false`.
+When expected metadata declares `reference_patch_mode`, Phase 2 accepts
+`applies`, `scope_only`, or `semantic_reference`.
 
 `score-results` reads every `benchmark_cases/expected/*.expected.json` file and
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
