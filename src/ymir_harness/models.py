@@ -58,6 +58,15 @@ IssueSeverity = Literal["error", "warning"]
 CaseValidationStatus = Literal["valid", "invalid", "warning-only", "skipped"]
 ScoreMetricStatus = Literal["pass", "fail", "skipped"]
 ScoreCollectionStatus = Literal["passed", "failed", "missing", "skipped"]
+ComparisonDelta = Literal[
+    "win",
+    "regression",
+    "unchanged_pass",
+    "unchanged_fail",
+    "missing_in_baseline",
+    "missing_in_candidate",
+    "non_headline",
+]
 
 
 @dataclass(frozen=True)
@@ -275,6 +284,73 @@ class ScoreCollectionReport:
             "schema_version": SCHEMA_VERSION,
             "cases_dir": str(self.cases_dir),
             "actual_results_dir": str(self.actual_results_dir),
+            "summary": self.summary(),
+            "cases": [entry.to_json() for entry in self.entries],
+        }
+
+
+@dataclass(frozen=True)
+class ComparisonEntry:
+    case_id: str
+    case_type: str | None
+    headline: bool
+    baseline_status: str | None
+    candidate_status: str | None
+    delta: ComparisonDelta
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "case_type": self.case_type,
+            "headline": self.headline,
+            "baseline_status": self.baseline_status,
+            "candidate_status": self.candidate_status,
+            "delta": self.delta,
+        }
+
+
+@dataclass
+class ComparisonReport:
+    baseline_path: Path
+    candidate_path: Path
+    entries: list[ComparisonEntry]
+
+    @property
+    def has_headline_regressions(self) -> bool:
+        return any(
+            entry.headline and entry.delta in {"regression", "missing_in_candidate"}
+            for entry in self.entries
+        )
+
+    def summary(self) -> dict[str, int | bool]:
+        counts: dict[str, int | bool] = {
+            "total": len(self.entries),
+            "headline_total": 0,
+            "wins": 0,
+            "regressions": 0,
+            "unchanged_pass": 0,
+            "unchanged_fail": 0,
+            "missing_in_baseline": 0,
+            "missing_in_candidate": 0,
+            "non_headline": 0,
+            "has_headline_regressions": self.has_headline_regressions,
+        }
+        for entry in self.entries:
+            if entry.delta == "win":
+                counts["wins"] = int(counts["wins"]) + 1
+            elif entry.delta == "regression":
+                counts["regressions"] = int(counts["regressions"]) + 1
+            else:
+                counts[entry.delta] = int(counts[entry.delta]) + 1
+            if entry.headline:
+                counts["headline_total"] = int(counts["headline_total"]) + 1
+        return counts
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "baseline_path": str(self.baseline_path),
+            "candidate_path": str(self.candidate_path),
             "summary": self.summary(),
             "cases": [entry.to_json() for entry in self.entries],
         }
