@@ -63,6 +63,8 @@ Phase 2 also requires a touched-file list to be extractable from each reference
 patch.
 When `reference_patch_mode` is `applies`, the reference patch must apply to a
 local mock repo at `pre_fix_ref`.
+It must not reverse-apply to `pre_fix_ref`, which indicates the fix is already
+present.
 
 `score-results` reads every `benchmark_cases/expected/*.expected.json` file and
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
