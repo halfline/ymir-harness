@@ -80,6 +80,8 @@ actual-results directory. It writes aggregate JSON to
 `benchmark_cases/reports/results.json` unless `--output` is provided. Use
 `--run-id`, `--ymir-sha`, and `--variant` to stamp the aggregate report with
 benchmark run metadata.
+Non-headline aggregate entries include `headline_reason` when case metadata
+excludes them from headline correctness counts.
 
 Scoring treats any `unsafe_operations` entries in an actual result as a hard
 failure gate. Use that field for blocked write attempts such as Jira mutation,
