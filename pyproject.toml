@@ -8,6 +8,9 @@ dynamic = ["version"]
 description = "Fixture validation and deterministic scoring for Ymir benchmark runs"
 readme = "README.md"
 requires-python = ">=3.12"
+dependencies = [
+  "PyYAML>=6.0",
+]
 license = "MIT"
 authors = [
   { name = "Ymir Harness contributors" },

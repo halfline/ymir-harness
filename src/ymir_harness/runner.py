@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from ymir_harness import __version__
 from ymir_harness.models import RunCaseResult, RunReport, ValidationIssue, ValidationReport
@@ -16,6 +19,54 @@ def default_results_dir(cases_dir: Path, run_id: str) -> Path:
 
 def actual_result_path(results_dir: Path, case_id: str, repetition: int) -> Path:
     return results_dir / f"repeat-{repetition}" / "actual-results" / f"{case_id}.actual.json"
+
+
+def load_case_manifest(cases_dir: Path) -> tuple[list[str], list[ValidationIssue]]:
+    manifest_path = cases_dir / "cases.yaml"
+    if not manifest_path.is_file():
+        return [], []
+
+    try:
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        return [], [_manifest_issue(manifest_path, f"invalid cases.yaml: {exc}")]
+
+    if data is None:
+        return [], []
+
+    entries = data.get("cases") if isinstance(data, Mapping) else data
+    if not isinstance(entries, list):
+        return [], [_manifest_issue(manifest_path, "cases.yaml must contain a list")]
+
+    case_ids = []
+    issues = []
+    for index, entry in enumerate(entries):
+        case_id = _manifest_case_id(entry)
+        if case_id is None:
+            issues.append(
+                _manifest_issue(
+                    manifest_path,
+                    f"cases.yaml entry {index} must be a case id or object with case_id",
+                )
+            )
+            continue
+        case_ids.append(case_id)
+
+    return case_ids, issues
+
+
+def append_global_issues(
+    report: ValidationReport,
+    issues: Sequence[ValidationIssue],
+) -> ValidationReport:
+    if not issues:
+        return report
+    return ValidationReport(
+        cases_dir=report.cases_dir,
+        phase=report.phase,
+        cases=report.cases,
+        global_issues=[*report.global_issues, *issues],
+    )
 
 
 def select_validation_cases(
@@ -48,6 +99,27 @@ def select_validation_cases(
         phase=report.phase,
         cases=selected_cases,
         global_issues=global_issues,
+    )
+
+
+def _manifest_case_id(entry: Any) -> str | None:
+    if isinstance(entry, str):
+        case_id = entry.strip()
+        return case_id or None
+    if isinstance(entry, Mapping):
+        value = entry.get("case_id")
+        if isinstance(value, str):
+            case_id = value.strip()
+            return case_id or None
+    return None
+
+
+def _manifest_issue(path: Path, message: str) -> ValidationIssue:
+    return ValidationIssue(
+        severity="error",
+        category="schema_mismatch",
+        message=message,
+        path=str(path),
     )
 
 
