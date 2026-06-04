@@ -151,6 +151,12 @@ Actual results may include advisory diagnostics such as `runtime_seconds`,
 `rationale_quality`, or `llm_judge_notes`. Scoring reports carry these as
 `advisory_metrics` without using them for pass/fail status.
 
+Phase 3 runner reports use `run_id`, `variant`, optional `ymir_sha`,
+`harness_version`, `fixture_checksum`, and `features` metadata. Each case entry
+includes `case_id`, `case_type`, `status`, optional `expected_path`, optional
+`actual_path`, and optional `reason`. Initial case status values are `not_run`,
+`passed`, `failed`, `skipped`, and `unsupported`.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
