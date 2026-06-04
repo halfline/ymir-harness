@@ -482,6 +482,18 @@ def _validate_source_cache(
                 path=str(upstream_dir),
             )
         )
+        return
+
+    if not any(upstream_dir.iterdir()):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="implementation case source_cache upstream directory is empty",
+                case_id=result.case_id,
+                path=str(upstream_dir),
+            )
+        )
 
 
 def _implementation_case_requires_source_cache(expected: Mapping[str, Any]) -> bool:
