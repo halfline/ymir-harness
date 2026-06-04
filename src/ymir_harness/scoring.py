@@ -111,6 +111,11 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
             _actual_result_field(actual, "dependency_issues"),
         ),
         _compare_list(
+            "sibling_issues",
+            expected.get("sibling_issues"),
+            _actual_result_field(actual, "sibling_issues"),
+        ),
+        _compare_list(
             "fix_sources",
             expected.get("fix_sources"),
             _actual_result_field(actual, "fix_sources"),
