@@ -51,6 +51,8 @@ When expected metadata declares `reference_patch_mode`, Phase 2 accepts
 Phase 2 requires `merged_mr` implementation cases to include
 `mock_data/*/reference_patches/CASE_ID.patch`.
 Reference patch files must parse as git patches.
+Phase 2 also requires a touched-file list to be extractable from each reference
+patch.
 
 `score-results` reads every `benchmark_cases/expected/*.expected.json` file and
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
