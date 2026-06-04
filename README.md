@@ -45,6 +45,7 @@ Use `--phase 2` once pilot fixtures are ready for stricter metadata checks.
 Phase 2 also checks that an expected `target_branch` or `fix_version` is
 declared by a mock repo `branch` or `zstream_override` value.
 Replay web cache manifests must list expected `patch_urls` in `required_urls`.
+`network_denied` cases must not declare expected `patch_urls`.
 Phase 2 requires implementation cases to include `source_cache/CASE_ID/` unless
 the expected result sets `requires_source_cache` to `false`.
 Implementation source caches must include `source_cache/CASE_ID/upstream/` with
