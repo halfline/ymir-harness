@@ -86,6 +86,38 @@ def test_score_result_directory_collects_headline_results(tmp_path: Path) -> Non
     assert [entry.status for entry in report.entries] == ["passed", "skipped"]
 
 
+def test_score_result_directory_records_run_metadata(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    actual_dir = tmp_path / "actual-results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        package="dnsmasq",
+        case_status="active",
+    )
+    _write_json(
+        actual_dir / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "resolution": "backport",
+            "package": "dnsmasq",
+        },
+    )
+
+    report = score_result_directory(
+        cases_dir,
+        actual_dir,
+        run_id="baseline-2026-06-04T120000Z",
+        ymir_sha="6e22912f83d57ddae1031e6207d4716171a99be0",
+        variant="baseline",
+    )
+
+    payload = report.to_json()
+    assert payload["run_id"] == "baseline-2026-06-04T120000Z"
+    assert payload["ymir_sha"] == "6e22912f83d57ddae1031e6207d4716171a99be0"
+    assert payload["variant"] == "baseline"
+
+
 def _write_expected(
     cases_dir: Path,
     case_id: str,
