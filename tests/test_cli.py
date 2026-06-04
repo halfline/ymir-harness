@@ -140,6 +140,8 @@ def test_cli_run_writes_placeholder_report(
                 "6e22912f83d57ddae1031e6207d4716171a99be0",
                 "--feature",
                 "YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK",
+                "--repeat",
+                "3",
                 "--output",
                 str(output_path),
                 "--json",
@@ -156,10 +158,12 @@ def test_cli_run_writes_placeholder_report(
     assert output["ymir_sha"] == "6e22912f83d57ddae1031e6207d4716171a99be0"
     assert output["harness_version"] == __version__
     assert output["features"] == ["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"]
+    assert output["repeat"] == 3
     assert output["fixture_checksum"].startswith("sha256:")
-    assert output["summary"]["not_run"] == 1
-    assert output["cases"][0]["status"] == "not_run"
-    assert output["cases"][0]["reason"] == "workflow adapters are not wired yet"
+    assert output["summary"]["not_run"] == 3
+    assert [case["repetition"] for case in output["cases"]] == [1, 2, 3]
+    assert {case["status"] for case in output["cases"]} == {"not_run"}
+    assert {case["reason"] for case in output["cases"]} == {"workflow adapters are not wired yet"}
     assert (cases_dir / "reports" / "fixture-validation.json").is_file()
 
 

@@ -15,6 +15,7 @@ def test_run_report_serializes_case_results() -> None:
         harness_version="0.1.0",
         fixture_checksum="sha256:" + "1" * 64,
         features=["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"],
+        repeat=2,
         entries=[
             RunCaseResult(
                 case_id="RHEL-12345",
@@ -27,6 +28,7 @@ def test_run_report_serializes_case_results() -> None:
                 case_id="RHEL-23456",
                 case_type="rebase",
                 status="unsupported",
+                repetition=2,
                 expected_path=Path("/tmp/benchmark_cases/expected/RHEL-23456.expected.json"),
                 actual_path=Path("/tmp/reports/baseline/RHEL-23456.actual.json"),
                 reason="workflow adapter is missing",
@@ -52,8 +54,11 @@ def test_run_report_serializes_case_results() -> None:
     assert payload["harness_version"] == "0.1.0"
     assert payload["fixture_checksum"] == "sha256:" + "1" * 64
     assert payload["features"] == ["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"]
+    assert payload["repeat"] == 2
     assert payload["cases_dir"] == "/tmp/benchmark_cases"
     assert payload["results_dir"] == "/tmp/reports/baseline"
+    assert payload["cases"][0]["repetition"] == 1
+    assert payload["cases"][1]["repetition"] == 2
     assert payload["cases"][0]["actual_path"] is None
     assert payload["cases"][0]["reason"] == "runner is not wired yet"
     assert payload["cases"][1]["actual_path"] == "/tmp/reports/baseline/RHEL-23456.actual.json"
