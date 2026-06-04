@@ -90,6 +90,10 @@ Expected results may declare `reference_patch_parse_status`. Scoring compares
 that token with `reference_patch_parse_status` in the actual result to check
 whether the reference patch parsed as expected.
 
+Expected results may declare `reference_patch_apply_status`. Scoring compares
+that token with `reference_patch_apply_status` in the actual result to check
+whether the reference patch applied as expected.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
