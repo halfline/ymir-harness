@@ -403,6 +403,19 @@ def _validate_web_cache_manifest(
         )
         recorded_files = {}
 
+    required_url_set = {url for url in required_urls if isinstance(url, str)}
+    for url in _expected_patch_urls(expected):
+        if url not in required_url_set:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"expected patch URL is missing from required_urls: {url}",
+                    case_id=result.case_id,
+                    path=str(manifest_path),
+                )
+            )
+
     for url in required_urls:
         if not isinstance(url, str) or not url:
             result.issues.append(
@@ -450,6 +463,14 @@ def _validate_web_cache_manifest(
                     path=str(recorded_path),
                 )
             )
+
+
+def _expected_patch_urls(expected: Mapping[str, Any]) -> list[str]:
+    patch_urls = expected.get("patch_urls")
+    if not isinstance(patch_urls, list):
+        return []
+
+    return [url for url in patch_urls if isinstance(url, str) and url]
 
 
 def _validate_source_cache(
