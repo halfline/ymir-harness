@@ -162,6 +162,20 @@ def test_cli_run_writes_placeholder_report(
     assert output["fixture_checksum"].startswith("sha256:")
     assert output["summary"]["not_run"] == 3
     assert [case["repetition"] for case in output["cases"]] == [1, 2, 3]
+    assert [case["actual_path"] for case in output["cases"]] == [
+        str(
+            (
+                cases_dir
+                / "reports"
+                / "runs"
+                / "baseline-1"
+                / f"repeat-{repetition}"
+                / "actual-results"
+                / "RHEL-12345.actual.json"
+            ).resolve()
+        )
+        for repetition in (1, 2, 3)
+    ]
     assert {case["status"] for case in output["cases"]} == {"not_run"}
     assert {case["reason"] for case in output["cases"]} == {"workflow adapters are not wired yet"}
     assert (cases_dir / "reports" / "fixture-validation.json").is_file()
