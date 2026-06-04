@@ -50,7 +50,8 @@ the expected result sets `requires_source_cache` to `false`.
 Implementation source caches must include `source_cache/CASE_ID/upstream/` with
 a git clone or source archive.
 Upstream source archive files must be readable.
-Implementation source caches must include a non-empty `source_cache/CASE_ID/lookaside/`.
+Implementation source caches must include artifact files under
+`source_cache/CASE_ID/lookaside/`.
 When expected metadata declares `reference_patch_mode`, Phase 2 accepts
 `applies`, `scope_only`, or `semantic_reference`.
 Merged MR implementation cases must declare `reference_patch_mode`.
