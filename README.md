@@ -48,6 +48,7 @@ Phase 2 requires implementation cases to include `source_cache/CASE_ID/` unless
 the expected result sets `requires_source_cache` to `false`.
 When expected metadata declares `reference_patch_mode`, Phase 2 accepts
 `applies`, `scope_only`, or `semantic_reference`.
+Merged MR implementation cases must declare `reference_patch_mode`.
 Phase 2 requires `merged_mr` implementation cases to include
 `mock_data/*/reference_patches/CASE_ID.patch`.
 Reference patch files must parse as git patches.
