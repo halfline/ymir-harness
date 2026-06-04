@@ -32,6 +32,20 @@ from ymir_harness.models import (
 )
 
 
+SOURCE_ARCHIVE_SUFFIXES = (
+    ".tar",
+    ".tar.gz",
+    ".tgz",
+    ".tar.bz2",
+    ".tbz2",
+    ".tar.xz",
+    ".txz",
+    ".tar.zst",
+    ".tzst",
+    ".zip",
+)
+
+
 @dataclass(frozen=True)
 class ReferencePatchTarget:
     repo_path: Path
@@ -495,6 +509,20 @@ def _validate_source_cache(
             )
         )
 
+    if not _contains_upstream_source(upstream_dir):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message=(
+                    "implementation case source_cache upstream must include "
+                    "a git clone or source archive"
+                ),
+                case_id=result.case_id,
+                path=str(upstream_dir),
+            )
+        )
+
     lookaside_dir = source_cache_dir / "lookaside"
     if not lookaside_dir.is_dir():
         result.issues.append(
@@ -518,6 +546,32 @@ def _validate_source_cache(
                 path=str(lookaside_dir),
             )
         )
+
+
+def _contains_upstream_source(upstream_dir: Path) -> bool:
+    if _is_git_checkout(upstream_dir) or _is_bare_git_repository(upstream_dir):
+        return True
+
+    for child in upstream_dir.iterdir():
+        if child.is_file() and _is_source_archive(child):
+            return True
+        if child.is_dir() and (_is_git_checkout(child) or _is_bare_git_repository(child)):
+            return True
+
+    return False
+
+
+def _is_source_archive(path: Path) -> bool:
+    name = path.name.lower()
+    return any(name.endswith(suffix) for suffix in SOURCE_ARCHIVE_SUFFIXES)
+
+
+def _is_git_checkout(path: Path) -> bool:
+    return (path / ".git").exists()
+
+
+def _is_bare_git_repository(path: Path) -> bool:
+    return (path / "HEAD").is_file() and (path / "objects").is_dir()
 
 
 def _implementation_case_requires_source_cache(expected: Mapping[str, Any]) -> bool:
