@@ -64,6 +64,7 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
             normalized_actual["target_branch"],
             optional=True,
         ),
+        _touched_files_metric(expected, actual),
         _compare_list("cve_ids", expected.get("cve_ids"), normalized_actual["cve_ids"]),
         _compare_list("patch_urls", expected.get("patch_urls"), normalized_actual["patch_urls"]),
     ]
@@ -168,6 +169,42 @@ def _required_artifacts_metric(
         actual=generated,
         notes=f"missing required artifacts: {', '.join(missing)}" if missing else None,
     )
+
+
+def _touched_files_metric(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreMetric:
+    expected_files = _normalize_file_list(expected.get("touched_files"))
+    actual_files = _normalize_file_list(
+        _actual_result_field(actual, "touched_files")
+        or _actual_result_field(actual, "changed_files")
+    )
+    if not expected_files:
+        return ScoreMetric(
+            name="touched_files",
+            status="skipped",
+            expected=expected_files,
+            actual=actual_files,
+            notes="expected result declares no touched file scope",
+        )
+
+    missing = [path for path in expected_files if path not in actual_files]
+    unexpected = [path for path in actual_files if path not in expected_files]
+    notes = _file_scope_notes(missing, unexpected)
+    return ScoreMetric(
+        name="touched_files",
+        status="pass" if not notes else "fail",
+        expected=expected_files,
+        actual=actual_files,
+        notes=notes,
+    )
+
+
+def _file_scope_notes(missing: list[str], unexpected: list[str]) -> str | None:
+    parts = []
+    if missing:
+        parts.append(f"missing touched files: {', '.join(missing)}")
+    if unexpected:
+        parts.append(f"unexpected touched files: {', '.join(unexpected)}")
+    return "; ".join(parts) if parts else None
 
 
 def _actual_result_field(actual: Mapping[str, Any], name: str) -> Any:
@@ -292,6 +329,10 @@ def _normalize_list(value: Any) -> list[str]:
     if isinstance(value, list | tuple | set):
         return [str(item) for item in value if item is not None]
     return [str(value)]
+
+
+def _normalize_file_list(value: Any) -> list[str]:
+    return sorted(_normalize_list(value))
 
 
 def _normalize_token(value: Any) -> str | None:
