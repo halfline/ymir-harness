@@ -351,9 +351,9 @@ def _validate_network_policy(
         if web_manifest.exists():
             result.issues.append(
                 ValidationIssue(
-                    severity="warning",
+                    severity="error",
                     category="network_policy_invalid",
-                    message="network_denied case has a web cache manifest that will not be used",
+                    message="network_denied case must not include web_cache manifest",
                     case_id=result.case_id,
                     path=str(web_manifest),
                 )
