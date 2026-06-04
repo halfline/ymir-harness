@@ -462,6 +462,42 @@ def test_phase2_reports_unreadable_source_cache_lookaside_artifact(
     )
 
 
+def test_phase2_reports_missing_required_source_cache_file(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        requires_source_cache=True,
+    )
+    upstream_dir = cases_dir / "source_cache" / "RHEL-12345" / "upstream"
+    upstream_dir.mkdir(parents=True)
+    (upstream_dir / "source.tar.gz").write_text("cached source\n", encoding="utf-8")
+    lookaside_dir = cases_dir / "source_cache" / "RHEL-12345" / "lookaside"
+    lookaside_dir.mkdir()
+    (lookaside_dir / "source.tar.gz").write_text("cached source\n", encoding="utf-8")
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    expected["required_source_cache_files"] = [
+        "lookaside/source.tar.gz",
+        "upstream/missing.tar.gz",
+    ]
+    _write_json(expected_path, expected)
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "source_cache_incomplete"
+        and "required source cache file is missing" in issue.message
+        and issue.path == str(upstream_dir / "missing.tar.gz")
+        for issue in issues
+    )
+
+
 def test_phase2_reports_source_cache_checksum_mismatch(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
