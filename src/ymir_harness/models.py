@@ -39,6 +39,7 @@ ALLOWED_GROUND_TRUTH_CONFIDENCE = {"high", "medium", "low"}
 ALLOWED_ANSWER_LEAKAGE = {"none", "partial", "explicit"}
 ALLOWED_CASE_STATUSES = {"active", "quarantined", "excluded"}
 ALLOWED_NETWORK_MODES = {"replay_only", "network_denied", "live_non_reproducible"}
+ALLOWED_REFERENCE_PATCH_MODES = {"applies", "scope_only", "semantic_reference"}
 
 FAILURE_CATEGORIES = {
     "missing_metadata",
