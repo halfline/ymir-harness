@@ -176,6 +176,30 @@ def test_score_case_reports_touched_file_scope_failures() -> None:
     assert failed["touched_files"].notes == "unexpected touched files: README.md"
 
 
+def test_score_case_reports_spec_patch_failures() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "spec_patches": ["Patch0001: fix-cve.patch"],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "data": {"spec_patches": []},
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["spec_patches"].expected == ["Patch0001: fix-cve.patch"]
+    assert failed["spec_patches"].actual == []
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
