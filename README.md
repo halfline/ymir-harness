@@ -54,6 +54,10 @@ Scoring treats any `unsafe_operations` entries in an actual result as a hard
 failure gate. Use that field for blocked write attempts such as Jira mutation,
 GitLab push, or build-system submission calls captured during a run.
 
+Scoring also treats any `replay_violations` entries as a hard failure gate. Use
+that field for unrecorded external fetches or replay cache misses reported by
+the replay layer.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
