@@ -18,7 +18,10 @@ ymir-harness score-result \
   benchmark_cases/expected/RHEL-12345.expected.json \
   reports/RHEL-12345.actual.json
 ymir-harness score-results benchmark_cases/ reports/actual-results/
-ymir-harness compare-results reports/baseline-results.json reports/enhanced-results.json
+ymir-harness compare-results \
+  reports/baseline-results.json \
+  reports/enhanced-results.json \
+  --markdown-output reports/comparison.md
 ```
 
 The `benchmark` script is an alias for the same CLI:
@@ -43,8 +46,9 @@ actual-results directory. It writes aggregate JSON to
 `benchmark_cases/reports/results.json` unless `--output` is provided.
 
 `compare-results` reads two aggregate score reports and emits a per-case delta
-table in JSON. A headline regression or missing candidate case returns a nonzero
-exit status.
+table in JSON. Use `--markdown-output` to also write a human-readable comparison
+report. A headline regression or missing candidate case returns a nonzero exit
+status.
 
 ## Development
 
