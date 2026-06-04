@@ -86,6 +86,10 @@ Expected results may declare `prep_result`. Scoring compares that token with
 `prep_result` in the actual result to check local preparation outcomes before
 implementation cases build.
 
+Expected results may declare `reference_patch_parse_status`. Scoring compares
+that token with `reference_patch_parse_status` in the actual result to check
+whether the reference patch parsed as expected.
+
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
 report. A headline regression or missing candidate case returns a nonzero exit
