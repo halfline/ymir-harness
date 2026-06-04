@@ -449,6 +449,7 @@ def _validate_mock_fixtures(
             _require_equal(
                 config.get("case_type"), expected_case_type, "case_type", mock_path, result
             )
+        branches_seen.update(_zstream_override_branches(config))
 
         repos = config.get("repos")
         if not isinstance(repos, list) or not repos:
@@ -536,6 +537,13 @@ def _validate_mock_repo_entry(
         _validate_local_pre_fix_ref(remote_url, pre_fix_ref, mock_path, result)
 
     return packages_seen, branches_seen
+
+
+def _zstream_override_branches(config: Mapping[str, Any]) -> set[str]:
+    override = config.get("zstream_override")
+    if not isinstance(override, Mapping):
+        return set()
+    return {value for value in override.values() if isinstance(value, str) and value}
 
 
 def _validate_local_pre_fix_ref(
