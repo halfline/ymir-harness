@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ymir_harness import __version__
 from ymir_harness.scoring import score_case, score_result_directory
 
 
@@ -477,6 +478,7 @@ def test_score_result_directory_records_run_metadata(tmp_path: Path) -> None:
     assert payload["run_id"] == "baseline-2026-06-04T120000Z"
     assert payload["ymir_sha"] == "6e22912f83d57ddae1031e6207d4716171a99be0"
     assert payload["variant"] == "baseline"
+    assert payload["harness_version"] == __version__
 
 
 def test_score_result_directory_records_headline_reasons(tmp_path: Path) -> None:
