@@ -106,6 +106,11 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
         ),
         _compare_list("cve_ids", expected.get("cve_ids"), normalized_actual["cve_ids"]),
         _compare_list(
+            "dependency_issues",
+            expected.get("dependency_issues"),
+            _actual_result_field(actual, "dependency_issues"),
+        ),
+        _compare_list(
             "fix_sources",
             expected.get("fix_sources"),
             _actual_result_field(actual, "fix_sources"),
