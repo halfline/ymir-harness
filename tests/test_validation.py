@@ -105,6 +105,16 @@ def test_phase2_reports_target_branch_missing_from_mock_fixture(tmp_path: Path) 
     )
 
 
+def test_phase2_accepts_zstream_override_target_branch(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(cases_dir, repo_path, pre_fix_ref, zstream_override={"8": "rhel-8.10.z"})
+
+    report = validate_case_directory(cases_dir, phase=2)
+
+    assert not report.has_blocking_errors
+
+
 def test_write_validation_reports(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
@@ -122,7 +132,13 @@ def test_write_validation_reports(tmp_path: Path) -> None:
     assert "No validation errors." in paths[2].read_text(encoding="utf-8")
 
 
-def _write_replay_case(cases_dir: Path, repo_path: Path, pre_fix_ref: str) -> None:
+def _write_replay_case(
+    cases_dir: Path,
+    repo_path: Path,
+    pre_fix_ref: str,
+    *,
+    zstream_override: dict[str, str] | None = None,
+) -> None:
     case_id = "RHEL-12345"
     case_type = "cve_backport"
     _write_json(
@@ -144,22 +160,22 @@ def _write_replay_case(cases_dir: Path, repo_path: Path, pre_fix_ref: str) -> No
             "network_mode": "replay_only",
         },
     )
-    _write_json(
-        cases_dir / "mock_data" / "triage" / f"{case_id}.json",
-        {
-            "schema_version": 1,
-            "case_id": case_id,
-            "case_type": case_type,
-            "repos": [
-                {
-                    "package": "dnsmasq",
-                    "remote_url": str(repo_path),
-                    "pre_fix_ref": pre_fix_ref,
-                    "branch": "c9s",
-                }
-            ],
-        },
-    )
+    mock_data = {
+        "schema_version": 1,
+        "case_id": case_id,
+        "case_type": case_type,
+        "repos": [
+            {
+                "package": "dnsmasq",
+                "remote_url": str(repo_path),
+                "pre_fix_ref": pre_fix_ref,
+                "branch": "c9s",
+            }
+        ],
+    }
+    if zstream_override is not None:
+        mock_data["zstream_override"] = zstream_override
+    _write_json(cases_dir / "mock_data" / "triage" / f"{case_id}.json", mock_data)
     _write_json(
         cases_dir / "web_cache" / case_id / "manifest.json",
         {
