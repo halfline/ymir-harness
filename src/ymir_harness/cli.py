@@ -73,6 +73,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the aggregate score report JSON to stdout",
     )
+    score_many.add_argument(
+        "--run-id",
+        help="record the benchmark run identifier in the aggregate score report",
+    )
+    score_many.add_argument(
+        "--ymir-sha",
+        help="record the benchmarked Ymir git SHA in the aggregate score report",
+    )
+    score_many.add_argument(
+        "--variant",
+        help="record the benchmark variant name in the aggregate score report",
+    )
     score_many.set_defaults(func=_cmd_score_results)
 
     compare = subparsers.add_parser(
@@ -140,7 +152,13 @@ def _cmd_score_result(args: argparse.Namespace) -> int:
 
 
 def _cmd_score_results(args: argparse.Namespace) -> int:
-    report = score_result_directory(args.cases_dir, args.actual_results_dir)
+    report = score_result_directory(
+        args.cases_dir,
+        args.actual_results_dir,
+        run_id=args.run_id,
+        ymir_sha=args.ymir_sha,
+        variant=args.variant,
+    )
     output_path = args.output or args.cases_dir / "reports" / "results.json"
     payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
     output_path.parent.mkdir(parents=True, exist_ok=True)
