@@ -77,6 +77,10 @@ def detect_unsafe_http_request(
     detail = f"{normalized_method} {url}"
     if "jira" in host or "/rest/api/" in path or "/rest/greenhopper/" in path:
         return UnsafeOperation("jira_write", f"Jira write: {detail}", source)
+    if "gitlab" in host and any(
+        segment in path for segment in ("fork", "labels", "merge_requests")
+    ):
+        return UnsafeOperation("gitlab_write", f"GitLab write: {detail}", source)
     return None
 
 
