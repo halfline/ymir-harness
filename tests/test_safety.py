@@ -93,10 +93,33 @@ def test_detect_unsafe_operations_reports_gitlab_write_events() -> None:
     )
 
 
+def test_detect_unsafe_operations_reports_rhpkg_lookaside_uploads() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "shell",
+                "argv": ["rhpkg", "new-sources", "source.tar.gz"],
+            },
+            {
+                "source": "run-shell-command",
+                "command": "rhpkg upload source.tar.gz",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "lookaside_upload",
+        "lookaside_upload",
+    ]
+    assert operations[0].detail == "rhpkg lookaside upload: rhpkg new-sources source.tar.gz"
+    assert operations[1].detail == "rhpkg lookaside upload: rhpkg upload source.tar.gz"
+
+
 def test_detect_unsafe_operations_ignores_read_only_events() -> None:
     operations = detect_unsafe_operations(
         [
             {"tool": "shell", "command": "git status --short"},
+            {"tool": "shell", "command": "rhpkg sources"},
             {
                 "tool": "http",
                 "method": "GET",
