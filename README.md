@@ -170,9 +170,10 @@ Future workflow adapters start from a no-write environment profile that forces
 `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
 known write credentials from the process environment.
 Unsafe-operation detection currently classifies git push attempts, Jira write
-attempts, GitLab write attempts, Errata write attempts, and `rhpkg` lookaside
-upload attempts from tool events. It also classifies `brew build`, `koji build`,
-`copr build`, and `konflux build` submissions.
+attempts, GitLab write attempts, Errata write attempts, Testing Farm
+submissions, and `rhpkg` lookaside upload attempts from tool events. It also
+classifies `brew build`, `koji build`, `copr build`, and `konflux build`
+submissions.
 When `cases.yaml` is present, `run` uses it as the default case list. It accepts
 a top-level list of case ids or a `cases:` list containing case ids or objects
 with `case_id`.
