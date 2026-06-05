@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import shlex
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -42,6 +42,22 @@ def detect_unsafe_operations(events: Sequence[Mapping[str, Any]]) -> list[Unsafe
                 operations.append(operation)
 
     return _dedupe_operations(operations)
+
+
+def detect_replay_violations(
+    events: Sequence[Mapping[str, Any]],
+    *,
+    recorded_urls: Iterable[str],
+) -> list[str]:
+    recorded_url_set = set(recorded_urls)
+    violations = []
+    for event in events:
+        url = _event_string(event, "url")
+        if not url or not _is_external_http_url(url):
+            continue
+        if url not in recorded_url_set:
+            violations.append(f"unrecorded URL: {url}")
+    return _dedupe_strings(violations)
 
 
 def detect_unsafe_command(
@@ -130,6 +146,11 @@ def _event_string(event: Mapping[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _is_external_http_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def _command_tokens(command: str | Sequence[str]) -> list[str]:
     if isinstance(command, str):
         try:
@@ -199,6 +220,17 @@ def _dedupe_operations(operations: Sequence[UnsafeOperation]) -> list[UnsafeOper
             continue
         seen.add(key)
         unique.append(operation)
+    return unique
+
+
+def _dedupe_strings(values: Sequence[str]) -> list[str]:
+    seen = set()
+    unique = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
     return unique
 
 
