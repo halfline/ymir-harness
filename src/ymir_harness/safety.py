@@ -5,8 +5,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 GIT_OPTIONS_WITH_VALUES = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+WRITE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,13 @@ def detect_unsafe_operations(events: Sequence[Mapping[str, Any]]) -> list[Unsafe
         for command in _event_commands(event):
             operations.extend(detect_unsafe_command(command, source=source))
 
+        method = _event_string(event, "method")
+        url = _event_string(event, "url")
+        if method and url:
+            operation = detect_unsafe_http_request(method, url, source=source)
+            if operation:
+                operations.append(operation)
+
     return _dedupe_operations(operations)
 
 
@@ -50,6 +59,25 @@ def detect_unsafe_command(
         operations.append(UnsafeOperation("git_push", f"git push: {display}", source))
 
     return _dedupe_operations(operations)
+
+
+def detect_unsafe_http_request(
+    method: str,
+    url: str,
+    *,
+    source: str | None = None,
+) -> UnsafeOperation | None:
+    normalized_method = method.upper()
+    if normalized_method not in WRITE_HTTP_METHODS:
+        return None
+
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    detail = f"{normalized_method} {url}"
+    if "jira" in host or "/rest/api/" in path or "/rest/greenhopper/" in path:
+        return UnsafeOperation("jira_write", f"Jira write: {detail}", source)
+    return None
 
 
 def _event_commands(event: Mapping[str, Any]) -> list[str | Sequence[str]]:
