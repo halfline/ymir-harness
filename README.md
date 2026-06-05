@@ -26,7 +26,8 @@ ymir-harness run \
   --variant baseline \
   --run-id baseline-2026-06-04T120000Z \
   --case RHEL-12345 \
-  --repeat 3
+  --repeat 3 \
+  --workflow ymir-triage
 ymir-harness compare-results \
   reports/baseline-results.json \
   reports/enhanced-results.json \
@@ -162,12 +163,18 @@ Actual results may include advisory diagnostics such as `runtime_seconds`,
 Phase 3 runner reports use `run_id`, `variant`, optional `ymir_sha`,
 `harness_version`, `fixture_checksum`, `features`, and `repeat` metadata. Each
 case entry includes `case_id`, `case_type`, `status`, `repetition`, optional
-`expected_path`, optional `actual_path`, and optional `reason`. Initial case
-status values are `not_run`, `passed`, `failed`, `skipped`, and `unsupported`.
-The initial `run` command writes validation reports first, then writes
+`expected_path`, optional `actual_path`, optional `score`, and optional
+`reason`. Initial case status values are `not_run`, `passed`, `failed`,
+`skipped`, and `unsupported`.
+The default `run` command writes validation reports first, then writes
 `benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
-It does not invoke Ymir workflows yet, so each runnable case repetition is
-marked `not_run`.
+Without `--workflow`, it does not invoke Ymir workflows, so each runnable case
+repetition is marked `not_run`.
+Use `--workflow ymir-triage` to call Ymir's triage `run_workflow()` directly for
+each runnable case. The runner applies the per-case no-write environment,
+writes the returned structured triage result to the reserved actual result
+path, scores it against the expected result, and records the score in the run
+entry. A deterministic score mismatch marks the run entry failed.
 Programmatic runner integrations can pass a case executor to receive resolved
 case metadata, the reserved actual result path, enabled feature flags, and the
 per-case no-write environment before returning a run status.
