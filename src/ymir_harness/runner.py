@@ -286,7 +286,18 @@ def _run_case_result(
             variant=variant,
             features=tuple(features),
         )
-        execution = executor(request)
+        try:
+            execution = executor(request)
+        except Exception as exc:
+            return RunCaseResult(
+                case_id=case_id,
+                case_type=case_type,
+                status="failed",
+                repetition=repetition,
+                expected_path=expected_path if expected_path.is_file() else None,
+                actual_path=actual_path,
+                reason=_executor_failure_reason(exc),
+            )
         return RunCaseResult(
             case_id=case_id,
             case_type=case_type,
@@ -306,3 +317,10 @@ def _run_case_result(
         actual_path=actual_path,
         reason=RUNNER_NOT_WIRED_REASON,
     )
+
+
+def _executor_failure_reason(exc: Exception) -> str:
+    detail = str(exc)
+    if detail:
+        return f"executor failed: {type(exc).__name__}: {detail}"
+    return f"executor failed: {type(exc).__name__}"
