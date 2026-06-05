@@ -284,6 +284,59 @@ def test_build_run_report_writes_executor_actual_result(tmp_path: Path) -> None:
     }
 
 
+def test_build_run_report_scores_executor_actual_result(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+        },
+    )
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "package": "dnsmasq",
+                "resolution": "not_affected",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    entry = report.entries[0]
+    assert entry.status == "passed"
+    assert entry.score is not None
+    assert entry.score.passed
+    payload = report.to_json()["cases"][0]["score"]
+    assert payload["summary"]["passed"] is True
+    assert {metric["name"]: metric["status"] for metric in payload["metrics"]}["package"] == "pass"
+
+
 def test_build_run_report_records_actual_result_write_failures(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
@@ -365,7 +418,7 @@ def test_build_run_report_records_executor_failures(tmp_path: Path) -> None:
     assert entry.reason == "executor failed: RuntimeError: adapter stopped"
 
 
-def _write_expected(cases_dir: Path, case_id: str) -> None:
+def _write_expected(cases_dir: Path, case_id: str, data: object | None = None) -> None:
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
     expected_path.parent.mkdir(parents=True, exist_ok=True)
-    expected_path.write_text("{}\n", encoding="utf-8")
+    expected_path.write_text(json.dumps(data or {}) + "\n", encoding="utf-8")
