@@ -119,6 +119,34 @@ def test_detect_unsafe_operations_reports_errata_write_events() -> None:
     assert operations[1].detail == ("Errata write: PUT https://errata.example/api/v1/erratum/12345")
 
 
+def test_detect_unsafe_operations_reports_testing_farm_submissions() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://api.testing-farm.io/v0.1/requests",
+            },
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://api.dev.testing-farm.io/v0.1/requests",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "testing_farm_submission",
+        "testing_farm_submission",
+    ]
+    assert operations[0].detail == (
+        "Testing Farm submission: POST https://api.testing-farm.io/v0.1/requests"
+    )
+    assert operations[1].detail == (
+        "Testing Farm submission: POST https://api.dev.testing-farm.io/v0.1/requests"
+    )
+
+
 def test_detect_unsafe_operations_reports_rhpkg_lookaside_uploads() -> None:
     operations = detect_unsafe_operations(
         [
@@ -257,6 +285,11 @@ def test_detect_unsafe_operations_ignores_read_only_events() -> None:
                 "tool": "http",
                 "method": "GET",
                 "url": "https://errata.engineering.redhat.com/api/v1/erratum/12345",
+            },
+            {
+                "tool": "http",
+                "method": "GET",
+                "url": "https://api.testing-farm.io/v0.1/requests/abc-123",
             },
             {
                 "tool": "shell",
