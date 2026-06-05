@@ -18,6 +18,7 @@ from ymir_harness.runner import (
 )
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 from ymir_harness.validation import validate_case_directory
+from ymir_harness.ymir_workflows import make_ymir_triage_executor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -126,6 +127,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--results-dir", type=Path, help="directory for run artifacts")
     run.add_argument("--output", type=Path, help="write run report JSON to this path")
     run.add_argument("--json", action="store_true", help="print the run report JSON to stdout")
+    run.add_argument(
+        "--workflow",
+        choices=("none", "ymir-triage"),
+        default="none",
+        help="workflow executor to invoke; defaults to placeholder run entries",
+    )
     run.set_defaults(func=_cmd_run)
 
     compare = subparsers.add_parser(
@@ -253,6 +260,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         ymir_sha=args.ymir_sha,
         features=args.features,
         repeat=args.repeat,
+        executor=_run_executor(args.workflow),
     )
     output_path = args.output or results_dir / "run.json"
     payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
@@ -272,6 +280,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         sys.stdout.write(f"run report written to {output_path}\n")
 
     return 1 if report.has_failures else 0
+
+
+def _run_executor(workflow: str):
+    if workflow == "ymir-triage":
+        return make_ymir_triage_executor()
+    return None
 
 
 def _positive_int(value: str) -> int:
