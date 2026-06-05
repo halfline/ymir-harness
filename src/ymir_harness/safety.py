@@ -73,6 +73,10 @@ def detect_unsafe_command(
         operations.append(
             UnsafeOperation("build_submission", f"copr build submission: {display}", source)
         )
+    if _is_konflux_build_submission_command(tokens):
+        operations.append(
+            UnsafeOperation("build_submission", f"konflux build submission: {display}", source)
+        )
 
     return _dedupe_operations(operations)
 
@@ -166,6 +170,12 @@ def _is_koji_build_submission_command(tokens: Sequence[str]) -> bool:
 
 def _is_copr_build_submission_command(tokens: Sequence[str]) -> bool:
     if len(tokens) < 2 or _program_name(tokens[0]) != "copr":
+        return False
+    return tokens[1] == "build"
+
+
+def _is_konflux_build_submission_command(tokens: Sequence[str]) -> bool:
+    if len(tokens) < 2 or _program_name(tokens[0]) != "konflux":
         return False
     return tokens[1] == "build"
 
