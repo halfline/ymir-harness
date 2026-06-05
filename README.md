@@ -168,6 +168,9 @@ The initial `run` command writes validation reports first, then writes
 `benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
 It does not invoke Ymir workflows yet, so each runnable case repetition is
 marked `not_run`.
+Programmatic runner integrations can pass a case executor to receive resolved
+case metadata, the reserved actual result path, enabled feature flags, and the
+per-case no-write environment before returning a run status.
 Future workflow adapters start from a no-write environment profile that forces
 `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
 known write credentials and Kerberos keytab paths from the process environment.
