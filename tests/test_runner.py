@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ymir_harness.models import CaseValidationResult, ValidationReport
@@ -234,6 +235,53 @@ def test_build_run_report_calls_executor_for_runnable_cases(tmp_path: Path) -> N
     assert entries["RHEL-23456", 1].actual_path is None
     assert entries["RHEL-23456", 2].status == "skipped"
     assert entries["RHEL-23456", 2].actual_path is None
+
+
+def test_build_run_report_writes_executor_actual_result(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "package": "dnsmasq",
+                "resolution": "not_affected",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    entry = report.entries[0]
+    assert entry.status == "passed"
+    assert entry.actual_path == (
+        results_dir.resolve() / "repeat-1" / "actual-results" / "RHEL-12345.actual.json"
+    )
+    assert json.loads(entry.actual_path.read_text(encoding="utf-8")) == {
+        "case_id": "RHEL-12345",
+        "package": "dnsmasq",
+        "resolution": "not_affected",
+    }
 
 
 def test_build_run_report_records_executor_failures(tmp_path: Path) -> None:
