@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ymir_harness.models import CaseValidationResult, ValidationReport
 from ymir_harness.runner import (
+    RunCaseExecution,
     build_no_write_environment,
     build_run_report,
     load_case_manifest,
@@ -161,6 +162,77 @@ def test_build_run_report_assigns_actual_paths(tmp_path: Path) -> None:
         results_dir.resolve() / "repeat-2" / "actual-results" / "RHEL-12345.actual.json"
     )
     assert entries["RHEL-23456", 1].actual_path is None
+    assert entries["RHEL-23456", 2].actual_path is None
+
+
+def test_build_run_report_calls_executor_for_runnable_cases(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_expected(cases_dir, "RHEL-23456")
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+            CaseValidationResult(
+                case_id="RHEL-23456",
+                case_type="not_affected",
+                status="skipped",
+            ),
+        ],
+    )
+    requests = []
+
+    def executor(request):
+        requests.append(request)
+        return RunCaseExecution(status="passed", reason="workflow completed")
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        features=["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"],
+        repeat=2,
+        executor=executor,
+        base_env={
+            "PATH": "/usr/bin",
+            "JIRA_TOKEN": "prod-token",
+        },
+    )
+
+    assert len(requests) == 2
+    assert [request.repetition for request in requests] == [1, 2]
+    assert {request.case_id for request in requests} == {"RHEL-12345"}
+    assert requests[0].cases_dir == cases_dir.resolve()
+    assert requests[0].results_dir == results_dir.resolve()
+    assert requests[0].expected_path == cases_dir.resolve() / "expected" / (
+        "RHEL-12345.expected.json"
+    )
+    assert requests[0].actual_path == (
+        results_dir.resolve() / "repeat-1" / "actual-results" / "RHEL-12345.actual.json"
+    )
+    assert requests[0].variant == "baseline"
+    assert requests[0].features == ("YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK",)
+    assert requests[0].environment["PATH"] == "/usr/bin"
+    assert requests[0].environment["DRY_RUN"] == "true"
+    assert requests[0].environment["YMIR_BENCHMARK_CASE_ID"] == "RHEL-12345"
+    assert "JIRA_TOKEN" not in requests[0].environment
+
+    entries = {(entry.case_id, entry.repetition): entry for entry in report.entries}
+    assert entries["RHEL-12345", 1].status == "passed"
+    assert entries["RHEL-12345", 1].actual_path == requests[0].actual_path
+    assert entries["RHEL-12345", 1].reason == "workflow completed"
+    assert entries["RHEL-12345", 2].status == "passed"
+    assert entries["RHEL-23456", 1].status == "skipped"
+    assert entries["RHEL-23456", 1].actual_path is None
+    assert entries["RHEL-23456", 2].status == "skipped"
     assert entries["RHEL-23456", 2].actual_path is None
 
 
