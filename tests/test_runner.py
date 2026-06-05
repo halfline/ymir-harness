@@ -24,6 +24,7 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
             "MOCK_JIRA": "false",
             "GITLAB_TOKEN": "prod-token",
             "JIRA_PASSWORD": "prod-password",
+            "KEYTAB_FILE": "/etc/ymir/prod.keytab",
             "KRB5CCNAME": "/tmp/prod-krb5",
             "YMIR_BENCHMARK_CASE_ID": "RHEL-OLD",
         },
@@ -38,6 +39,7 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert "GITLAB_TOKEN" not in env
     assert "JIRA_PASSWORD" not in env
+    assert "KEYTAB_FILE" not in env
     assert "KRB5CCNAME" not in env
     assert "YMIR_BENCHMARK_CASE_ID" not in env
     assert env["JIRA_MOCK_FILES"] == str((cases_dir / "jiras").resolve())
