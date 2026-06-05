@@ -168,7 +168,7 @@ It does not invoke Ymir workflows yet, so each runnable case repetition is
 marked `not_run`.
 Future workflow adapters start from a no-write environment profile that forces
 `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
-known write credentials from the process environment.
+known write credentials and Kerberos keytab paths from the process environment.
 Unsafe-operation detection currently classifies git push attempts, Jira write
 attempts, GitLab write attempts, Errata write attempts, Testing Farm
 submissions, GreenWave mutations, ResultsDB mutations, and `rhpkg` lookaside
