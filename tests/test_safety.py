@@ -93,6 +93,32 @@ def test_detect_unsafe_operations_reports_gitlab_write_events() -> None:
     )
 
 
+def test_detect_unsafe_operations_reports_errata_write_events() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": ("https://errata.engineering.redhat.com/api/v1/erratum/12345/change_state"),
+            },
+            {
+                "tool": "http",
+                "method": "PUT",
+                "url": "https://errata.example/api/v1/erratum/12345",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "errata_write",
+        "errata_write",
+    ]
+    assert operations[0].detail == (
+        "Errata write: POST https://errata.engineering.redhat.com/api/v1/erratum/12345/change_state"
+    )
+    assert operations[1].detail == ("Errata write: PUT https://errata.example/api/v1/erratum/12345")
+
+
 def test_detect_unsafe_operations_reports_rhpkg_lookaside_uploads() -> None:
     operations = detect_unsafe_operations(
         [
@@ -226,6 +252,11 @@ def test_detect_unsafe_operations_ignores_read_only_events() -> None:
                 "tool": "http",
                 "method": "GET",
                 "url": "https://jira.example/rest/api/2/issue/RHEL-12345",
+            },
+            {
+                "tool": "http",
+                "method": "GET",
+                "url": "https://errata.engineering.redhat.com/api/v1/erratum/12345",
             },
             {
                 "tool": "shell",
