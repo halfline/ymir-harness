@@ -103,6 +103,10 @@ def detect_unsafe_http_request(
         return UnsafeOperation("gitlab_write", f"GitLab write: {detail}", source)
     if "errata" in host:
         return UnsafeOperation("errata_write", f"Errata write: {detail}", source)
+    if "testing-farm" in host:
+        return UnsafeOperation(
+            "testing_farm_submission", f"Testing Farm submission: {detail}", source
+        )
     return None
 
 
