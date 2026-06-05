@@ -175,6 +175,34 @@ def test_detect_unsafe_operations_reports_greenwave_mutations() -> None:
     )
 
 
+def test_detect_unsafe_operations_reports_resultsdb_mutations() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://resultsdb-api.engineering.redhat.com/api/v2.0/results",
+            },
+            {
+                "tool": "http",
+                "method": "DELETE",
+                "url": "https://resultsdb.example/api/v2.0/results/12345",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "resultsdb_mutation",
+        "resultsdb_mutation",
+    ]
+    assert operations[0].detail == (
+        "ResultsDB mutation: POST https://resultsdb-api.engineering.redhat.com/api/v2.0/results"
+    )
+    assert operations[1].detail == (
+        "ResultsDB mutation: DELETE https://resultsdb.example/api/v2.0/results/12345"
+    )
+
+
 def test_detect_unsafe_operations_reports_rhpkg_lookaside_uploads() -> None:
     operations = detect_unsafe_operations(
         [
@@ -323,6 +351,14 @@ def test_detect_unsafe_operations_ignores_read_only_events() -> None:
                 "tool": "http",
                 "method": "GET",
                 "url": "https://gating-status.osci.redhat.com/query?nvr=package-1.0-1",
+            },
+            {
+                "tool": "http",
+                "method": "GET",
+                "url": (
+                    "https://resultsdb-api.engineering.redhat.com/api/v2.0/results"
+                    "?item=package-1.0-1"
+                ),
             },
             {
                 "tool": "shell",
