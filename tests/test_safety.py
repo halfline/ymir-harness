@@ -115,11 +115,36 @@ def test_detect_unsafe_operations_reports_rhpkg_lookaside_uploads() -> None:
     assert operations[1].detail == "rhpkg lookaside upload: rhpkg upload source.tar.gz"
 
 
+def test_detect_unsafe_operations_reports_brew_build_submissions() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "shell",
+                "argv": ["brew", "build", "c9s", "package.src.rpm"],
+            },
+            {
+                "source": "run-shell-command",
+                "command": "brew build --scratch c9s package.src.rpm",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "build_submission",
+        "build_submission",
+    ]
+    assert operations[0].detail == "brew build submission: brew build c9s package.src.rpm"
+    assert operations[1].detail == (
+        "brew build submission: brew build --scratch c9s package.src.rpm"
+    )
+
+
 def test_detect_unsafe_operations_ignores_read_only_events() -> None:
     operations = detect_unsafe_operations(
         [
             {"tool": "shell", "command": "git status --short"},
             {"tool": "shell", "command": "rhpkg sources"},
+            {"tool": "shell", "command": "brew list-tags package"},
             {
                 "tool": "http",
                 "method": "GET",
