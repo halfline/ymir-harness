@@ -163,6 +163,32 @@ def test_detect_unsafe_operations_reports_koji_build_submissions() -> None:
     )
 
 
+def test_detect_unsafe_operations_reports_copr_build_submissions() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "shell",
+                "argv": ["copr", "build", "owner/project", "package.src.rpm"],
+            },
+            {
+                "source": "run-shell-command",
+                "command": "copr build owner/project package.src.rpm",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "build_submission",
+        "build_submission",
+    ]
+    assert operations[0].detail == (
+        "copr build submission: copr build owner/project package.src.rpm"
+    )
+    assert operations[1].detail == (
+        "copr build submission: copr build owner/project package.src.rpm"
+    )
+
+
 def test_detect_unsafe_operations_ignores_read_only_events() -> None:
     operations = detect_unsafe_operations(
         [
@@ -170,6 +196,7 @@ def test_detect_unsafe_operations_ignores_read_only_events() -> None:
             {"tool": "shell", "command": "rhpkg sources"},
             {"tool": "shell", "command": "brew list-tags package"},
             {"tool": "shell", "command": "koji list-tags package"},
+            {"tool": "shell", "command": "copr list owner"},
             {
                 "tool": "http",
                 "method": "GET",
