@@ -171,6 +171,8 @@ marked `not_run`.
 Programmatic runner integrations can pass a case executor to receive resolved
 case metadata, the reserved actual result path, enabled feature flags, and the
 per-case no-write environment before returning a run status.
+Executors may return an `actual_result` payload for the runner to write as JSON
+at the reserved actual result path.
 If the executor raises, the runner records a failed case entry with the reserved
 actual result path and the exception reason.
 Future workflow adapters start from a no-write environment profile that forces
