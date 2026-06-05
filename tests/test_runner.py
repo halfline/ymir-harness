@@ -236,6 +236,44 @@ def test_build_run_report_calls_executor_for_runnable_cases(tmp_path: Path) -> N
     assert entries["RHEL-23456", 2].actual_path is None
 
 
+def test_build_run_report_records_executor_failures(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        raise RuntimeError("adapter stopped")
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    assert report.has_failures
+    assert report.summary()["failed"] == 1
+    entry = report.entries[0]
+    assert entry.status == "failed"
+    assert entry.actual_path == (
+        results_dir.resolve() / "repeat-1" / "actual-results" / "RHEL-12345.actual.json"
+    )
+    assert entry.reason == "executor failed: RuntimeError: adapter stopped"
+
+
 def _write_expected(cases_dir: Path, case_id: str) -> None:
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
     expected_path.parent.mkdir(parents=True, exist_ok=True)
