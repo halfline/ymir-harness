@@ -120,10 +120,12 @@ def detect_replay_violations(
     violations = []
     for event in events:
         url = _event_string(event, "url")
-        if not url or not _is_external_http_url(url):
-            continue
-        if url not in recorded_url_set:
+        if url and _is_external_http_url(url) and url not in recorded_url_set:
             violations.append(f"unrecorded URL: {url}")
+        for command in _event_commands(event):
+            for command_url in _command_replay_urls(command):
+                if command_url not in recorded_url_set:
+                    violations.append(f"unrecorded URL: {command_url}")
     return _dedupe_strings(violations)
 
 
