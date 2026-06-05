@@ -3,7 +3,61 @@ from __future__ import annotations
 from pathlib import Path
 
 from ymir_harness.models import CaseValidationResult, ValidationReport
-from ymir_harness.runner import build_run_report, load_case_manifest, select_validation_cases
+from ymir_harness.runner import (
+    build_no_write_environment,
+    build_run_report,
+    load_case_manifest,
+    select_validation_cases,
+)
+
+
+def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "reports"
+
+    env = build_no_write_environment(
+        cases_dir,
+        results_dir,
+        base_env={
+            "PATH": "/usr/bin",
+            "DRY_RUN": "false",
+            "MOCK_JIRA": "false",
+            "GITLAB_TOKEN": "prod-token",
+            "JIRA_PASSWORD": "prod-password",
+            "KRB5CCNAME": "/tmp/prod-krb5",
+            "YMIR_BENCHMARK_CASE_ID": "RHEL-OLD",
+        },
+    )
+
+    assert env["PATH"] == "/usr/bin"
+    assert env["DRY_RUN"] == "true"
+    assert env["MOCK_JIRA"] == "true"
+    assert env["JIRA_DRY_RUN"] == "true"
+    assert env["AUTO_CHAIN"] == "false"
+    assert env["SILENT_RUN"] == "true"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GITLAB_TOKEN" not in env
+    assert "JIRA_PASSWORD" not in env
+    assert "KRB5CCNAME" not in env
+    assert "YMIR_BENCHMARK_CASE_ID" not in env
+    assert env["JIRA_MOCK_FILES"] == str((cases_dir / "jiras").resolve())
+    assert env["MOCK_REPOS_DIR"] == str((cases_dir / "mock_data").resolve())
+    assert env["YMIR_BENCHMARK_CASES_DIR"] == str(cases_dir.resolve())
+    assert env["YMIR_BENCHMARK_RESULTS_DIR"] == str(results_dir.resolve())
+
+
+def test_build_no_write_environment_records_case_id(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "reports"
+
+    env = build_no_write_environment(
+        cases_dir,
+        results_dir,
+        base_env={},
+        case_id="RHEL-12345",
+    )
+
+    assert env["YMIR_BENCHMARK_CASE_ID"] == "RHEL-12345"
 
 
 def test_load_case_manifest_reads_case_ids(tmp_path: Path) -> None:
