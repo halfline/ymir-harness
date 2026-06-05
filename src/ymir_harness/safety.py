@@ -61,6 +61,10 @@ def detect_unsafe_command(
         operations.append(
             UnsafeOperation("lookaside_upload", f"rhpkg lookaside upload: {display}", source)
         )
+    if _is_brew_build_submission_command(tokens):
+        operations.append(
+            UnsafeOperation("build_submission", f"brew build submission: {display}", source)
+        )
 
     return _dedupe_operations(operations)
 
@@ -138,6 +142,12 @@ def _is_rhpkg_lookaside_upload_command(tokens: Sequence[str]) -> bool:
     if len(tokens) < 2 or _program_name(tokens[0]) != "rhpkg":
         return False
     return tokens[1] in {"new-sources", "upload"}
+
+
+def _is_brew_build_submission_command(tokens: Sequence[str]) -> bool:
+    if len(tokens) < 2 or _program_name(tokens[0]) != "brew":
+        return False
+    return tokens[1] == "build"
 
 
 def _dedupe_operations(operations: Sequence[UnsafeOperation]) -> list[UnsafeOperation]:
