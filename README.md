@@ -100,7 +100,8 @@ GitLab push, or build-system submission calls captured during a run.
 Scoring also treats any `replay_violations` entries as a hard failure gate. Use
 that field for unrecorded external fetches or replay cache misses reported by
 the replay layer. Replay violation detection can derive those entries from HTTP
-tool events whose URLs are absent from the recorded replay URL set.
+tool events and shell `curl` or `wget` commands whose target URLs are absent
+from the recorded replay URL set.
 
 Expected results may declare `required_artifacts`. Scoring compares that list
 with `generated_artifacts` in the actual result and fails the case when any
