@@ -27,6 +27,7 @@ SENSITIVE_ENVIRONMENT_NAMES = frozenset(
         "JIRA_API_TOKEN",
         "JIRA_PASSWORD",
         "JIRA_TOKEN",
+        "KEYTAB_FILE",
         "KRB5CCNAME",
         "KRB5_KTNAME",
         "KOJI_CONFIG",
