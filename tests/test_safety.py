@@ -189,6 +189,30 @@ def test_detect_unsafe_operations_reports_copr_build_submissions() -> None:
     )
 
 
+def test_detect_unsafe_operations_reports_konflux_build_submissions() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "shell",
+                "argv": ["konflux", "build", "component"],
+            },
+            {
+                "source": "run-shell-command",
+                "command": "konflux build --namespace tenant component",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "build_submission",
+        "build_submission",
+    ]
+    assert operations[0].detail == "konflux build submission: konflux build component"
+    assert operations[1].detail == (
+        "konflux build submission: konflux build --namespace tenant component"
+    )
+
+
 def test_detect_unsafe_operations_ignores_read_only_events() -> None:
     operations = detect_unsafe_operations(
         [
@@ -197,6 +221,7 @@ def test_detect_unsafe_operations_ignores_read_only_events() -> None:
             {"tool": "shell", "command": "brew list-tags package"},
             {"tool": "shell", "command": "koji list-tags package"},
             {"tool": "shell", "command": "copr list owner"},
+            {"tool": "shell", "command": "konflux list components"},
             {
                 "tool": "http",
                 "method": "GET",
