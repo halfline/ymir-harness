@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,28 @@ from ymir_harness.models import RunCaseResult, RunReport, ValidationIssue, Valid
 from ymir_harness.scoring import _fixture_checksum
 
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
+NO_WRITE_ENVIRONMENT = {
+    "DRY_RUN": "true",
+    "MOCK_JIRA": "true",
+    "JIRA_DRY_RUN": "true",
+    "AUTO_CHAIN": "false",
+    "SILENT_RUN": "true",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+SENSITIVE_ENVIRONMENT_NAMES = frozenset(
+    {
+        "GITLAB_PRIVATE_TOKEN",
+        "GITLAB_TOKEN",
+        "JIRA_API_TOKEN",
+        "JIRA_PASSWORD",
+        "JIRA_TOKEN",
+        "KRB5CCNAME",
+        "KRB5_KTNAME",
+        "KOJI_CONFIG",
+        "LOOKASIDE_PASSWORD",
+        "LOOKASIDE_TOKEN",
+    }
+)
 
 
 def default_results_dir(cases_dir: Path, run_id: str) -> Path:
@@ -19,6 +42,30 @@ def default_results_dir(cases_dir: Path, run_id: str) -> Path:
 
 def actual_result_path(results_dir: Path, case_id: str, repetition: int) -> Path:
     return results_dir / f"repeat-{repetition}" / "actual-results" / f"{case_id}.actual.json"
+
+
+def build_no_write_environment(
+    cases_dir: Path,
+    results_dir: Path,
+    *,
+    base_env: Mapping[str, str] | None = None,
+    case_id: str | None = None,
+) -> dict[str, str]:
+    env = dict(os.environ if base_env is None else base_env)
+    for name in SENSITIVE_ENVIRONMENT_NAMES:
+        env.pop(name, None)
+
+    env.update(NO_WRITE_ENVIRONMENT)
+    env["JIRA_MOCK_FILES"] = str((cases_dir / "jiras").resolve())
+    env["MOCK_REPOS_DIR"] = str((cases_dir / "mock_data").resolve())
+    env.setdefault("GIT_REPO_BASEPATH", str(results_dir.resolve()))
+    env["YMIR_BENCHMARK_CASES_DIR"] = str(cases_dir.resolve())
+    env["YMIR_BENCHMARK_RESULTS_DIR"] = str(results_dir.resolve())
+    if case_id:
+        env["YMIR_BENCHMARK_CASE_ID"] = case_id
+    else:
+        env.pop("YMIR_BENCHMARK_CASE_ID", None)
+    return env
 
 
 def load_case_manifest(cases_dir: Path) -> tuple[list[str], list[ValidationIssue]]:
