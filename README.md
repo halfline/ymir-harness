@@ -169,6 +169,8 @@ marked `not_run`.
 Future workflow adapters start from a no-write environment profile that forces
 `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
 known write credentials from the process environment.
+Unsafe-operation detection currently classifies git push attempts from tool
+events.
 When `cases.yaml` is present, `run` uses it as the default case list. It accepts
 a top-level list of case ids or a `cases:` list containing case ids or objects
 with `case_id`.
