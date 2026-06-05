@@ -302,7 +302,18 @@ def _run_case_result(
             )
         execution_actual_path = execution.actual_path or actual_path
         if execution.actual_result is not None:
-            _write_actual_result(execution_actual_path, execution.actual_result)
+            try:
+                _write_actual_result(execution_actual_path, execution.actual_result)
+            except Exception as exc:
+                return RunCaseResult(
+                    case_id=case_id,
+                    case_type=case_type,
+                    status="failed",
+                    repetition=repetition,
+                    expected_path=expected_path if expected_path.is_file() else None,
+                    actual_path=execution_actual_path,
+                    reason=_actual_result_write_failure_reason(exc),
+                )
         return RunCaseResult(
             case_id=case_id,
             case_type=case_type,
@@ -329,6 +340,13 @@ def _executor_failure_reason(exc: Exception) -> str:
     if detail:
         return f"executor failed: {type(exc).__name__}: {detail}"
     return f"executor failed: {type(exc).__name__}"
+
+
+def _actual_result_write_failure_reason(exc: Exception) -> str:
+    detail = str(exc)
+    if detail:
+        return f"actual result write failed: {type(exc).__name__}: {detail}"
+    return f"actual result write failed: {type(exc).__name__}"
 
 
 def _write_actual_result(path: Path, actual_result: Mapping[str, Any]) -> None:
