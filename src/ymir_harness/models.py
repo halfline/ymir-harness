@@ -326,6 +326,7 @@ class RunCaseResult:
     repetition: int = 1
     expected_path: Path | None = None
     actual_path: Path | None = None
+    score: ScoreReport | None = None
     reason: str | None = None
 
     def to_json(self) -> dict[str, Any]:
@@ -337,6 +338,8 @@ class RunCaseResult:
             "expected_path": str(self.expected_path) if self.expected_path else None,
             "actual_path": str(self.actual_path) if self.actual_path else None,
         }
+        if self.score is not None:
+            payload["score"] = self.score.to_json()
         if self.reason:
             payload["reason"] = self.reason
         return payload
