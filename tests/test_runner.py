@@ -240,7 +240,16 @@ def test_build_run_report_calls_executor_for_runnable_cases(tmp_path: Path) -> N
 def test_build_run_report_writes_executor_actual_result(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
-    _write_expected(cases_dir, "RHEL-12345")
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+        },
+    )
     validation_report = ValidationReport(
         cases_dir=cases_dir,
         phase=1,
