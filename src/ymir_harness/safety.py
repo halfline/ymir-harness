@@ -57,6 +57,10 @@ def detect_unsafe_command(
 
     if git_subcommand == "push":
         operations.append(UnsafeOperation("git_push", f"git push: {display}", source))
+    if _is_rhpkg_lookaside_upload_command(tokens):
+        operations.append(
+            UnsafeOperation("lookaside_upload", f"rhpkg lookaside upload: {display}", source)
+        )
 
     return _dedupe_operations(operations)
 
@@ -128,6 +132,12 @@ def _git_subcommand(tokens: Sequence[str]) -> str | None:
         return token
 
     return None
+
+
+def _is_rhpkg_lookaside_upload_command(tokens: Sequence[str]) -> bool:
+    if len(tokens) < 2 or _program_name(tokens[0]) != "rhpkg":
+        return False
+    return tokens[1] in {"new-sources", "upload"}
 
 
 def _dedupe_operations(operations: Sequence[UnsafeOperation]) -> list[UnsafeOperation]:
