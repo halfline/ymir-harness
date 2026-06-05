@@ -14,10 +14,11 @@ from ymir_harness.models import (
     RunCaseResult,
     RunCaseStatus,
     RunReport,
+    ScoreReport,
     ValidationIssue,
     ValidationReport,
 )
-from ymir_harness.scoring import _fixture_checksum
+from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
 
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
 NO_WRITE_ENVIRONMENT = {
@@ -301,6 +302,7 @@ def _run_case_result(
                 reason=_executor_failure_reason(exc),
             )
         execution_actual_path = execution.actual_path or actual_path
+        score = None
         if execution.actual_result is not None:
             try:
                 _write_actual_result(execution_actual_path, execution.actual_result)
@@ -314,6 +316,18 @@ def _run_case_result(
                     actual_path=execution_actual_path,
                     reason=_actual_result_write_failure_reason(exc),
                 )
+            try:
+                score = _score_actual_result(expected_path, execution.actual_result)
+            except Exception as exc:
+                return RunCaseResult(
+                    case_id=case_id,
+                    case_type=case_type,
+                    status="failed",
+                    repetition=repetition,
+                    expected_path=expected_path if expected_path.is_file() else None,
+                    actual_path=execution_actual_path,
+                    reason=_actual_result_score_failure_reason(exc),
+                )
         return RunCaseResult(
             case_id=case_id,
             case_type=case_type,
@@ -321,6 +335,7 @@ def _run_case_result(
             repetition=repetition,
             expected_path=expected_path if expected_path.is_file() else None,
             actual_path=execution_actual_path,
+            score=score,
             reason=execution.reason,
         )
 
@@ -347,6 +362,20 @@ def _actual_result_write_failure_reason(exc: Exception) -> str:
     if detail:
         return f"actual result write failed: {type(exc).__name__}: {detail}"
     return f"actual result write failed: {type(exc).__name__}"
+
+
+def _actual_result_score_failure_reason(exc: Exception) -> str:
+    detail = str(exc)
+    if detail:
+        return f"actual result scoring failed: {type(exc).__name__}: {detail}"
+    return f"actual result scoring failed: {type(exc).__name__}"
+
+
+def _score_actual_result(
+    expected_path: Path,
+    actual_result: Mapping[str, Any],
+) -> ScoreReport:
+    return score_case(load_json_file(expected_path), actual_result)
 
 
 def _write_actual_result(path: Path, actual_result: Mapping[str, Any]) -> None:
