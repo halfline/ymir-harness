@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from ymir_harness import __version__
-from ymir_harness.models import RunCaseResult, RunReport, ValidationIssue, ValidationReport
+from ymir_harness.models import (
+    RunCaseResult,
+    RunCaseStatus,
+    RunReport,
+    ValidationIssue,
+    ValidationReport,
+)
 from ymir_harness.scoring import _fixture_checksum
 
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
@@ -35,6 +42,28 @@ SENSITIVE_ENVIRONMENT_NAMES = frozenset(
         "LOOKASIDE_TOKEN",
     }
 )
+RunCaseExecutor = Callable[["RunCaseRequest"], "RunCaseExecution"]
+
+
+@dataclass(frozen=True)
+class RunCaseRequest:
+    case_id: str
+    case_type: str | None
+    repetition: int
+    cases_dir: Path
+    results_dir: Path
+    expected_path: Path
+    actual_path: Path
+    environment: Mapping[str, str]
+    variant: str
+    features: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RunCaseExecution:
+    status: RunCaseStatus
+    actual_path: Path | None = None
+    reason: str | None = None
 
 
 def default_results_dir(cases_dir: Path, run_id: str) -> Path:
@@ -181,6 +210,8 @@ def build_run_report(
     ymir_sha: str | None = None,
     features: Sequence[str] = (),
     repeat: int = 1,
+    executor: RunCaseExecutor | None = None,
+    base_env: Mapping[str, str] | None = None,
 ) -> RunReport:
     cases_dir = cases_dir.resolve()
     results_dir = results_dir.resolve()
@@ -195,6 +226,10 @@ def build_run_report(
                 case.status,
                 repetition,
                 results_dir,
+                variant,
+                features,
+                executor,
+                base_env,
             )
             for repetition in range(1, repeat + 1)
             for case in validation_report.cases
@@ -216,6 +251,10 @@ def _run_case_result(
     validation_status: str,
     repetition: int,
     results_dir: Path,
+    variant: str,
+    features: Sequence[str],
+    executor: RunCaseExecutor | None,
+    base_env: Mapping[str, str] | None,
 ) -> RunCaseResult:
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
     if validation_status == "skipped":
@@ -228,12 +267,42 @@ def _run_case_result(
             reason="case is excluded by fixture metadata",
         )
 
+    actual_path = actual_result_path(results_dir, case_id, repetition)
+    if executor is not None:
+        request = RunCaseRequest(
+            case_id=case_id,
+            case_type=case_type,
+            repetition=repetition,
+            cases_dir=cases_dir,
+            results_dir=results_dir,
+            expected_path=expected_path,
+            actual_path=actual_path,
+            environment=build_no_write_environment(
+                cases_dir,
+                results_dir,
+                base_env=base_env,
+                case_id=case_id,
+            ),
+            variant=variant,
+            features=tuple(features),
+        )
+        execution = executor(request)
+        return RunCaseResult(
+            case_id=case_id,
+            case_type=case_type,
+            status=execution.status,
+            repetition=repetition,
+            expected_path=expected_path if expected_path.is_file() else None,
+            actual_path=execution.actual_path or actual_path,
+            reason=execution.reason,
+        )
+
     return RunCaseResult(
         case_id=case_id,
         case_type=case_type,
         status="not_run",
         repetition=repetition,
         expected_path=expected_path if expected_path.is_file() else None,
-        actual_path=actual_result_path(results_dir, case_id, repetition),
+        actual_path=actual_path,
         reason=RUNNER_NOT_WIRED_REASON,
     )
