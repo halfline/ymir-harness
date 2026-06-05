@@ -109,6 +109,8 @@ def detect_unsafe_http_request(
         )
     if "greenwave" in host or host == "gating-status.osci.redhat.com":
         return UnsafeOperation("greenwave_mutation", f"GreenWave mutation: {detail}", source)
+    if "resultsdb" in host:
+        return UnsafeOperation("resultsdb_mutation", f"ResultsDB mutation: {detail}", source)
     return None
 
 
