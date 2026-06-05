@@ -37,13 +37,41 @@ def test_detect_unsafe_operations_reports_shell_string_git_push() -> None:
     assert operations[0].detail == ("git push: git --git-dir=/tmp/repo/.git push origin HEAD")
 
 
+def test_detect_unsafe_operations_reports_jira_write_events() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://jira.example/rest/api/2/issue/RHEL-12345/comment",
+            },
+            {
+                "tool": "http",
+                "method": "PATCH",
+                "url": "https://issues.example/rest/api/2/issue/RHEL-12345",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "jira_write",
+        "jira_write",
+    ]
+    assert operations[0].detail == (
+        "Jira write: POST https://jira.example/rest/api/2/issue/RHEL-12345/comment"
+    )
+    assert operations[1].detail == (
+        "Jira write: PATCH https://issues.example/rest/api/2/issue/RHEL-12345"
+    )
+
+
 def test_detect_unsafe_operations_ignores_read_only_events() -> None:
     operations = detect_unsafe_operations(
         [
             {"tool": "shell", "command": "git status --short"},
             {
                 "tool": "http",
-                "method": "POST",
+                "method": "GET",
                 "url": "https://jira.example/rest/api/2/issue/RHEL-12345",
             },
             {
