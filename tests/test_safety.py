@@ -139,12 +139,37 @@ def test_detect_unsafe_operations_reports_brew_build_submissions() -> None:
     )
 
 
+def test_detect_unsafe_operations_reports_koji_build_submissions() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "shell",
+                "argv": ["koji", "build", "c9s", "package.src.rpm"],
+            },
+            {
+                "source": "run-shell-command",
+                "command": "koji build --scratch c9s package.src.rpm",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "build_submission",
+        "build_submission",
+    ]
+    assert operations[0].detail == "koji build submission: koji build c9s package.src.rpm"
+    assert operations[1].detail == (
+        "koji build submission: koji build --scratch c9s package.src.rpm"
+    )
+
+
 def test_detect_unsafe_operations_ignores_read_only_events() -> None:
     operations = detect_unsafe_operations(
         [
             {"tool": "shell", "command": "git status --short"},
             {"tool": "shell", "command": "rhpkg sources"},
             {"tool": "shell", "command": "brew list-tags package"},
+            {"tool": "shell", "command": "koji list-tags package"},
             {
                 "tool": "http",
                 "method": "GET",
