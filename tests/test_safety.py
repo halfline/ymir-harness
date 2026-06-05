@@ -42,12 +42,54 @@ def test_detect_replay_violations_ignores_recorded_and_local_events() -> None:
                 "url": "file:///tmp/cache/advisory.html",
             },
             {"tool": "http", "method": "GET", "url": "/tmp/cache/advisory.html"},
-            {"tool": "shell", "command": "curl https://example.invalid/advisory"},
+            {"tool": "shell", "command": "python fetch.py https://example.invalid/advisory"},
         ],
         recorded_urls={"https://example.invalid/recorded"},
     )
 
     assert violations == []
+
+
+def test_detect_replay_violations_reports_shell_download_urls() -> None:
+    violations = detect_replay_violations(
+        [
+            {
+                "tool": "shell",
+                "command": (
+                    "curl -fsSL -H 'Referer: https://example.invalid/header' "
+                    "https://example.invalid/advisory"
+                ),
+            },
+            {
+                "tool": "shell",
+                "argv": [
+                    "wget",
+                    "--output-document",
+                    "advisory.html",
+                    "https://example.invalid/recorded",
+                ],
+            },
+            {
+                "tool": "shell",
+                "command": "curl --url https://example.invalid/extra",
+            },
+            {
+                "tool": "shell",
+                "argv": [
+                    "wget",
+                    "--header=Referer: https://example.invalid/header",
+                    "https://example.invalid/source.tar.gz",
+                ],
+            },
+        ],
+        recorded_urls={"https://example.invalid/recorded"},
+    )
+
+    assert violations == [
+        "unrecorded URL: https://example.invalid/advisory",
+        "unrecorded URL: https://example.invalid/extra",
+        "unrecorded URL: https://example.invalid/source.tar.gz",
+    ]
 
 
 def test_detect_unsafe_operations_reports_git_push() -> None:
