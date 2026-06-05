@@ -346,6 +346,60 @@ def test_build_run_report_scores_executor_actual_result(tmp_path: Path) -> None:
     assert {metric["name"]: metric["status"] for metric in payload["metrics"]}["package"] == "pass"
 
 
+def test_build_run_report_fails_executor_score_mismatches(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+        },
+    )
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "package": "libtiff",
+                "resolution": "not_affected",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    assert report.has_failures
+    entry = report.entries[0]
+    assert entry.status == "failed"
+    assert entry.reason == "deterministic score failed"
+    assert entry.score is not None
+    assert not entry.score.passed
+    failed = {metric.name: metric for metric in entry.score.metrics if metric.status == "fail"}
+    assert failed["package"].actual == "libtiff"
+
+
 def test_build_run_report_records_actual_result_write_failures(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
