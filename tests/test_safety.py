@@ -147,6 +147,34 @@ def test_detect_unsafe_operations_reports_testing_farm_submissions() -> None:
     )
 
 
+def test_detect_unsafe_operations_reports_greenwave_mutations() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://gating-status.osci.redhat.com/api/v1.0/decision",
+            },
+            {
+                "tool": "http",
+                "method": "PATCH",
+                "url": "https://greenwave.example/api/v1.0/policies/rhel",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "greenwave_mutation",
+        "greenwave_mutation",
+    ]
+    assert operations[0].detail == (
+        "GreenWave mutation: POST https://gating-status.osci.redhat.com/api/v1.0/decision"
+    )
+    assert operations[1].detail == (
+        "GreenWave mutation: PATCH https://greenwave.example/api/v1.0/policies/rhel"
+    )
+
+
 def test_detect_unsafe_operations_reports_rhpkg_lookaside_uploads() -> None:
     operations = detect_unsafe_operations(
         [
@@ -290,6 +318,11 @@ def test_detect_unsafe_operations_ignores_read_only_events() -> None:
                 "tool": "http",
                 "method": "GET",
                 "url": "https://api.testing-farm.io/v0.1/requests/abc-123",
+            },
+            {
+                "tool": "http",
+                "method": "GET",
+                "url": "https://gating-status.osci.redhat.com/query?nvr=package-1.0-1",
             },
             {
                 "tool": "shell",
