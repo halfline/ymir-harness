@@ -331,12 +331,12 @@ def _run_case_result(
         return RunCaseResult(
             case_id=case_id,
             case_type=case_type,
-            status=execution.status,
+            status=_execution_status(execution, score),
             repetition=repetition,
             expected_path=expected_path if expected_path.is_file() else None,
             actual_path=execution_actual_path,
             score=score,
-            reason=execution.reason,
+            reason=execution.reason or _execution_reason(execution, score),
         )
 
     return RunCaseResult(
@@ -376,6 +376,24 @@ def _score_actual_result(
     actual_result: Mapping[str, Any],
 ) -> ScoreReport:
     return score_case(load_json_file(expected_path), actual_result)
+
+
+def _execution_status(
+    execution: RunCaseExecution,
+    score: ScoreReport | None,
+) -> RunCaseStatus:
+    if execution.status == "passed" and score is not None and not score.passed:
+        return "failed"
+    return execution.status
+
+
+def _execution_reason(
+    execution: RunCaseExecution,
+    score: ScoreReport | None,
+) -> str | None:
+    if execution.status == "passed" and score is not None and not score.passed:
+        return "deterministic score failed"
+    return None
 
 
 def _write_actual_result(path: Path, actual_result: Mapping[str, Any]) -> None:
