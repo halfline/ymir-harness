@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -62,6 +63,7 @@ class RunCaseRequest:
 @dataclass(frozen=True)
 class RunCaseExecution:
     status: RunCaseStatus
+    actual_result: Mapping[str, Any] | None = None
     actual_path: Path | None = None
     reason: str | None = None
 
@@ -298,13 +300,16 @@ def _run_case_result(
                 actual_path=actual_path,
                 reason=_executor_failure_reason(exc),
             )
+        execution_actual_path = execution.actual_path or actual_path
+        if execution.actual_result is not None:
+            _write_actual_result(execution_actual_path, execution.actual_result)
         return RunCaseResult(
             case_id=case_id,
             case_type=case_type,
             status=execution.status,
             repetition=repetition,
             expected_path=expected_path if expected_path.is_file() else None,
-            actual_path=execution.actual_path or actual_path,
+            actual_path=execution_actual_path,
             reason=execution.reason,
         )
 
@@ -324,3 +329,9 @@ def _executor_failure_reason(exc: Exception) -> str:
     if detail:
         return f"executor failed: {type(exc).__name__}: {detail}"
     return f"executor failed: {type(exc).__name__}"
+
+
+def _write_actual_result(path: Path, actual_result: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(dict(actual_result), indent=2, sort_keys=True) + "\n"
+    path.write_text(payload, encoding="utf-8")
