@@ -101,6 +101,8 @@ def detect_unsafe_http_request(
         segment in path for segment in ("fork", "labels", "merge_requests")
     ):
         return UnsafeOperation("gitlab_write", f"GitLab write: {detail}", source)
+    if "errata" in host:
+        return UnsafeOperation("errata_write", f"Errata write: {detail}", source)
     return None
 
 
