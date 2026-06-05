@@ -1,6 +1,53 @@
 from __future__ import annotations
 
-from ymir_harness.safety import detect_unsafe_operations
+from ymir_harness.safety import detect_replay_violations, detect_unsafe_operations
+
+
+def test_detect_replay_violations_reports_unrecorded_http_events() -> None:
+    violations = detect_replay_violations(
+        [
+            {
+                "tool": "http",
+                "method": "GET",
+                "url": "https://example.invalid/advisory",
+            },
+            {
+                "tool": "http",
+                "method": "GET",
+                "url": "https://example.invalid/recorded",
+            },
+            {
+                "tool": "http",
+                "method": "GET",
+                "url": "https://example.invalid/advisory",
+            },
+        ],
+        recorded_urls={"https://example.invalid/recorded"},
+    )
+
+    assert violations == ["unrecorded URL: https://example.invalid/advisory"]
+
+
+def test_detect_replay_violations_ignores_recorded_and_local_events() -> None:
+    violations = detect_replay_violations(
+        [
+            {
+                "tool": "http",
+                "method": "GET",
+                "url": "https://example.invalid/recorded",
+            },
+            {
+                "tool": "http",
+                "method": "GET",
+                "url": "file:///tmp/cache/advisory.html",
+            },
+            {"tool": "http", "method": "GET", "url": "/tmp/cache/advisory.html"},
+            {"tool": "shell", "command": "curl https://example.invalid/advisory"},
+        ],
+        recorded_urls={"https://example.invalid/recorded"},
+    )
+
+    assert violations == []
 
 
 def test_detect_unsafe_operations_reports_git_push() -> None:
