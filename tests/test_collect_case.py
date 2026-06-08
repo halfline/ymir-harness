@@ -82,9 +82,7 @@ def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
     assert (cases_dir / "cases.yaml").read_text(encoding="utf-8") == "cases:\n  - RHEL-12345\n"
 
     mock = json.loads(
-        (cases_dir / "mock_data" / "backport" / "RHEL-12345.json").read_text(
-            encoding="utf-8"
-        )
+        (cases_dir / "mock_data" / "backport" / "RHEL-12345.json").read_text(encoding="utf-8")
     )
     assert mock["repos"][0]["remote_url"] == "https://example.invalid/dnsmasq.git"
     assert mock["zstream_override"] == {"8": "rhel-8.10.z"}
@@ -93,14 +91,15 @@ def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
     ).is_file()
 
     manifest = json.loads(
-        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(
-            encoding="utf-8"
-        )
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["required_urls"] == ["https://example.invalid/fix.patch"]
-    recorded_path = cases_dir / "web_cache" / "RHEL-12345" / manifest["recorded_files"][
-        "https://example.invalid/fix.patch"
-    ]
+    recorded_path = (
+        cases_dir
+        / "web_cache"
+        / "RHEL-12345"
+        / manifest["recorded_files"]["https://example.invalid/fix.patch"]
+    )
     assert recorded_path.read_text(encoding="utf-8") == "cached patch\n"
     assert (cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "source.tar.gz").is_file()
     assert (cases_dir / "source_cache" / "RHEL-12345" / "lookaside" / "source.tar.gz").is_file()
@@ -536,23 +535,13 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     expected = json.loads(
         (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
     )
-    assert expected["patch_urls"] == [
-        "https://gitlab.example/group/pkg/-/merge_requests/7.patch"
-    ]
-    assert expected["fix_sources"] == [
-        "https://gitlab.example/group/pkg/-/merge_requests/7"
-    ]
-    reference_patch = (
-        cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch"
-    )
-    assert reference_patch.read_text(encoding="utf-8") == (
-        "diff --git a/source.c b/source.c\n"
-    )
+    assert expected["patch_urls"] == ["https://gitlab.example/group/pkg/-/merge_requests/7.patch"]
+    assert expected["fix_sources"] == ["https://gitlab.example/group/pkg/-/merge_requests/7"]
+    reference_patch = cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch"
+    assert reference_patch.read_text(encoding="utf-8") == ("diff --git a/source.c b/source.c\n")
 
     manifest = json.loads(
-        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(
-            encoding="utf-8"
-        )
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["required_urls"] == [
         "https://gitlab.example/group/pkg/-/merge_requests/7.patch",
@@ -570,9 +559,7 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/changes": (
             "gitlab/changes.json"
         ),
-        "https://gitlab.example/group/pkg/-/merge_requests/7.patch": (
-            "gitlab/merge_request.patch"
-        ),
+        "https://gitlab.example/group/pkg/-/merge_requests/7.patch": ("gitlab/merge_request.patch"),
     }
     assert result.fetched_urls == seen_urls == list(responses)
 
