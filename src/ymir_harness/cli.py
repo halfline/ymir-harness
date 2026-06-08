@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     collect = subparsers.add_parser(
         "collect-case",
-        help="scaffold one benchmark case from local files or Jira fetches",
+        help="scaffold one benchmark case from local evidence files",
     )
     collect.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
     collect.add_argument("--case-id", required=True, help="Jira issue key / benchmark case id")
@@ -115,7 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument(
         "--network-mode",
         choices=sorted(ALLOWED_NETWORK_MODES),
-        default="network_denied",
+        help=(
+            "expected replay network policy; defaults to replay_only when "
+            "patch/web evidence is provided, otherwise network_denied"
+        ),
     )
     collect.add_argument("--cve-id", dest="cve_ids", action="append", default=[])
     collect.add_argument("--patch-url", dest="patch_urls", action="append", default=[])
@@ -393,7 +396,7 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         answer_leakage=args.answer_leakage,
         case_status=args.case_status,
         case_status_reason=args.case_status_reason,
-        network_mode=args.network_mode,
+        network_mode=_collect_network_mode(args),
         target_branch=args.target_branch,
         fix_version=args.fix_version,
         cve_ids=tuple(args.cve_ids),
@@ -420,6 +423,14 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         overwrite=args.overwrite,
     )
 
+
+
+def _collect_network_mode(args: argparse.Namespace) -> str:
+    if args.network_mode is not None:
+        return args.network_mode
+    if args.patch_urls or args.web_records:
+        return "replay_only"
+    return "network_denied"
 
 
 def _collect_mock_repo(args: argparse.Namespace) -> MockRepoInput | None:
