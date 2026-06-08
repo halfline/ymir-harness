@@ -16,6 +16,7 @@ from ymir_harness.runner import (
     load_case_manifest,
     select_validation_cases,
 )
+from ymir_harness.provenance import parse_provenance_items
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 from ymir_harness.validation import validate_case_directory
 from ymir_harness.ymir_workflows import (
@@ -309,6 +310,13 @@ def _positive_int(value: str) -> int:
         msg = f"invalid positive integer: {value}"
         raise argparse.ArgumentTypeError(msg)
     return parsed
+
+
+def _parse_provenance_or_exit(items: Sequence[str]) -> dict[str, str]:
+    try:
+        return parse_provenance_items(items)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _cmd_compare_results(args: argparse.Namespace) -> int:
