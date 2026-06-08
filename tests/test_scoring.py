@@ -431,8 +431,10 @@ def test_score_case_records_advisory_metrics_without_failing() -> None:
         "runtime_seconds": 42.5,
         "data": {
             "token_usage": {"input": 1200, "output": 300},
+            "iteration_count": 12,
             "tool_call_count": 7,
             "retry_count": 1,
+            "total_cost_usd": 4.25,
             "llm_judge_notes": "consistent with reference result",
         },
     }
@@ -446,8 +448,10 @@ def test_score_case_records_advisory_metrics_without_failing() -> None:
         "llm_judge_notes": "consistent with reference result",
         "runtime_seconds": 42.5,
         "token_usage": {"input": 1200, "output": 300},
+        "iteration_count": 12,
         "tool_call_count": 7,
         "retry_count": 1,
+        "total_cost_usd": 4.25,
     }
 
 
