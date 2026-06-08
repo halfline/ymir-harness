@@ -614,6 +614,10 @@ def test_ymir_rebuild_executor_runs_workflow_with_expected_inputs(
                 )
             ],
             consolidation_summary="Rebuild siblings share the same dependency",
+            usage={"input_tokens": 1500, "output_tokens": 250},
+            iteration=6,
+            tool_calls=[object()],
+            cost=3.5,
         )
 
     executor = make_ymir_rebuild_executor(workflow=workflow)
@@ -654,6 +658,10 @@ def test_ymir_rebuild_executor_runs_workflow_with_expected_inputs(
         "dependency_issues": ["RHEL-23456"],
         "dependency_components": ["golang"],
         "sibling_issues": ["RHEL-34567"],
+        "token_usage": {"input_tokens": 1500, "output_tokens": 250},
+        "iteration_count": 6,
+        "tool_call_count": 1,
+        "total_cost_usd": 3.5,
     }
     assert calls == [
         {
