@@ -142,6 +142,10 @@ download forms are blocked instead of falling through to live network.
 Expected results may declare `required_artifacts`. Scoring compares that list
 with `generated_artifacts` in the actual result and fails the case when any
 required artifact is missing.
+Workflow adapters also expose `YMIR_BENCHMARK_ARTIFACT_DIR` and merge generated
+artifacts, touched files, spec patch declarations, changelog entries, and
+unrelated source change diagnostics from returned workflow payloads, workflow
+state, and files written to that artifact directory.
 
 Expected results may declare `fix_sources`. Scoring compares that list with
 `fix_sources` in the actual result to check required upstream commits,
