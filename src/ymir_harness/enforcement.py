@@ -1,0 +1,337 @@
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import socket
+import subprocess
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from typing import Any
+from urllib.parse import urlparse
+from urllib.request import Request
+
+from ymir_harness.replay import ReplayCache, ReplayCacheError, request_url
+from ymir_harness.safety import detect_replay_violations, detect_unsafe_command
+
+
+class BenchmarkBoundaryViolation(RuntimeError):
+    """Raised when a benchmark run attempts forbidden I/O."""
+
+
+@contextmanager
+def enforce_benchmark_boundaries(environment: Mapping[str, str]) -> Iterator[None]:
+    network_mode = environment.get("YMIR_BENCHMARK_NETWORK_MODE")
+    replay_cache = _replay_cache(environment)
+    recorded_urls = _recorded_urls(environment, replay_cache)
+    active_network_guard = network_mode in {"replay_only", "network_denied"}
+
+    originals = _PatchState.capture()
+    try:
+        _patch_subprocess(originals, network_mode, replay_cache, recorded_urls)
+        if active_network_guard:
+            _patch_socket(originals)
+            _patch_urllib(originals, network_mode, replay_cache)
+            _patch_requests(originals, network_mode, replay_cache)
+            _patch_aiohttp(originals, network_mode, replay_cache)
+        yield
+    finally:
+        originals.restore()
+
+
+class _PatchState:
+    def __init__(self) -> None:
+        self.socket_connect = socket.socket.connect
+        self.socket_connect_ex = socket.socket.connect_ex
+        self.subprocess_run = subprocess.run
+        self.subprocess_popen = subprocess.Popen
+        self.urllib_urlopen = None
+        self.requests_request = None
+        self.aiohttp_request = None
+        self.requests_session = None
+        self.aiohttp_client_session = None
+
+    @classmethod
+    def capture(cls) -> "_PatchState":
+        state = cls()
+        import urllib.request
+
+        state.urllib_urlopen = urllib.request.urlopen
+
+        try:
+            import requests.sessions  # type: ignore[import-not-found]
+        except ImportError:
+            pass
+        else:
+            state.requests_session = requests.sessions.Session
+            state.requests_request = requests.sessions.Session.request
+
+        try:
+            import aiohttp  # type: ignore[import-not-found]
+        except ImportError:
+            pass
+        else:
+            state.aiohttp_client_session = aiohttp.ClientSession
+            state.aiohttp_request = aiohttp.ClientSession._request
+
+        return state
+
+    def restore(self) -> None:
+        socket.socket.connect = self.socket_connect
+        socket.socket.connect_ex = self.socket_connect_ex
+        subprocess.run = self.subprocess_run
+        subprocess.Popen = self.subprocess_popen
+
+        import urllib.request
+
+        if self.urllib_urlopen is not None:
+            urllib.request.urlopen = self.urllib_urlopen
+
+        if self.requests_session is not None and self.requests_request is not None:
+            self.requests_session.request = self.requests_request
+
+        if self.aiohttp_client_session is not None and self.aiohttp_request is not None:
+            self.aiohttp_client_session._request = self.aiohttp_request
+
+
+def _patch_subprocess(
+    originals: _PatchState,
+    network_mode: str | None,
+    replay_cache: ReplayCache | None,
+    recorded_urls: Sequence[str],
+) -> None:
+    def guarded_run(command: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        _check_command(command, network_mode=network_mode, recorded_urls=recorded_urls)
+        replayed = _replayed_shell_download(command, replay_cache, kwargs)
+        if replayed is not None:
+            return replayed
+        return originals.subprocess_run(command, *args, **kwargs)
+
+    class guarded_popen(subprocess.Popen):  # type: ignore[type-arg]
+        def __init__(self, command: Any, *args: Any, **kwargs: Any) -> None:
+            _check_command(command, network_mode=network_mode, recorded_urls=recorded_urls)
+            if _is_shell_download(command):
+                raise BenchmarkBoundaryViolation(
+                    "shell replay through subprocess.Popen is not supported; "
+                    "use Python URL adapters or subprocess.run"
+                )
+            super().__init__(command, *args, **kwargs)
+
+    subprocess.run = guarded_run
+    subprocess.Popen = guarded_popen
+
+
+def _check_command(
+    command: Any,
+    *,
+    network_mode: str | None,
+    recorded_urls: Sequence[str],
+) -> None:
+    operations = detect_unsafe_command(_command_for_safety(command), source="subprocess")
+    if operations:
+        operation = operations[0]
+        raise BenchmarkBoundaryViolation(f"unsafe operation blocked: {operation.detail}")
+
+    tokens = _command_tokens(command)
+    if network_mode in {"replay_only", "network_denied"}:
+        external_urls = _external_urls(tokens)
+        replayable_download = (
+            network_mode == "replay_only"
+            and _is_shell_download(command)
+            and external_urls
+            and all(url in recorded_urls for url in external_urls)
+        )
+        if external_urls and not replayable_download:
+            raise BenchmarkBoundaryViolation(f"external subprocess URL blocked: {external_urls[0]}")
+        violations = detect_replay_violations(
+            [{"argv": tokens}],
+            recorded_urls=recorded_urls,
+        )
+        if violations:
+            raise BenchmarkBoundaryViolation(f"fixture replay violation blocked: {violations[0]}")
+
+
+def _replayed_shell_download(
+    command: Any,
+    replay_cache: ReplayCache | None,
+    kwargs: Mapping[str, Any],
+) -> subprocess.CompletedProcess[Any] | None:
+    if replay_cache is None or not _is_shell_download(command):
+        return None
+
+    urls = _external_urls(_command_tokens(command))
+    if len(urls) != 1 or not replay_cache.has_url(urls[0]):
+        return None
+
+    body = replay_cache.read_bytes(urls[0])
+    text_mode = bool(
+        kwargs.get("text") or kwargs.get("encoding") or kwargs.get("universal_newlines")
+    )
+    stdout = body.decode(kwargs.get("encoding") or "utf-8") if text_mode else body
+    if kwargs.get("stdout") is None:
+        stdout = None
+    return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=None)
+
+
+def _patch_socket(originals: _PatchState) -> None:
+    def guarded_connect(sock: socket.socket, address: Any) -> Any:
+        _check_socket_address(address)
+        return originals.socket_connect(sock, address)
+
+    def guarded_connect_ex(sock: socket.socket, address: Any) -> int:
+        _check_socket_address(address)
+        return originals.socket_connect_ex(sock, address)
+
+    socket.socket.connect = guarded_connect
+    socket.socket.connect_ex = guarded_connect_ex
+
+
+def _check_socket_address(address: Any) -> None:
+    if not isinstance(address, tuple) or not address:
+        return
+    host = str(address[0])
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return
+    raise BenchmarkBoundaryViolation(f"external network connection blocked: {host}")
+
+
+def _patch_urllib(
+    originals: _PatchState,
+    network_mode: str | None,
+    replay_cache: ReplayCache | None,
+) -> None:
+    import urllib.request
+
+    def guarded_urlopen(url: str | Request, *args: Any, **kwargs: Any) -> Any:
+        request = url
+        target_url = (
+            request.full_url if isinstance(request, Request) else request_url(url, args, kwargs)
+        )
+        if target_url is None:
+            return originals.urllib_urlopen(url, *args, **kwargs)
+        if (
+            network_mode == "replay_only"
+            and replay_cache is not None
+            and replay_cache.has_url(target_url)
+        ):
+            return replay_cache.open_urllib_response(target_url)
+        _raise_network_violation(network_mode, target_url)
+        return originals.urllib_urlopen(url, *args, **kwargs)
+
+    urllib.request.urlopen = guarded_urlopen
+
+
+def _patch_requests(
+    originals: _PatchState,
+    network_mode: str | None,
+    replay_cache: ReplayCache | None,
+) -> None:
+    if originals.requests_session is None or originals.requests_request is None:
+        return
+
+    def guarded_request(session: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+        if network_mode == "replay_only" and replay_cache is not None and replay_cache.has_url(url):
+            import requests  # type: ignore[import-not-found]
+
+            response = requests.Response()
+            response.status_code = 200
+            response.url = url
+            response._content = replay_cache.read_bytes(url)
+            response.request = requests.Request(method=method, url=url).prepare()
+            return response
+        _raise_network_violation(network_mode, url)
+        return originals.requests_request(session, method, url, *args, **kwargs)
+
+    originals.requests_session.request = guarded_request
+
+
+def _patch_aiohttp(
+    originals: _PatchState,
+    network_mode: str | None,
+    replay_cache: ReplayCache | None,
+) -> None:
+    if originals.aiohttp_client_session is None or originals.aiohttp_request is None:
+        return
+
+    async def guarded_request(
+        session: Any, method: str, url: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        if network_mode == "replay_only" and replay_cache is not None and replay_cache.has_url(url):
+            return replay_cache.open_aiohttp_response(url)
+        _raise_network_violation(network_mode, url)
+        return await originals.aiohttp_request(session, method, url, *args, **kwargs)
+
+    originals.aiohttp_client_session._request = guarded_request
+
+
+def _raise_network_violation(network_mode: str | None, url: str) -> None:
+    if network_mode == "network_denied":
+        raise BenchmarkBoundaryViolation(f"external network access blocked: {url}")
+    if network_mode == "replay_only":
+        raise BenchmarkBoundaryViolation(f"unrecorded replay URL blocked: {url}")
+
+
+def _replay_cache(environment: Mapping[str, str]) -> ReplayCache | None:
+    try:
+        return ReplayCache.from_environment(environment)
+    except ReplayCacheError as exc:
+        raise BenchmarkBoundaryViolation(str(exc)) from exc
+
+
+def _recorded_urls(
+    environment: Mapping[str, str],
+    replay_cache: ReplayCache | None,
+) -> tuple[str, ...]:
+    encoded = environment.get("YMIR_BENCHMARK_RECORDED_URLS")
+    urls = []
+    if encoded:
+        try:
+            value = json.loads(encoded)
+        except json.JSONDecodeError:
+            value = []
+        if isinstance(value, list):
+            urls.extend(url for url in value if isinstance(url, str) and url)
+    if replay_cache is not None:
+        urls.extend(replay_cache.recorded_urls)
+    return tuple(dict.fromkeys(urls))
+
+
+def _command_for_safety(command: Any) -> str | Sequence[str]:
+    if isinstance(command, str):
+        return command
+    if isinstance(command, Sequence):
+        return [str(part) for part in command]
+    return str(command)
+
+
+def _command_tokens(command: Any) -> list[str]:
+    if isinstance(command, str):
+        try:
+            return shlex.split(command)
+        except ValueError:
+            return command.split()
+    if isinstance(command, Sequence):
+        return [str(part) for part in command]
+    return [str(command)]
+
+
+def _is_shell_download(command: Any) -> bool:
+    tokens = _command_tokens(command)
+    if not tokens:
+        return False
+    return PathName(tokens[0]).name in {"curl", "wget"}
+
+
+def _external_urls(tokens: Sequence[str]) -> list[str]:
+    urls = []
+    for token in tokens[1:]:
+        parsed = urlparse(token)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            urls.append(token)
+    return urls
+
+
+class PathName(str):
+    @property
+    def name(self) -> str:
+        return os.path.basename(self)
