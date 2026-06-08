@@ -6,7 +6,7 @@ import inspect
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 from ymir_harness.models import SCHEMA_VERSION
@@ -655,6 +655,93 @@ def _model_payload(value: Any) -> dict[str, Any]:
     return payload
 
 
+def _state_diagnostics(state: Any) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
+
+    usage = _diagnostic_payload(getattr(state, "usage", None))
+    if usage is not None:
+        diagnostics["token_usage"] = usage
+
+    iteration_count = _int_or_none(
+        _field_value(state, "iteration_count") or _field_value(state, "iteration")
+    )
+    if iteration_count is not None:
+        diagnostics["iteration_count"] = iteration_count
+
+    tool_call_count = _tool_call_count(state)
+    if tool_call_count is not None:
+        diagnostics["tool_call_count"] = tool_call_count
+
+    total_cost_usd = _total_cost_usd(state)
+    if total_cost_usd is not None:
+        diagnostics["total_cost_usd"] = total_cost_usd
+
+    return diagnostics
+
+
+def _diagnostic_payload(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return _compact_mapping(value)
+    if is_dataclass(value):
+        return _compact_mapping(asdict(value))
+    if hasattr(value, "model_dump"):
+        try:
+            payload = value.model_dump(mode="json")
+        except TypeError:
+            payload = value.model_dump()
+        if isinstance(payload, Mapping):
+            return _compact_mapping(payload)
+        return payload
+    return _number_or_none(value)
+
+
+def _compact_mapping(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    payload = {str(key): item for key, item in value.items() if item is not None}
+    return payload or None
+
+
+def _tool_call_count(state: Any) -> int | None:
+    direct = _int_or_none(_field_value(state, "tool_call_count"))
+    if direct is not None:
+        return direct
+
+    tool_calls = _field_value(state, "tool_calls")
+    if isinstance(tool_calls, list | tuple):
+        return len(tool_calls)
+
+    steps = _field_value(state, "steps")
+    if isinstance(steps, list | tuple):
+        return len(steps)
+
+    return None
+
+
+def _total_cost_usd(state: Any) -> float | None:
+    direct = _number_or_none(_field_value(state, "total_cost_usd"))
+    if direct is not None:
+        return direct
+
+    cost = _field_value(state, "cost")
+    if cost is None:
+        return None
+
+    for name in ("total_cost_usd", "total_usd", "usd", "total"):
+        value = _number_or_none(_field_value(cost, name))
+        if value is not None:
+            return value
+
+    payload = _diagnostic_payload(cost)
+    if isinstance(payload, Mapping):
+        for name in ("total_cost_usd", "total_usd", "usd", "total"):
+            value = _number_or_none(payload.get(name))
+            if value is not None:
+                return value
+
+    return _number_or_none(cost)
+
+
 def _string_or_none(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -727,6 +814,22 @@ def _field_value(value: Any, name: str) -> Any:
     if isinstance(value, Mapping):
         return value.get(name)
     return getattr(value, name, None)
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _number_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
 
 
 def _unique_strings(values: Any) -> list[str]:
