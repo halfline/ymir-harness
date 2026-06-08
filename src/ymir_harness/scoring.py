@@ -14,6 +14,7 @@ from ymir_harness.models import (
     ScoreMetric,
     ScoreReport,
 )
+from ymir_harness.provenance import collect_provenance
 
 ADVISORY_RESULT_FIELDS = (
     "diff_similarity",
@@ -203,6 +204,7 @@ def score_result_directory(
     run_id: str | None = None,
     ymir_sha: str | None = None,
     variant: str | None = None,
+    provenance: Mapping[str, Any] | None = None,
 ) -> ScoreCollectionReport:
     cases_dir = cases_dir.resolve()
     actual_results_dir = actual_results_dir.resolve()
@@ -219,6 +221,7 @@ def score_result_directory(
         variant=variant,
         harness_version=__version__,
         fixture_checksum=_fixture_checksum(cases_dir),
+        provenance=collect_provenance(ymir_sha=ymir_sha, overrides=provenance),
     )
 
 
