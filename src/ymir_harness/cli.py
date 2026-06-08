@@ -155,23 +155,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.set_defaults(func=_cmd_run)
 
-    compare = subparsers.add_parser(
-        "compare-results",
-        help="compare two aggregate score-results JSON reports",
-    )
-    compare.add_argument("baseline_json", type=Path)
-    compare.add_argument("candidate_json", type=Path)
-    compare.add_argument(
-        "--output",
-        type=Path,
-        help="write comparison JSON to this path instead of stdout",
-    )
-    compare.add_argument(
-        "--markdown-output",
-        type=Path,
-        help="write a Markdown comparison report to this path",
-    )
-    compare.set_defaults(func=_cmd_compare_results)
+    for compare_name in ("compare-results", "compare"):
+        compare = subparsers.add_parser(
+            compare_name,
+            help="compare two aggregate score-results JSON reports",
+        )
+        compare.add_argument("baseline_json", type=Path)
+        compare.add_argument("candidate_json", type=Path)
+        compare.add_argument(
+            "--output",
+            type=Path,
+            help="write comparison JSON to this path instead of stdout",
+        )
+        compare.add_argument(
+            "--markdown-output",
+            type=Path,
+            help="write a Markdown comparison report to this path",
+        )
+        compare.set_defaults(func=_cmd_compare_results)
 
     return parser
 
