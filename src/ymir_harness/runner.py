@@ -22,6 +22,7 @@ from ymir_harness.models import (
 from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
 
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
+MAX_ITERATIONS_OVERRIDE_ENV = "BENCHMARK_MAX_ITERATIONS_OVERRIDE"
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
     "MOCK_JIRA": "true",
@@ -95,6 +96,9 @@ def build_no_write_environment(
     env.setdefault("GIT_REPO_BASEPATH", str(results_dir.resolve()))
     env["YMIR_BENCHMARK_CASES_DIR"] = str(cases_dir.resolve())
     env["YMIR_BENCHMARK_RESULTS_DIR"] = str(results_dir.resolve())
+    max_iterations = env.get(MAX_ITERATIONS_OVERRIDE_ENV)
+    if max_iterations:
+        env["BEEAI_MAX_ITERATIONS"] = max_iterations
     if case_id:
         env["YMIR_BENCHMARK_CASE_ID"] = case_id
     else:
