@@ -200,6 +200,11 @@ Actual results may include advisory diagnostics such as `runtime_seconds`,
 `llm_judge_notes`. Scoring reports carry these as `advisory_metrics` without
 using them for pass/fail status.
 
+Expected results may declare `alternate_acceptable_outcomes` as a list of
+partial expected-result overrides. If the primary expected result fails,
+scoring tries each alternate and accepts the first deterministic pass while
+recording an `alternate_acceptable_outcome` metric.
+
 Phase 3 runner reports use `run_id`, `variant`, optional `ymir_sha`,
 `harness_version`, `fixture_checksum`, `features`, and `repeat` metadata. Each
 case entry includes `case_id`, `case_type`, `status`, `repetition`, optional
