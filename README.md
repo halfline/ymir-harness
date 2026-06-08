@@ -175,6 +175,11 @@ each runnable case. The runner applies the per-case no-write environment,
 writes the returned structured triage result to the reserved actual result
 path, scores it against the expected result, and records the score in the run
 entry. A deterministic score mismatch marks the run entry failed.
+Use `--workflow ymir-backport` to call Ymir's backport `run_workflow()` for
+implementation cases. The executor reads expected-result fields for the
+package, target branch, patch sources, CVE, justification, and fix version,
+then writes a normalized backport actual result with build status, backport
+status, errors, and generated artifacts for scoring.
 Programmatic runner integrations can pass a case executor to receive resolved
 case metadata, the reserved actual result path, enabled feature flags, and the
 per-case no-write environment before returning a run status.
@@ -182,7 +187,7 @@ Executors may return an `actual_result` payload for the runner to write as JSON
 at the reserved actual result path.
 If the executor raises, the runner records a failed case entry with the reserved
 actual result path and the exception reason.
-Future workflow adapters start from a no-write environment profile that forces
+Workflow adapters start from a no-write environment profile that forces
 `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
 known write credentials and Kerberos keytab paths from the process environment.
 Unsafe-operation detection currently classifies git push attempts, Jira write
