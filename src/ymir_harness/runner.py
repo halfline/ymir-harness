@@ -19,6 +19,7 @@ from ymir_harness.models import (
     ValidationIssue,
     ValidationReport,
 )
+from ymir_harness.provenance import collect_provenance
 from ymir_harness.safety import detect_replay_violations, detect_unsafe_operations
 from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
 
@@ -252,6 +253,7 @@ def build_run_report(
     repeat: int = 1,
     executor: RunCaseExecutor | None = None,
     base_env: Mapping[str, str] | None = None,
+    provenance: Mapping[str, Any] | None = None,
 ) -> RunReport:
     cases_dir = cases_dir.resolve()
     results_dir = results_dir.resolve()
@@ -281,6 +283,12 @@ def build_run_report(
         fixture_checksum=_fixture_checksum(cases_dir),
         features=list(features),
         repeat=repeat,
+        provenance=collect_provenance(
+            base_env=base_env,
+            ymir_sha=ymir_sha,
+            features=features,
+            overrides=provenance,
+        ),
     )
 
 
