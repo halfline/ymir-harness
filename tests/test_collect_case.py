@@ -12,6 +12,7 @@ from ymir_harness.collect_case import (
     WebRecord,
     collect_case,
 )
+import ymir_harness.collect_case as collect_case_module
 from ymir_harness.validation import validate_case_directory
 
 
@@ -138,6 +139,53 @@ def test_collect_case_rejects_network_denied_external_records(tmp_path: Path) ->
         )
 
 
+def test_collect_case_fetches_jira_issue_comments_and_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+            "key": "RHEL-12345",
+            "fields": {"summary": "Backport CVE fix"},
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/comment": {
+            "comments": [{"body": "Please backport this fix."}],
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [
+            {"object": {"url": "https://gitlab.example/group/pkg/-/merge_requests/7"}}
+        ],
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(responses, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            jira_url="https://issues.example.invalid/browse/RHEL-12345",
+        )
+    )
+
+    jira_dir = tmp_path / "benchmark_cases" / "jiras" / "RHEL-12345"
+    issue = json.loads((jira_dir / "issue.json").read_text(encoding="utf-8"))
+    comments = json.loads((jira_dir / "comments.json").read_text(encoding="utf-8"))
+    links = json.loads((jira_dir / "links.json").read_text(encoding="utf-8"))
+    assert issue["key"] == "RHEL-12345"
+    assert comments["comments"][0]["body"] == "Please backport this fix."
+    assert links["links"][0]["object"]["url"] == (
+        "https://gitlab.example/group/pkg/-/merge_requests/7"
+    )
+    assert result.fetched_urls == seen_urls == list(responses)
+
+
 
 def test_collect_case_overwrite_replaces_existing_files(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
@@ -165,6 +213,37 @@ def test_collect_case_overwrite_replaces_existing_files(tmp_path: Path) -> None:
     )
     assert expected["package"] == "libtiff"
 
+
+def _fake_urlopen(
+    responses: dict[str, object],
+    seen_urls: list[str],
+):
+    def fake_urlopen(request, timeout: float):
+        del timeout
+        url = request.full_url
+        seen_urls.append(url)
+        if url not in responses:
+            raise OSError(f"unexpected URL: {url}")
+        body = responses[url]
+        if not isinstance(body, str):
+            body = json.dumps(body)
+        return _FakeHttpResponse(body.encode("utf-8"))
+
+    return fake_urlopen
+
+
+class _FakeHttpResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self) -> "_FakeHttpResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
 
 
 def _write_json(path: Path, payload: object) -> Path:
