@@ -130,6 +130,8 @@ class FetchedEvidence:
     jira_comments: Mapping[str, Any] | None = None
     jira_links: Any = None
     jira_patch_urls: tuple[str, ...] = ()
+    gitlab_mr: Mapping[str, Any] | None = None
+    gitlab_commits: Any = None
     gitlab_mr_url: str | None = None
     gitlab_patch_url: str | None = None
     gitlab_patch_body: bytes | None = None
@@ -158,6 +160,7 @@ class CollectCaseRequest:
     alternate_acceptable_outcomes: tuple[Mapping[str, Any], ...] = ()
     reference_patch_mode: str | None = None
     mock_repo: MockRepoInput | None = None
+    mock_agent: str = "triage"
     jira_url: str | None = None
     jira_base_url: str | None = None
     jira_token_env: str = "JIRA_TOKEN"
@@ -256,6 +259,8 @@ def _fetch_evidence(
     jira_comments = None
     jira_links = None
     jira_patch_urls: tuple[str, ...] = ()
+    gitlab_mr = None
+    gitlab_commits = None
     gitlab_records: list[FetchedRecord] = []
     gitlab_patch_url = None
     gitlab_patch_body = None
@@ -305,6 +310,10 @@ def _fetch_evidence(
         for name in ("merge_request", "commits", "changes"):
             url = gitlab_urls[name]
             body = _fetch_bytes(url, headers=gitlab_headers, request=request, result=result)
+            if name == "merge_request":
+                gitlab_mr = _json_object_from_body(body, url)
+            elif name == "commits":
+                gitlab_commits = _json_value_from_body(body, url)
             gitlab_records.append(
                 FetchedRecord(
                     url=url,
@@ -365,6 +374,8 @@ def _fetch_evidence(
         jira_comments=jira_comments,
         jira_links=jira_links,
         jira_patch_urls=jira_patch_urls,
+        gitlab_mr=gitlab_mr,
+        gitlab_commits=gitlab_commits,
         gitlab_mr_url=gitlab_mr_url,
         gitlab_patch_url=gitlab_patch_url,
         gitlab_patch_body=gitlab_patch_body,
@@ -454,6 +465,20 @@ def _gitlab_mr_urls(url: str) -> dict[str, str]:
         "changes": f"{api_base}/changes",
         "patch": f"{normalized_mr_url}.patch",
     }
+
+
+def _json_object_from_body(body: bytes, url: str) -> Mapping[str, Any]:
+    data = _json_value_from_body(body, url)
+    if not isinstance(data, Mapping):
+        raise CollectCaseError(f"fetched URL returned non-object JSON: {url}")
+    return data
+
+
+def _json_value_from_body(body: bytes, url: str) -> Any:
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CollectCaseError(f"fetched URL did not return JSON: {url}") from exc
 
 
 def _gitlab_mr_url_from_jira_evidence(*values: Any) -> str | None:
@@ -572,13 +597,7 @@ def _fetch_json(
     result: CollectCaseResult,
 ) -> Mapping[str, Any]:
     body = _fetch_bytes(url, headers=headers, request=request, result=result)
-    try:
-        data = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CollectCaseError(f"fetched URL did not return JSON: {url}") from exc
-    if not isinstance(data, Mapping):
-        raise CollectCaseError(f"fetched URL returned non-object JSON: {url}")
-    return data
+    return _json_object_from_body(body, url)
 
 
 def _fetch_json_value(
@@ -589,10 +608,7 @@ def _fetch_json_value(
     result: CollectCaseResult,
 ) -> Any:
     body = _fetch_bytes(url, headers=headers, request=request, result=result)
-    try:
-        return json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CollectCaseError(f"fetched URL did not return JSON: {url}") from exc
+    return _json_value_from_body(body, url)
 
 
 def _fetch_bytes(
@@ -619,17 +635,27 @@ def _complete_request(
     issue = _evidence_issue(request, fetched)
     comments = _evidence_comments(request, fetched)
     resolution = request.resolution or _derive_resolution(issue, comments)
+    package = request.package or _derive_package(issue)
+    fix_version = request.fix_version or _derive_fix_version(issue)
+    target_branch = request.target_branch
+    mock_repo = request.mock_repo or _derive_mock_repo(
+        request,
+        fetched,
+        target_branch=target_branch,
+        fix_version=fix_version,
+    )
 
     return replace(
         request,
         case_type=request.case_type or _derive_case_type(resolution),
         resolution=resolution,
-        package=request.package or _derive_package(issue),
+        package=package,
         expected_basis=request.expected_basis
         or ("historical_jira_state" if issue is not None else "manual_review"),
         network_mode=request.network_mode or _derive_network_mode(request, fetched),
-        fix_version=request.fix_version or _derive_fix_version(issue),
+        fix_version=fix_version,
         cve_ids=request.cve_ids or tuple(_derive_cve_ids(issue, comments)),
+        mock_repo=mock_repo,
     )
 
 
@@ -733,6 +759,79 @@ def _derive_network_mode(request: CollectCaseRequest, fetched: FetchedEvidence) 
     ):
         return "replay_only"
     return "network_denied"
+
+
+def _derive_mock_repo(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+    *,
+    target_branch: str | None,
+    fix_version: str | None,
+) -> MockRepoInput | None:
+    if fetched.gitlab_mr is None:
+        return None
+
+    mr_url = _nonempty_string(fetched.gitlab_mr.get("web_url")) or fetched.gitlab_mr_url
+    remote_url = _gitlab_remote_url_from_mr_url(mr_url)
+    pre_fix_ref = _gitlab_pre_fix_ref(fetched.gitlab_mr, fetched.gitlab_commits)
+    branch = _nonempty_string(fetched.gitlab_mr.get("target_branch"))
+    if remote_url is None or pre_fix_ref is None or branch is None:
+        return None
+
+    expected_branch = target_branch or fix_version
+    return MockRepoInput(
+        remote_url=remote_url,
+        pre_fix_ref=pre_fix_ref,
+        branch=branch,
+        agent=request.mock_agent,
+        zstream_override=_zstream_override(branch, expected_branch),
+    )
+
+
+def _gitlab_remote_url_from_mr_url(url: str | None) -> str | None:
+    if url is None:
+        return None
+    parsed = urlparse(url)
+    marker = "/-/merge_requests/"
+    if not parsed.scheme or not parsed.netloc or marker not in parsed.path:
+        return None
+    project_path = parsed.path.split(marker, 1)[0].rstrip("/")
+    if not project_path:
+        return None
+    suffix = "" if project_path.endswith(".git") else ".git"
+    return f"{parsed.scheme}://{parsed.netloc}{project_path}{suffix}"
+
+
+def _gitlab_pre_fix_ref(mr: Mapping[str, Any], commits: Any) -> str | None:
+    diff_refs = mr.get("diff_refs")
+    if isinstance(diff_refs, Mapping):
+        for name in ("base_sha", "start_sha"):
+            if value := _nonempty_string(diff_refs.get(name)):
+                return value
+
+    if isinstance(commits, list) and commits:
+        first_commit = commits[0]
+        if isinstance(first_commit, Mapping):
+            parent_ids = first_commit.get("parent_ids")
+            if isinstance(parent_ids, list) and parent_ids:
+                return _nonempty_string(parent_ids[0])
+    return None
+
+
+def _zstream_override(branch: str, expected_branch: str | None) -> dict[str, str]:
+    if expected_branch is None or expected_branch == branch:
+        return {}
+    match = re.search(r"\brhel-(\d+)", expected_branch)
+    if match is None:
+        return {}
+    return {match.group(1): expected_branch}
+
+
+def _nonempty_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
 
 
 def _issue_fields(issue: Mapping[str, Any] | None) -> Mapping[str, Any] | None:

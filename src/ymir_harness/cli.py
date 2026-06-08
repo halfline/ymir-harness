@@ -422,6 +422,7 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         alternate_acceptable_outcomes=load_alternate_outcomes(args.alternate_outcomes),
         reference_patch_mode=args.reference_patch_mode,
         mock_repo=mock_repo,
+        mock_agent=args.mock_agent,
         jira_url=args.jira_url,
         jira_base_url=args.jira_base_url,
         jira_token_env=args.jira_token_env,
