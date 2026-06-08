@@ -174,7 +174,11 @@ def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
                     "error": None,
                     "srpm_path": "/tmp/build/dnsmasq.src.rpm",
                 }
-            )
+            ),
+            usage={"input_tokens": 2200, "output_tokens": 500},
+            iteration_count=17,
+            tool_call_count=8,
+            total_cost_usd=9.75,
         )
 
     def agent_factory(_gateway_tools, _local_tool_options):
@@ -209,6 +213,10 @@ def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
             "srpm_path": "/tmp/build/dnsmasq.src.rpm",
         },
         "generated_artifacts": ["/tmp/build/dnsmasq.src.rpm"],
+        "token_usage": {"input_tokens": 2200, "output_tokens": 500},
+        "iteration_count": 17,
+        "tool_call_count": 8,
+        "total_cost_usd": 9.75,
     }
     assert calls == [
         {
