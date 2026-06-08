@@ -22,8 +22,10 @@ ADVISORY_RESULT_FIELDS = (
     "runtime",
     "runtime_seconds",
     "token_usage",
+    "iteration_count",
     "tool_call_count",
     "retry_count",
+    "total_cost_usd",
 )
 
 
