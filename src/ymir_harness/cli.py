@@ -20,6 +20,7 @@ from ymir_harness.scoring import load_json_file, score_case, score_result_direct
 from ymir_harness.validation import validate_case_directory
 from ymir_harness.ymir_workflows import (
     make_ymir_backport_executor,
+    make_ymir_rebuild_executor,
     make_ymir_rebase_executor,
     make_ymir_triage_executor,
 )
@@ -133,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true", help="print the run report JSON to stdout")
     run.add_argument(
         "--workflow",
-        choices=("none", "ymir-triage", "ymir-backport", "ymir-rebase"),
+        choices=("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild"),
         default="none",
         help="workflow executor to invoke; defaults to placeholder run entries",
     )
@@ -293,6 +294,8 @@ def _run_executor(workflow: str):
         return make_ymir_backport_executor()
     if workflow == "ymir-rebase":
         return make_ymir_rebase_executor()
+    if workflow == "ymir-rebuild":
+        return make_ymir_rebuild_executor()
     return None
 
 
