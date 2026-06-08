@@ -68,6 +68,35 @@ def test_render_comparison_markdown_lists_case_deltas(tmp_path: Path) -> None:
     assert "# Result Comparison" in markdown
     assert "Headline wins: `1`" in markdown
     assert "| RHEL-1 | cve_backport | yes |  | failed | passed | win |" in markdown
+    assert "Baseline cost" not in markdown
+
+
+def test_compare_result_payloads_reports_cost_deltas(tmp_path: Path) -> None:
+    report = compare_result_payloads(
+        {"cases": [_case("RHEL-1", "passed", True, total_cost_usd=4.5)]},
+        {"cases": [_case("RHEL-1", "passed", True, total_cost_usd=7.25)]},
+        tmp_path / "baseline.json",
+        tmp_path / "candidate.json",
+    )
+
+    entry = report.entries[0]
+    assert entry.baseline_total_cost_usd == 4.5
+    assert entry.candidate_total_cost_usd == 7.25
+    assert entry.cost_delta_usd == 2.75
+
+    payload = report.to_json()["cases"][0]
+    assert payload["baseline_total_cost_usd"] == 4.5
+    assert payload["candidate_total_cost_usd"] == 7.25
+    assert payload["cost_delta_usd"] == 2.75
+
+    markdown = render_comparison_markdown(report)
+    assert (
+        "| Case | Type | Headline | Reason | Baseline | Candidate | Delta | "
+        "Baseline cost | Candidate cost | Cost delta |"
+    ) in markdown
+    assert (
+        "| RHEL-1 | cve_backport | yes |  | passed | passed | unchanged_pass | 4.5 | 7.25 | 2.75 |"
+    ) in markdown
 
 
 def _case(
@@ -76,6 +105,7 @@ def _case(
     headline: bool,
     *,
     headline_reason: str | None = None,
+    total_cost_usd: float | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "case_id": case_id,
@@ -85,4 +115,13 @@ def _case(
     }
     if headline_reason is not None:
         payload["headline_reason"] = headline_reason
+    if total_cost_usd is not None:
+        payload["score"] = {
+            "advisory_metrics": [
+                {
+                    "name": "total_cost_usd",
+                    "value": total_cost_usd,
+                }
+            ]
+        }
     return payload
