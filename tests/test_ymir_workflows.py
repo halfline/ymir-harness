@@ -299,6 +299,62 @@ def test_ymir_backport_executor_reports_missing_backport_result(tmp_path: Path) 
     assert execution.reason == "ymir backport workflow returned no backport result"
 
 
+def test_ymir_backport_executor_collects_artifacts_and_scope(tmp_path: Path) -> None:
+    request = _request(
+        tmp_path,
+        environment={
+            "DRY_RUN": "true",
+            "YMIR_BENCHMARK_ARTIFACT_DIR": str(tmp_path / "artifacts" / "RHEL-12345"),
+        },
+    )
+    artifact_path = Path(request.environment["YMIR_BENCHMARK_ARTIFACT_DIR"]) / "fix.patch"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("diff --git a/source.c b/source.c\n", encoding="utf-8")
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+        },
+    )
+
+    async def workflow(**_kwargs):
+        return _State(
+            backport_result=_BackportResult(
+                {
+                    "success": True,
+                    "status": "built",
+                    "srpm_path": "/tmp/build/dnsmasq.src.rpm",
+                    "touched_files": ["SOURCES/fix.patch"],
+                    "spec_patches": ["Patch0001: fix.patch"],
+                    "changelog_entries": ["- Resolves: RHEL-12345"],
+                }
+            ),
+        )
+
+    executor = make_ymir_backport_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(request)
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    assert execution.actual_result["generated_artifacts"] == [
+        "/tmp/build/dnsmasq.src.rpm",
+        str(artifact_path),
+    ]
+    assert execution.actual_result["touched_files"] == ["SOURCES/fix.patch"]
+    assert execution.actual_result["spec_patches"] == ["Patch0001: fix.patch"]
+    assert execution.actual_result["changelog_entries"] == ["- Resolves: RHEL-12345"]
+
+
 def test_ymir_rebase_executor_runs_workflow_with_expected_inputs(
     tmp_path: Path,
     monkeypatch,
