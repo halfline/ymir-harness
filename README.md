@@ -81,6 +81,10 @@ a z-stream name such as `rhel-9.7.z` and the dist-git branch differs,
 `collect-case` writes the corresponding `zstream_override`.
 Supplying `--remote-url`, `--pre-fix-ref`, and `--branch` keeps using the
 manual mock repo metadata instead.
+Use `--mock-repo-cache DIR` to clone or refresh mock repos into a local bare
+repo cache during collection. Cached fixtures keep `remote_url` as the original
+URL for replay rewrites and blocked-network checks, and add `source_url` with
+the local cache path that `run` can clone offline.
 The MR patch is also copied to `mock_data/*/reference_patches/CASE_ID.patch`
 when mock repo metadata is provided and no local `--reference-patch` is
 supplied. Jira fetches use `JIRA_TOKEN` when it is set. Tokens are sent as
