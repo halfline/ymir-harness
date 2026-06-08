@@ -7,6 +7,7 @@ import os
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
+from pathlib import Path
 from typing import Any
 
 from ymir_harness.models import SCHEMA_VERSION
@@ -650,6 +651,11 @@ def _rebuild_actual_result(
 
     actual.update(_state_diagnostics(state))
     return actual
+
+
+def _request_artifact_dir(request: RunCaseRequest) -> Path | None:
+    artifact_dir = request.environment.get("YMIR_BENCHMARK_ARTIFACT_DIR")
+    return Path(artifact_dir) if artifact_dir else None
 
 
 def _model_payload(value: Any) -> dict[str, Any]:
