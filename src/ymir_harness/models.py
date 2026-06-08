@@ -408,6 +408,9 @@ class ComparisonEntry:
     candidate_status: str | None
     delta: ComparisonDelta
     headline_reason: str | None = None
+    baseline_total_cost_usd: float | None = None
+    candidate_total_cost_usd: float | None = None
+    cost_delta_usd: float | None = None
 
     def to_json(self) -> dict[str, Any]:
         payload = {
@@ -420,6 +423,12 @@ class ComparisonEntry:
         }
         if self.headline_reason:
             payload["headline_reason"] = self.headline_reason
+        if self.baseline_total_cost_usd is not None:
+            payload["baseline_total_cost_usd"] = self.baseline_total_cost_usd
+        if self.candidate_total_cost_usd is not None:
+            payload["candidate_total_cost_usd"] = self.candidate_total_cost_usd
+        if self.cost_delta_usd is not None:
+            payload["cost_delta_usd"] = self.cost_delta_usd
         return payload
 
 
