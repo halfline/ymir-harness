@@ -1013,6 +1013,42 @@ def test_build_run_report_records_executor_failures(tmp_path: Path) -> None:
     assert entry.reason == "executor failed: RuntimeError: adapter stopped"
 
 
+def test_build_run_report_records_executor_exception_group_details(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        raise ExceptionGroup("workflow failed", [RuntimeError("inner stopped")])
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    entry = report.entries[0]
+    assert entry.status == "failed"
+    assert entry.reason == (
+        "executor failed: ExceptionGroup: workflow failed (1 sub-exception) "
+        "[RuntimeError: inner stopped]"
+    )
+
+
 def _write_expected(cases_dir: Path, case_id: str, data: object | None = None) -> None:
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
     expected_path.parent.mkdir(parents=True, exist_ok=True)
