@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 from ymir_harness.runner import RunCaseRequest
-from ymir_harness.ymir_workflows import make_ymir_triage_executor
+from ymir_harness.ymir_workflows import make_ymir_backport_executor, make_ymir_triage_executor
 
 
 def test_ymir_triage_executor_runs_workflow_with_no_write_environment(
@@ -109,6 +110,170 @@ def test_ymir_triage_executor_reports_missing_triage_result(tmp_path: Path) -> N
     assert execution.reason == "ymir triage workflow returned no triage result"
 
 
+def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OUTER_ONLY", "kept")
+    request = _request(
+        tmp_path,
+        environment={
+            "PATH": "/usr/bin",
+            "DRY_RUN": "true",
+        },
+        features=("YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK",),
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+            "cve_ids": ["CVE-2026-0001"],
+            "rationale": "Merged upstream fix",
+            "fix_version": "rhel-8.10.z",
+        },
+    )
+    calls = []
+
+    async def workflow(**kwargs):
+        calls.append(
+            {
+                **kwargs,
+                "dry_run_env": os.environ["DRY_RUN"],
+                "feature_env": os.environ["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"],
+                "outer_only": os.environ.get("OUTER_ONLY"),
+            }
+        )
+        return _State(
+            backport_result=_BackportResult(
+                {
+                    "success": True,
+                    "status": "built",
+                    "error": None,
+                    "srpm_path": "/tmp/build/dnsmasq.src.rpm",
+                }
+            )
+        )
+
+    def agent_factory(_gateway_tools, _local_tool_options):
+        return object()
+
+    executor = make_ymir_backport_executor(
+        workflow=workflow,
+        agent_factory=agent_factory,
+    )
+
+    execution = executor(request)
+
+    assert os.environ["OUTER_ONLY"] == "kept"
+    assert execution.status == "passed"
+    assert execution.actual_result == {
+        "schema_version": 1,
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "workflow": "ymir-backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "target_branch": "rhel-8.10.z",
+        "patch_urls": ["https://example.invalid/fix.patch"],
+        "cve_ids": ["CVE-2026-0001"],
+        "build_result": "passed",
+        "backport_status": "built",
+        "backport_error": None,
+        "data": {
+            "success": True,
+            "status": "built",
+            "error": None,
+            "srpm_path": "/tmp/build/dnsmasq.src.rpm",
+        },
+        "generated_artifacts": ["/tmp/build/dnsmasq.src.rpm"],
+    }
+    assert calls == [
+        {
+            "package": "dnsmasq",
+            "dist_git_branch": "rhel-8.10.z",
+            "upstream_patches": ["https://example.invalid/fix.patch"],
+            "jira_issue": "RHEL-12345",
+            "cve_id": "CVE-2026-0001",
+            "justification": "Merged upstream fix",
+            "fix_version": "rhel-8.10.z",
+            "dry_run": True,
+            "backport_agent_factory": agent_factory,
+            "dry_run_env": "true",
+            "feature_env": "true",
+            "outer_only": None,
+        }
+    ]
+
+
+def test_ymir_backport_executor_reports_missing_expected_inputs(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+        },
+    )
+    calls = []
+
+    async def workflow(**kwargs):
+        calls.append(kwargs)
+        return _State(backport_result={})
+
+    executor = make_ymir_backport_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(request)
+
+    assert execution.status == "failed"
+    assert execution.actual_result is None
+    assert execution.reason == (
+        "ymir backport workflow missing expected dist_git_branch, upstream_patches"
+    )
+    assert calls == []
+
+
+def test_ymir_backport_executor_reports_missing_backport_result(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+        },
+    )
+
+    async def workflow(**_kwargs):
+        return _State(backport_result=None)
+
+    executor = make_ymir_backport_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(request)
+
+    assert execution.status == "failed"
+    assert execution.actual_result is None
+    assert execution.reason == "ymir backport workflow returned no backport result"
+
+
 def _request(
     tmp_path: Path,
     *,
@@ -131,13 +296,27 @@ def _request(
     )
 
 
+def _write_expected(request: RunCaseRequest, payload: dict[str, object]) -> None:
+    request.expected_path.parent.mkdir(parents=True, exist_ok=True)
+    request.expected_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 class _State:
-    def __init__(self, *, triage_result, target_branch):
-        self.triage_result = triage_result
-        self.target_branch = target_branch
+    def __init__(self, **attributes):
+        for name, value in attributes.items():
+            setattr(self, name, value)
 
 
 class _TriageResult:
+    def __init__(self, payload: dict[str, object]):
+        self._payload = payload
+
+    def model_dump(self, *, mode: str):
+        assert mode == "json"
+        return self._payload
+
+
+class _BackportResult:
     def __init__(self, payload: dict[str, object]):
         self._payload = payload
 
