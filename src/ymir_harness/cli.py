@@ -146,6 +146,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="workflow executor to invoke; defaults to placeholder run entries",
     )
+    run.add_argument(
+        "--provenance",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="record additional run provenance; may be provided more than once",
+    )
     run.set_defaults(func=_cmd_run)
 
     compare = subparsers.add_parser(
@@ -275,6 +282,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         features=args.features,
         repeat=args.repeat,
         executor=_run_executor(args.workflow),
+        provenance=_parse_provenance_or_exit(args.provenance),
     )
     output_path = args.output or results_dir / "run.json"
     payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
