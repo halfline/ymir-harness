@@ -127,6 +127,80 @@ def test_ymir_triage_executor_reports_missing_triage_result(tmp_path: Path) -> N
     assert execution.reason == "ymir triage workflow returned no triage result"
 
 
+@pytest.mark.parametrize(
+    ("executor_factory", "case_type", "expected", "reason"),
+    [
+        (
+            make_ymir_triage_executor,
+            "cve_backport",
+            None,
+            "ymir triage workflow missing MCP_GATEWAY_URL; "
+            "start the MCP gateway and pass its SSE URL in the run environment",
+        ),
+        (
+            make_ymir_backport_executor,
+            "cve_backport",
+            {
+                "schema_version": 1,
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+                "target_branch": "rhel-8.10.z",
+                "patch_urls": ["https://example.invalid/fix.patch"],
+            },
+            "ymir backport workflow missing MCP_GATEWAY_URL; "
+            "start the MCP gateway and pass its SSE URL in the run environment",
+        ),
+        (
+            make_ymir_rebase_executor,
+            "rebase",
+            {
+                "schema_version": 1,
+                "case_id": "RHEL-12345",
+                "case_type": "rebase",
+                "resolution": "rebase",
+                "package": "dnsmasq",
+                "target_branch": "rhel-8.10.z",
+                "version": "2.91",
+            },
+            "ymir rebase workflow missing MCP_GATEWAY_URL; "
+            "start the MCP gateway and pass its SSE URL in the run environment",
+        ),
+        (
+            make_ymir_rebuild_executor,
+            "dependency_rebuild",
+            {
+                "schema_version": 1,
+                "case_id": "RHEL-12345",
+                "case_type": "dependency_rebuild",
+                "resolution": "rebuild",
+                "package": "dnsmasq",
+                "target_branch": "rhel-8.10.z",
+            },
+            "ymir rebuild workflow missing MCP_GATEWAY_URL; "
+            "start the MCP gateway and pass its SSE URL in the run environment",
+        ),
+    ],
+)
+def test_live_ymir_executors_report_missing_mcp_gateway_url(
+    tmp_path: Path,
+    executor_factory,
+    case_type: str,
+    expected: dict[str, object] | None,
+    reason: str,
+) -> None:
+    request = _request(tmp_path, case_type=case_type)
+    if expected is not None:
+        _write_expected(request, expected)
+
+    execution = executor_factory()(request)
+
+    assert execution.status == "failed"
+    assert execution.actual_result is None
+    assert execution.reason == reason
+
+
 def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
     tmp_path: Path,
     monkeypatch,
@@ -525,7 +599,11 @@ def test_ymir_rebase_executor_uses_class_workflow_by_default(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    request = _request(tmp_path, case_type="rebase")
+    request = _request(
+        tmp_path,
+        case_type="rebase",
+        environment={"MCP_GATEWAY_URL": "http://gateway.example.invalid/sse"},
+    )
     _write_expected(
         request,
         {
@@ -584,7 +662,11 @@ def test_ymir_rebase_executor_rejects_module_level_workflow_by_default(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    request = _request(tmp_path, case_type="rebase")
+    request = _request(
+        tmp_path,
+        case_type="rebase",
+        environment={"MCP_GATEWAY_URL": "http://gateway.example.invalid/sse"},
+    )
     _write_expected(
         request,
         {
@@ -800,7 +882,11 @@ def test_ymir_rebuild_executor_uses_class_workflow_by_default(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    request = _request(tmp_path, case_type="dependency_rebuild")
+    request = _request(
+        tmp_path,
+        case_type="dependency_rebuild",
+        environment={"MCP_GATEWAY_URL": "http://gateway.example.invalid/sse"},
+    )
     _write_expected(
         request,
         {
