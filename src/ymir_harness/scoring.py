@@ -38,6 +38,28 @@ def load_json_file(path: Path) -> dict[str, Any]:
 
 
 def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreReport:
+    primary = _score_case_once(expected, actual)
+    if primary.passed:
+        return primary
+
+    for index, alternate in enumerate(_alternate_expected_results(expected), start=1):
+        alternate_report = _score_case_once(alternate, actual)
+        if alternate_report.passed:
+            alternate_report.metrics.append(
+                ScoreMetric(
+                    name="alternate_acceptable_outcome",
+                    status="pass",
+                    expected=f"alternate #{index}",
+                    actual="matched",
+                    notes="actual result matched an alternate acceptable outcome",
+                )
+            )
+            return alternate_report
+
+    return primary
+
+
+def _score_case_once(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreReport:
     case_id = str(expected.get("case_id") or actual.get("case_id") or "")
     case_type = _string_or_none(expected.get("case_type") or actual.get("case_type"))
     normalized_actual = normalize_actual_result(actual)
@@ -156,6 +178,22 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
         metrics=metrics,
         advisory_metrics=_advisory_metrics(actual),
     )
+
+
+def _alternate_expected_results(expected: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    alternates = expected.get("alternate_acceptable_outcomes")
+    if not isinstance(alternates, list):
+        return []
+
+    output = []
+    for alternate in alternates:
+        if not isinstance(alternate, Mapping):
+            continue
+        merged = dict(expected)
+        merged.pop("alternate_acceptable_outcomes", None)
+        merged.update(alternate)
+        output.append(merged)
+    return output
 
 
 def score_result_directory(
