@@ -20,8 +20,8 @@ def compare_result_payloads(
     baseline_path: Path,
     candidate_path: Path,
 ) -> ComparisonReport:
-    baseline_cases = _case_map(baseline)
-    candidate_cases = _case_map(candidate)
+    baseline_cases = _case_groups(baseline)
+    candidate_cases = _case_groups(candidate)
     case_ids = sorted(baseline_cases.keys() | candidate_cases.keys())
     entries = [
         _compare_case(case_id, baseline_cases.get(case_id), candidate_cases.get(case_id))
@@ -36,6 +36,10 @@ def compare_result_payloads(
 
 def render_comparison_markdown(report: ComparisonReport) -> str:
     summary = report.summary()
+    show_stability = any(_has_stability_fields(entry) for entry in report.entries)
+    show_runtime = any(_has_runtime_fields(entry) for entry in report.entries)
+    show_tokens = any(_has_token_fields(entry) for entry in report.entries)
+    show_tool_calls = any(_has_tool_call_fields(entry) for entry in report.entries)
     show_costs = any(_has_cost_fields(entry) for entry in report.entries)
     lines = [
         "# Result Comparison",
@@ -48,23 +52,34 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         f"- Non-headline cases: `{summary['non_headline']}`",
         "",
     ]
+
+    columns = ["Case", "Type", "Headline", "Reason", "Baseline", "Candidate", "Delta"]
+    if show_stability:
+        columns.extend(
+            [
+                "Baseline reps",
+                "Candidate reps",
+                "Baseline stability",
+                "Candidate stability",
+            ]
+        )
+    if show_runtime:
+        columns.extend(["Baseline runtime", "Candidate runtime", "Runtime delta"])
+    if show_tokens:
+        columns.extend(["Baseline tokens", "Candidate tokens", "Token delta"])
+    if show_tool_calls:
+        columns.extend(
+            [
+                "Baseline tool calls",
+                "Candidate tool calls",
+                "Tool call delta",
+            ]
+        )
     if show_costs:
-        lines.extend(
-            [
-                (
-                    "| Case | Type | Headline | Reason | Baseline | Candidate | "
-                    "Delta | Baseline cost | Candidate cost | Cost delta |"
-                ),
-                "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "| Case | Type | Headline | Reason | Baseline | Candidate | Delta |",
-                "| --- | --- | --- | --- | --- | --- | --- |",
-            ]
-        )
+        columns.extend(["Baseline cost", "Candidate cost", "Cost delta"])
+
+    lines.append("| " + " | ".join(columns) + " |")
+    lines.append("| " + " | ".join("---" for _ in columns) + " |")
 
     for entry in report.entries:
         row = [
@@ -76,37 +91,70 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
             entry.candidate_status or "",
             entry.delta,
         ]
+        if show_stability:
+            row.extend(
+                [
+                    _format_metric(entry.baseline_repetitions),
+                    _format_metric(entry.candidate_repetitions),
+                    entry.baseline_stability or "",
+                    entry.candidate_stability or "",
+                ]
+            )
+        if show_runtime:
+            row.extend(
+                [
+                    _format_metric(entry.baseline_runtime_seconds),
+                    _format_metric(entry.candidate_runtime_seconds),
+                    _format_metric(entry.runtime_delta_seconds),
+                ]
+            )
+        if show_tokens:
+            row.extend(
+                [
+                    _format_metric(entry.baseline_token_count),
+                    _format_metric(entry.candidate_token_count),
+                    _format_metric(entry.token_delta),
+                ]
+            )
+        if show_tool_calls:
+            row.extend(
+                [
+                    _format_metric(entry.baseline_tool_call_count),
+                    _format_metric(entry.candidate_tool_call_count),
+                    _format_metric(entry.tool_call_delta),
+                ]
+            )
         if show_costs:
             row.extend(
                 [
-                    _format_cost(entry.baseline_total_cost_usd),
-                    _format_cost(entry.candidate_total_cost_usd),
-                    _format_cost(entry.cost_delta_usd),
+                    _format_metric(entry.baseline_total_cost_usd),
+                    _format_metric(entry.candidate_total_cost_usd),
+                    _format_metric(entry.cost_delta_usd),
                 ]
             )
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _case_map(payload: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+def _case_groups(payload: Mapping[str, Any]) -> dict[str, list[Mapping[str, Any]]]:
     cases = payload.get("cases")
     if not isinstance(cases, list):
         return {}
 
-    mapped: dict[str, Mapping[str, Any]] = {}
+    mapped: dict[str, list[Mapping[str, Any]]] = {}
     for case in cases:
         if not isinstance(case, Mapping):
             continue
         case_id = case.get("case_id")
         if isinstance(case_id, str) and case_id:
-            mapped[case_id] = case
+            mapped.setdefault(case_id, []).append(case)
     return mapped
 
 
 def _compare_case(
     case_id: str,
-    baseline: Mapping[str, Any] | None,
-    candidate: Mapping[str, Any] | None,
+    baseline: list[Mapping[str, Any]] | None,
+    candidate: list[Mapping[str, Any]] | None,
 ) -> ComparisonEntry:
     case_type = _case_type(baseline, candidate)
     headline = _headline(baseline) or _headline(candidate)
@@ -114,8 +162,14 @@ def _compare_case(
     candidate_status = _status(candidate)
     delta = _delta(headline, baseline_status, candidate_status)
     headline_reason = None if headline else _headline_reason(baseline, candidate)
-    baseline_cost = _total_cost_usd(baseline)
-    candidate_cost = _total_cost_usd(candidate)
+    baseline_runtime = _mean_metric(baseline, _runtime_seconds)
+    candidate_runtime = _mean_metric(candidate, _runtime_seconds)
+    baseline_tokens = _mean_metric(baseline, _token_count)
+    candidate_tokens = _mean_metric(candidate, _token_count)
+    baseline_tool_calls = _mean_metric(baseline, _tool_call_count)
+    candidate_tool_calls = _mean_metric(candidate, _tool_call_count)
+    baseline_cost = _mean_metric(baseline, _case_total_cost_usd)
+    candidate_cost = _mean_metric(candidate, _case_total_cost_usd)
     return ComparisonEntry(
         case_id=case_id,
         case_type=case_type,
@@ -124,9 +178,22 @@ def _compare_case(
         candidate_status=candidate_status,
         delta=delta,
         headline_reason=headline_reason,
+        baseline_repetitions=_repetition_count(baseline),
+        candidate_repetitions=_repetition_count(candidate),
+        baseline_stability=_stability(baseline),
+        candidate_stability=_stability(candidate),
+        baseline_runtime_seconds=baseline_runtime,
+        candidate_runtime_seconds=candidate_runtime,
+        runtime_delta_seconds=_numeric_delta(baseline_runtime, candidate_runtime),
+        baseline_token_count=baseline_tokens,
+        candidate_token_count=candidate_tokens,
+        token_delta=_numeric_delta(baseline_tokens, candidate_tokens),
+        baseline_tool_call_count=baseline_tool_calls,
+        candidate_tool_call_count=candidate_tool_calls,
+        tool_call_delta=_numeric_delta(baseline_tool_calls, candidate_tool_calls),
         baseline_total_cost_usd=baseline_cost,
         candidate_total_cost_usd=candidate_cost,
-        cost_delta_usd=_cost_delta(baseline_cost, candidate_cost),
+        cost_delta_usd=_numeric_delta(baseline_cost, candidate_cost),
     )
 
 
@@ -153,32 +220,34 @@ def _delta(
     return "unchanged_fail"
 
 
-def _case_type(*cases: Mapping[str, Any] | None) -> str | None:
-    for case in cases:
-        if case is None:
+def _case_type(*groups: list[Mapping[str, Any]] | None) -> str | None:
+    for group in groups:
+        if not group:
             continue
-        case_type = case.get("case_type")
-        if isinstance(case_type, str):
-            return case_type
+        for case in group:
+            case_type = case.get("case_type")
+            if isinstance(case_type, str):
+                return case_type
     return None
 
 
-def _headline(case: Mapping[str, Any] | None) -> bool:
-    if case is None:
+def _headline(group: list[Mapping[str, Any]] | None) -> bool:
+    if not group:
         return False
-    return case.get("headline") is True
+    return any(case.get("headline") is True for case in group)
 
 
-def _headline_reason(*cases: Mapping[str, Any] | None) -> str | None:
+def _headline_reason(*groups: list[Mapping[str, Any]] | None) -> str | None:
     reasons = []
     seen: set[str] = set()
-    for label, case in zip(("baseline", "candidate"), cases, strict=True):
-        if case is None:
+    for label, group in zip(("baseline", "candidate"), groups, strict=True):
+        if not group:
             continue
-        reason = case.get("headline_reason")
-        if isinstance(reason, str) and reason and reason not in seen:
-            seen.add(reason)
-            reasons.append(f"{label}: {reason}")
+        for case in group:
+            reason = case.get("headline_reason")
+            if isinstance(reason, str) and reason and reason not in seen:
+                seen.add(reason)
+                reasons.append(f"{label}: {reason}")
 
     if not reasons:
         return None
@@ -187,22 +256,98 @@ def _headline_reason(*cases: Mapping[str, Any] | None) -> str | None:
     return "; ".join(reasons)
 
 
-def _status(case: Mapping[str, Any] | None) -> str | None:
-    if case is None:
+def _status(group: list[Mapping[str, Any]] | None) -> str | None:
+    statuses = _statuses(group)
+    if not statuses:
         return None
-    status = case.get("status")
-    if isinstance(status, str):
-        return status
-    return None
+    if len(set(statuses)) == 1:
+        return statuses[0]
+    return "flaky"
 
 
-def _total_cost_usd(case: Mapping[str, Any] | None) -> float | None:
-    if case is None:
+def _statuses(group: list[Mapping[str, Any]] | None) -> list[str]:
+    if not group:
+        return []
+    statuses = []
+    for case in group:
+        status = case.get("status")
+        if isinstance(status, str):
+            statuses.append(status)
+    return statuses
+
+
+def _repetition_count(group: list[Mapping[str, Any]] | None) -> int | None:
+    if not group:
         return None
-    direct = _number_or_none(case.get("total_cost_usd"))
+    return len(group)
+
+
+def _stability(group: list[Mapping[str, Any]] | None) -> str | None:
+    statuses = _statuses(group)
+    if not statuses:
+        return None
+    if len(set(statuses)) == 1:
+        return "stable"
+    return "flaky"
+
+
+def _mean_metric(
+    group: list[Mapping[str, Any]] | None,
+    extractor: Any,
+) -> float | None:
+    if not group:
+        return None
+
+    values = []
+    for case in group:
+        value = extractor(case)
+        if value is not None:
+            values.append(value)
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _runtime_seconds(case: Mapping[str, Any]) -> float | None:
+    return _number_or_none(
+        case.get("runtime_seconds")
+        or _advisory_metric(case, "runtime_seconds")
+        or _advisory_metric(case, "runtime")
+    )
+
+
+def _token_count(case: Mapping[str, Any]) -> float | None:
+    direct = _number_or_none(case.get("token_count") or _advisory_metric(case, "token_count"))
     if direct is not None:
         return direct
 
+    usage = case.get("token_usage") or _advisory_metric(case, "token_usage")
+    if isinstance(usage, Mapping):
+        token_values = [
+            _number_or_none(value) for key, value in usage.items() if "token" in str(key).lower()
+        ]
+        numbers = [value for value in token_values if value is not None]
+        if numbers:
+            return sum(numbers)
+        all_values = [_number_or_none(value) for value in usage.values()]
+        all_numbers = [value for value in all_values if value is not None]
+        if all_numbers:
+            return sum(all_numbers)
+    return _number_or_none(usage)
+
+
+def _tool_call_count(case: Mapping[str, Any]) -> float | None:
+    return _number_or_none(case.get("tool_call_count") or _advisory_metric(case, "tool_call_count"))
+
+
+def _case_total_cost_usd(case: Mapping[str, Any]) -> float | None:
+    direct = _number_or_none(case.get("total_cost_usd"))
+    if direct is not None:
+        return direct
+    return _number_or_none(_advisory_metric(case, "total_cost_usd"))
+
+
+def _advisory_metric(case: Mapping[str, Any], name: str) -> Any:
     score = case.get("score")
     if not isinstance(score, Mapping):
         return None
@@ -214,12 +359,12 @@ def _total_cost_usd(case: Mapping[str, Any] | None) -> float | None:
     for metric in advisory_metrics:
         if not isinstance(metric, Mapping):
             continue
-        if metric.get("name") == "total_cost_usd":
-            return _number_or_none(metric.get("value"))
+        if metric.get("name") == name:
+            return metric.get("value")
     return None
 
 
-def _cost_delta(baseline: float | None, candidate: float | None) -> float | None:
+def _numeric_delta(baseline: float | None, candidate: float | None) -> float | None:
     if baseline is None or candidate is None:
         return None
     return candidate - baseline
@@ -242,7 +387,40 @@ def _has_cost_fields(entry: ComparisonEntry) -> bool:
     )
 
 
-def _format_cost(value: float | None) -> str:
+def _has_stability_fields(entry: ComparisonEntry) -> bool:
+    return (
+        entry.baseline_stability == "flaky"
+        or entry.candidate_stability == "flaky"
+        or (entry.baseline_repetitions is not None and entry.baseline_repetitions > 1)
+        or (entry.candidate_repetitions is not None and entry.candidate_repetitions > 1)
+    )
+
+
+def _has_runtime_fields(entry: ComparisonEntry) -> bool:
+    return (
+        entry.baseline_runtime_seconds is not None
+        or entry.candidate_runtime_seconds is not None
+        or entry.runtime_delta_seconds is not None
+    )
+
+
+def _has_token_fields(entry: ComparisonEntry) -> bool:
+    return (
+        entry.baseline_token_count is not None
+        or entry.candidate_token_count is not None
+        or entry.token_delta is not None
+    )
+
+
+def _has_tool_call_fields(entry: ComparisonEntry) -> bool:
+    return (
+        entry.baseline_tool_call_count is not None
+        or entry.candidate_tool_call_count is not None
+        or entry.tool_call_delta is not None
+    )
+
+
+def _format_metric(value: float | int | None) -> str:
     if value is None:
         return ""
     return f"{value:g}"
