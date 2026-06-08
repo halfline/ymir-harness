@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import ymir_harness.runner as runner_module
@@ -179,6 +180,7 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     results_dir = tmp_path / "results"
     _write_expected(cases_dir, "RHEL-12345")
     _write_expected(cases_dir, "RHEL-23456")
+    _write_structured_jira(cases_dir, "RHEL-12345")
     validation_report = ValidationReport(
         cases_dir=cases_dir,
         phase=1,
@@ -235,6 +237,21 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     assert requests[0].environment["DRY_RUN"] == "true"
     assert requests[0].environment["YMIR_BENCHMARK_CASE_ID"] == "RHEL-12345"
     assert "JIRA_TOKEN" not in requests[0].environment
+    assert requests[0].environment["JIRA_MOCK_FILES"] == str(
+        results_dir.resolve() / "repeat-1" / "jira-mock"
+    )
+    assert requests[1].environment["JIRA_MOCK_FILES"] == str(
+        results_dir.resolve() / "repeat-2" / "jira-mock"
+    )
+    jira_payload = json.loads(
+        (results_dir.resolve() / "repeat-1" / "jira-mock" / "RHEL-12345").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert jira_payload["fields"]["comment"]["comments"] == [{"body": "Please backport this fix."}]
+    assert jira_payload["remote_links"] == [
+        {"object": {"url": "https://gitlab.example/group/pkg/-/merge_requests/7"}}
+    ]
 
     entries = {(entry.case_id, entry.repetition): entry for entry in report.entries}
     assert entries["RHEL-12345", 1].status == "passed"
@@ -247,6 +264,50 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     assert entries["RHEL-23456", 1].actual_path is None
     assert entries["RHEL-23456", 2].status == "skipped"
     assert entries["RHEL-23456", 2].actual_path is None
+
+
+def test_build_run_report_fails_invalid_structured_jira(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": [],
+        },
+    )
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+    requests = []
+
+    def executor(request):
+        requests.append(request)
+        return RunCaseExecution(status="passed")
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    assert requests == []
+    entry = report.entries[0]
+    assert entry.status == "failed"
+    assert entry.reason is not None
+    assert entry.reason.startswith("Jira mock setup failed: JiraMockMaterializationError:")
 
 
 def test_build_run_report_passes_replay_policy_environment(tmp_path: Path) -> None:
@@ -498,6 +559,87 @@ def test_build_run_report_enforces_event_safety_and_replay(tmp_path: Path) -> No
         }
     ]
     assert actual["replay_violations"] == ["unrecorded URL: https://example.invalid/unrecorded"]
+
+
+def test_build_run_report_materializes_local_mock_repos(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "network_mode": "network_denied",
+        },
+    )
+    _write_json(
+        cases_dir / "mock_data" / "triage" / "RHEL-12345.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "zstream_override": {"8": "rhel-8.10.z"},
+            "repos": [
+                {
+                    "package": "dnsmasq",
+                    "remote_url": str(source_repo),
+                    "pre_fix_ref": pre_fix_ref,
+                    "branch": "c9s",
+                }
+            ],
+        },
+    )
+    requests = []
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(request):
+        requests.append(request)
+        repos = json.loads(request.environment["YMIR_BENCHMARK_MOCK_REPOS"])
+        local_path = Path(repos[0]["local_path"])
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+                "target_branch": "rhel-8.10.z",
+                "generated_artifacts": [str(local_path / "source.c")],
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    env = requests[0].environment
+    repos = json.loads(env["YMIR_BENCHMARK_MOCK_REPOS"])
+    local_path = Path(repos[0]["local_path"])
+    assert report.entries[0].status == "passed"
+    assert (local_path / "source.c").read_text(encoding="utf-8") == "pre-fix\n"
+    assert Path(env["GIT_CONFIG_GLOBAL"]).is_file()
+    assert str(source_repo) in Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
+    assert env["MOCK_BLOCKED_URLS"] == str(source_repo)
+    assert json.loads(env["YMIR_BENCHMARK_ZSTREAM_OVERRIDE"]) == {"8": "rhel-8.10.z"}
 
 
 def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> None:
@@ -798,6 +940,42 @@ def _write_expected(cases_dir: Path, case_id: str, data: object | None = None) -
     expected_path.write_text(json.dumps(data or {}) + "\n", encoding="utf-8")
 
 
+def _write_json(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_structured_jira(cases_dir: Path, case_id: str) -> None:
+    _write_json(
+        cases_dir / "jiras" / case_id / "issue.json",
+        {
+            "schema_version": 1,
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "key": case_id,
+            "fields": {"summary": "Backport CVE fix"},
+        },
+    )
+    _write_json(
+        cases_dir / "jiras" / case_id / "comments.json",
+        {
+            "schema_version": 1,
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "comments": [{"body": "Please backport this fix."}],
+        },
+    )
+    _write_json(
+        cases_dir / "jiras" / case_id / "links.json",
+        {
+            "schema_version": 1,
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "links": [{"object": {"url": "https://gitlab.example/group/pkg/-/merge_requests/7"}}],
+        },
+    )
+
+
 def _write_web_manifest(cases_dir: Path, case_id: str, required_urls: list[str]) -> None:
     manifest_path = cases_dir / "web_cache" / case_id / "manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -813,4 +991,42 @@ def _write_web_manifest(cases_dir: Path, case_id: str, required_urls: list[str])
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def _create_git_repo(tmp_path: Path) -> tuple[Path, str]:
+    repo_path = tmp_path / "source-repo"
+    repo_path.mkdir()
+    _run_git(repo_path, "init")
+    (repo_path / "source.c").write_text("pre-fix\n", encoding="utf-8")
+    _run_git(repo_path, "add", "source.c")
+    _run_git(repo_path, "commit", "-m", "initial")
+    rev = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    (repo_path / "source.c").write_text("fixed\n", encoding="utf-8")
+    _run_git(repo_path, "add", "source.c")
+    _run_git(repo_path, "commit", "-m", "fixed")
+    return repo_path, rev
+
+
+def _run_git(repo_path: Path, *args: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_path),
+            "-c",
+            "user.name=Ymir Harness Tests",
+            "-c",
+            "user.email=ymir-harness@example.invalid",
+            *args,
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
