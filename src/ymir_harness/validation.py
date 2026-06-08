@@ -1235,9 +1235,15 @@ def _validate_mock_repo_entry(
         branches_seen.add(branch)
 
     remote_url = repo.get("remote_url")
+    source_url = repo.get("source_url")
     pre_fix_ref = repo.get("pre_fix_ref")
     if isinstance(remote_url, str) and isinstance(pre_fix_ref, str):
-        repo_path = _validate_local_pre_fix_ref(remote_url, pre_fix_ref, mock_path, result)
+        repo_path = _validate_local_pre_fix_ref(
+            source_url if isinstance(source_url, str) else remote_url,
+            pre_fix_ref,
+            mock_path,
+            result,
+        )
         if repo_path is not None:
             reference_patch_target = ReferencePatchTarget(
                 repo_path=repo_path,

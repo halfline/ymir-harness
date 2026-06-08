@@ -146,8 +146,9 @@ def _materialize_repo(
     branch = _required_string(repo_config, "branch", mock_path, index)
     remote_url = _required_string(repo_config, "remote_url", mock_path, index)
     pre_fix_ref = _required_string(repo_config, "pre_fix_ref", mock_path, index)
+    source_url = _optional_string(repo_config, "source_url", mock_path, index)
 
-    source = _cloneable_source(remote_url)
+    source = _cloneable_source(source_url or remote_url)
     if source is None:
         return None
 
@@ -171,6 +172,22 @@ def _required_string(
     index: int,
 ) -> str:
     value = repo_config.get(field)
+    if not isinstance(value, str) or not value:
+        raise MockRepoMaterializationError(
+            f"mock fixture repos[{index}].{field} must be a non-empty string: {mock_path}"
+        )
+    return value
+
+
+def _optional_string(
+    repo_config: Mapping[str, Any],
+    field: str,
+    mock_path: Path,
+    index: int,
+) -> str | None:
+    value = repo_config.get(field)
+    if value is None:
+        return None
     if not isinstance(value, str) or not value:
         raise MockRepoMaterializationError(
             f"mock fixture repos[{index}].{field} must be a non-empty string: {mock_path}"
