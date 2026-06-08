@@ -59,7 +59,7 @@ IssueSeverity = Literal["error", "warning"]
 CaseValidationStatus = Literal["valid", "invalid", "warning-only", "skipped"]
 ScoreMetricStatus = Literal["pass", "fail", "skipped"]
 ScoreCollectionStatus = Literal["passed", "failed", "missing", "skipped"]
-RunCaseStatus = Literal["not_run", "passed", "failed", "skipped", "unsupported"]
+RunCaseStatus = Literal["not_run", "passed", "failed", "timeout", "skipped", "unsupported"]
 ComparisonDelta = Literal[
     "win",
     "regression",
@@ -363,7 +363,7 @@ class RunReport:
 
     @property
     def has_failures(self) -> bool:
-        return any(entry.status == "failed" for entry in self.entries)
+        return any(entry.status in {"failed", "timeout"} for entry in self.entries)
 
     def summary(self) -> dict[str, int | bool]:
         counts: dict[str, int | bool] = {
@@ -376,6 +376,9 @@ class RunReport:
             "has_failures": self.has_failures,
         }
         for entry in self.entries:
+            if entry.status == "timeout":
+                counts["timeout"] = int(counts.get("timeout", 0)) + 1
+                continue
             counts[entry.status] = int(counts[entry.status]) + 1
         return counts
 
