@@ -363,6 +363,7 @@ class RunReport:
     fixture_checksum: str | None = None
     features: list[str] = field(default_factory=list)
     repeat: int = 1
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_failures(self) -> bool:
@@ -397,6 +398,7 @@ class RunReport:
             "fixture_checksum": self.fixture_checksum,
             "features": self.features,
             "repeat": self.repeat,
+            "provenance": self.provenance,
             "cases_dir": str(self.cases_dir),
             "results_dir": str(self.results_dir),
             "summary": self.summary(),
