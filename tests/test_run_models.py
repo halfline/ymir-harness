@@ -31,6 +31,7 @@ def test_run_report_serializes_case_results() -> None:
                 repetition=2,
                 expected_path=Path("/tmp/benchmark_cases/expected/RHEL-23456.expected.json"),
                 actual_path=Path("/tmp/reports/baseline/RHEL-23456.actual.json"),
+                runtime_seconds=12.5,
                 reason="workflow adapter is missing",
             ),
         ],
@@ -62,3 +63,4 @@ def test_run_report_serializes_case_results() -> None:
     assert payload["cases"][0]["actual_path"] is None
     assert payload["cases"][0]["reason"] == "runner is not wired yet"
     assert payload["cases"][1]["actual_path"] == "/tmp/reports/baseline/RHEL-23456.actual.json"
+    assert payload["cases"][1]["runtime_seconds"] == 12.5

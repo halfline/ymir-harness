@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import ymir_harness.runner as runner_module
 from ymir_harness.models import CaseValidationResult, ValidationReport
 from ymir_harness.runner import (
     RunCaseExecution,
@@ -166,7 +167,10 @@ def test_build_run_report_assigns_actual_paths(tmp_path: Path) -> None:
     assert entries["RHEL-23456", 2].actual_path is None
 
 
-def test_build_run_report_calls_executor_for_runnable_cases(tmp_path: Path) -> None:
+def test_build_run_report_calls_executor_for_runnable_cases(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
     _write_expected(cases_dir, "RHEL-12345")
@@ -188,6 +192,8 @@ def test_build_run_report_calls_executor_for_runnable_cases(tmp_path: Path) -> N
         ],
     )
     requests = []
+    clock_values = iter([10.0, 12.5, 20.0, 21.25])
+    monkeypatch.setattr(runner_module.time, "monotonic", lambda: next(clock_values))
 
     def executor(request):
         requests.append(request)
@@ -229,8 +235,10 @@ def test_build_run_report_calls_executor_for_runnable_cases(tmp_path: Path) -> N
     entries = {(entry.case_id, entry.repetition): entry for entry in report.entries}
     assert entries["RHEL-12345", 1].status == "passed"
     assert entries["RHEL-12345", 1].actual_path == requests[0].actual_path
+    assert entries["RHEL-12345", 1].runtime_seconds == 2.5
     assert entries["RHEL-12345", 1].reason == "workflow completed"
     assert entries["RHEL-12345", 2].status == "passed"
+    assert entries["RHEL-12345", 2].runtime_seconds == 1.25
     assert entries["RHEL-23456", 1].status == "skipped"
     assert entries["RHEL-23456", 1].actual_path is None
     assert entries["RHEL-23456", 2].status == "skipped"
