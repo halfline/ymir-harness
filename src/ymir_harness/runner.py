@@ -12,6 +12,7 @@ import yaml
 
 from ymir_harness import __version__
 from ymir_harness.artifacts import artifact_environment
+from ymir_harness.enforcement import BenchmarkBoundaryViolation, enforce_benchmark_boundaries
 from ymir_harness.jira_mock import (
     JiraMockMaterializationError,
     has_structured_jira_fixture,
@@ -377,8 +378,19 @@ def _run_case_result(
         )
         try:
             started_at = time.monotonic()
-            execution = executor(request)
+            with enforce_benchmark_boundaries(request.environment):
+                execution = executor(request)
             runtime_seconds = time.monotonic() - started_at
+        except BenchmarkBoundaryViolation as exc:
+            return RunCaseResult(
+                case_id=case_id,
+                case_type=case_type,
+                status="failed",
+                repetition=repetition,
+                expected_path=expected_path if expected_path.is_file() else None,
+                actual_path=actual_path,
+                reason=f"benchmark boundary blocked: {exc}",
+            )
         except Exception as exc:
             return RunCaseResult(
                 case_id=case_id,
