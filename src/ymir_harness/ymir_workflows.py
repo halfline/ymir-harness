@@ -662,6 +662,12 @@ def _rebuild_actual_result(
     if sibling_issues:
         actual["sibling_issues"] = sibling_issues
 
+    merge_artifact_fields(
+        actual,
+        request_artifact_dir=_request_artifact_dir(request),
+        state=state,
+        payload=data,
+    )
     actual.update(_state_diagnostics(state))
     return actual
 
