@@ -180,6 +180,11 @@ implementation cases. The executor reads expected-result fields for the
 package, target branch, patch sources, CVE, justification, and fix version,
 then writes a normalized backport actual result with build status, backport
 status, errors, and generated artifacts for scoring.
+Use `--workflow ymir-rebase` to call Ymir's rebase `run_workflow()` for
+implementation cases. The executor reads expected-result fields for the
+package, target branch, target version, Jira issue, and justification, then
+writes a normalized rebase actual result with build status, rebase status,
+errors, generated artifacts, and touched files for scoring.
 Programmatic runner integrations can pass a case executor to receive resolved
 case metadata, the reserved actual result path, enabled feature flags, and the
 per-case no-write environment before returning a run status.
