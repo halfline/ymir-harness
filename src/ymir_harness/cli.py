@@ -392,9 +392,7 @@ def _cmd_collect_case(args: argparse.Namespace) -> int:
         json.dump(result.to_json(), sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
     else:
-        sys.stdout.write(
-            f"collected {result.case_id}: {len(result.written_paths)} files written\n"
-        )
+        sys.stdout.write(f"collected {result.case_id}: {len(result.written_paths)} files written\n")
         if result.warnings:
             for warning in result.warnings:
                 sys.stdout.write(f"warning: {warning}\n")

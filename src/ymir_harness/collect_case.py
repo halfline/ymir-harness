@@ -1463,7 +1463,9 @@ def _copy_into_dir(
             shutil.rmtree(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, destination)
-        result.written_paths.extend(path for path in sorted(destination.rglob("*")) if path.is_file())
+        result.written_paths.extend(
+            path for path in sorted(destination.rglob("*")) if path.is_file()
+        )
         return
     _copy_file(source, destination, overwrite=overwrite, result=result)
 
