@@ -73,6 +73,14 @@ in result comments are recorded into replay evidence but removed from
 metadata, commits, changes, and patch content into `web_cache/CASE_ID/`; if no
 MR is passed, a GitLab MR remote link or comment URL in the fetched Jira is used
 automatically.
+When fetched GitLab MR metadata includes `diff_refs.base_sha` and
+`target_branch`, `collect-case` also derives `mock_data` from the MR: the repo
+URL comes from the MR project URL, `pre_fix_ref` comes from the MR base SHA, and
+the branch comes from the MR target branch. If the completed Jira fix version is
+a z-stream name such as `rhel-9.7.z` and the dist-git branch differs,
+`collect-case` writes the corresponding `zstream_override`.
+Supplying `--remote-url`, `--pre-fix-ref`, and `--branch` keeps using the
+manual mock repo metadata instead.
 The MR patch is also copied to `mock_data/*/reference_patches/CASE_ID.patch`
 when mock repo metadata is provided and no local `--reference-patch` is
 supplied. Jira fetches use `JIRA_TOKEN` when it is set. Tokens are sent as
