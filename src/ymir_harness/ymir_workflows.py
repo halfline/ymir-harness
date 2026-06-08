@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import inspect
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
@@ -24,6 +26,15 @@ class BackportInputs:
     cve_id: str | None
     justification: str | None
     fix_version: str | None
+
+
+@dataclass(frozen=True)
+class RebaseInputs:
+    package: str
+    dist_git_branch: str
+    version: str
+    jira_issue: str
+    justification: str | None
 
 
 def make_ymir_triage_executor(
@@ -54,6 +65,21 @@ def make_ymir_backport_executor(
                 request,
                 workflow=workflow,
                 agent_factory=agent_factory,
+            )
+        )
+
+    return executor
+
+
+def make_ymir_rebase_executor(
+    *,
+    workflow: AsyncWorkflow | None = None,
+) -> Callable[[RunCaseRequest], RunCaseExecution]:
+    def executor(request: RunCaseRequest) -> RunCaseExecution:
+        return asyncio.run(
+            _run_ymir_rebase(
+                request,
+                workflow=workflow,
             )
         )
 
@@ -128,6 +154,40 @@ async def _run_ymir_backport(
     )
 
 
+async def _run_ymir_rebase(
+    request: RunCaseRequest,
+    *,
+    workflow: AsyncWorkflow | None,
+) -> RunCaseExecution:
+    inputs = _rebase_inputs(request)
+    if isinstance(inputs, RunCaseExecution):
+        return inputs
+
+    workflow_runner = _rebase_dependencies(workflow)
+
+    with _request_environment(request):
+        state = await workflow_runner(
+            package=inputs.package,
+            dist_git_branch=inputs.dist_git_branch,
+            version=inputs.version,
+            jira_issue=inputs.jira_issue,
+            justification=inputs.justification,
+            redis_conn=None,
+        )
+
+    rebase_result = getattr(state, "rebase_result", None)
+    if rebase_result is None:
+        return RunCaseExecution(
+            status="failed",
+            reason="ymir rebase workflow returned no rebase result",
+        )
+
+    return RunCaseExecution(
+        status="passed",
+        actual_result=_rebase_actual_result(request, inputs, state, rebase_result),
+    )
+
+
 def _triage_dependencies(
     workflow: AsyncWorkflow | None,
     agent_factory: AgentFactory | None,
@@ -156,6 +216,68 @@ def _backport_dependencies(
     )
 
     return workflow or run_workflow, agent_factory or create_backport_agent
+
+
+def _rebase_dependencies(workflow: AsyncWorkflow | None) -> AsyncWorkflow:
+    if workflow is not None:
+        return workflow
+
+    return _agent_class_workflow(
+        "ymir.agents.rebase_agent",
+        class_names=("RebaseAgent", "RebaseWorkflow"),
+    )
+
+
+def _agent_class_workflow(
+    module_name: str,
+    *,
+    class_names: tuple[str, ...],
+) -> AsyncWorkflow:
+    module = importlib.import_module(module_name)
+
+    for class_name in class_names:
+        workflow_class = getattr(module, class_name, None)
+        if inspect.isclass(workflow_class) and callable(
+            getattr(workflow_class, "run_workflow", None)
+        ):
+            return _bind_class_workflow(module_name, class_name, workflow_class)
+
+    candidates = [
+        name
+        for name, value in vars(module).items()
+        if inspect.isclass(value) and callable(getattr(value, "run_workflow", None))
+    ]
+    if len(candidates) == 1:
+        class_name = candidates[0]
+        return _bind_class_workflow(module_name, class_name, getattr(module, class_name))
+
+    if not candidates:
+        raise ImportError(f"{module_name} does not define an agent class with run_workflow")
+
+    joined = ", ".join(sorted(candidates))
+    raise ImportError(f"{module_name} defines multiple agent classes with run_workflow: {joined}")
+
+
+def _bind_class_workflow(module_name: str, class_name: str, workflow_class: type) -> AsyncWorkflow:
+    descriptor = inspect.getattr_static(workflow_class, "run_workflow", None)
+    if descriptor is None:
+        raise ImportError(f"{module_name}.{class_name} does not define run_workflow")
+
+    if isinstance(descriptor, staticmethod | classmethod):
+        workflow = descriptor.__get__(None, workflow_class)
+    else:
+        try:
+            workflow = getattr(workflow_class(), "run_workflow")
+        except TypeError as exc:
+            raise ImportError(
+                f"{module_name}.{class_name} must be instantiable without arguments "
+                "or define run_workflow as a staticmethod/classmethod"
+            ) from exc
+
+    if not callable(workflow):
+        raise ImportError(f"{module_name}.{class_name}.run_workflow is not callable")
+
+    return workflow
 
 
 def _triage_actual_result(
@@ -230,6 +352,37 @@ def _backport_inputs(request: RunCaseRequest) -> BackportInputs | RunCaseExecuti
     )
 
 
+def _rebase_inputs(request: RunCaseRequest) -> RebaseInputs | RunCaseExecution:
+    expected = load_json_file(request.expected_path)
+    values = {
+        "package": _string_or_none(expected.get("package")),
+        "dist_git_branch": _string_or_none(
+            expected.get("dist_git_branch")
+            or expected.get("target_branch")
+            or expected.get("fix_version")
+        ),
+        "version": _string_or_none(expected.get("version") or expected.get("target_version")),
+        "jira_issue": _string_or_none(expected.get("jira_issue") or expected.get("case_id"))
+        or request.case_id,
+    }
+    missing = [name for name, value in values.items() if value is None or value == ""]
+    if missing:
+        return RunCaseExecution(
+            status="failed",
+            reason=f"ymir rebase workflow missing expected {', '.join(missing)}",
+        )
+
+    return RebaseInputs(
+        package=values["package"],
+        dist_git_branch=values["dist_git_branch"],
+        version=values["version"],
+        jira_issue=values["jira_issue"],
+        justification=_string_or_none(
+            expected.get("justification") or expected.get("rationale") or expected.get("notes")
+        ),
+    )
+
+
 def _backport_actual_result(
     request: RunCaseRequest,
     inputs: BackportInputs,
@@ -260,6 +413,41 @@ def _backport_actual_result(
     }
     if srpm_path:
         actual["generated_artifacts"] = [str(srpm_path)]
+
+    return actual
+
+
+def _rebase_actual_result(
+    request: RunCaseRequest,
+    inputs: RebaseInputs,
+    state: Any,
+    rebase_result: Any,
+) -> dict[str, Any]:
+    payload = _model_payload(rebase_result)
+    package = getattr(state, "package", None) or inputs.package
+    dist_git_branch = getattr(state, "dist_git_branch", None) or inputs.dist_git_branch
+    version = getattr(state, "version", None) or inputs.version
+    srpm_path = payload.get("srpm_path")
+    files_to_git_add = _string_list(payload.get("files_to_git_add"))
+
+    actual: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "case_id": request.case_id,
+        "case_type": request.case_type,
+        "workflow": "ymir-rebase",
+        "resolution": "rebase",
+        "package": package,
+        "target_branch": dist_git_branch,
+        "version": version,
+        "build_result": "passed" if payload.get("success") else "failed",
+        "rebase_status": payload.get("status"),
+        "rebase_error": payload.get("error"),
+        "data": payload,
+    }
+    if srpm_path:
+        actual["generated_artifacts"] = [str(srpm_path)]
+    if files_to_git_add:
+        actual["touched_files"] = files_to_git_add
 
     return actual
 
