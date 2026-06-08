@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from ymir_harness import __version__
+from ymir_harness.artifacts import artifact_environment
 from ymir_harness.models import (
     RunCaseResult,
     RunCaseStatus,
@@ -319,6 +320,16 @@ def _run_case_result(
     if executor is not None:
         expected = _load_expected_for_policy(expected_path)
         replay_policy = _replay_policy(cases_dir, case_id, expected)
+        environment = build_no_write_environment(
+            cases_dir,
+            results_dir,
+            base_env=base_env,
+            case_id=case_id,
+            network_mode=replay_policy.network_mode,
+            replay_manifest_path=replay_policy.manifest_path,
+            recorded_urls=replay_policy.recorded_urls,
+        )
+        environment.update(artifact_environment(actual_path))
         request = RunCaseRequest(
             case_id=case_id,
             case_type=case_type,
@@ -327,15 +338,7 @@ def _run_case_result(
             results_dir=results_dir,
             expected_path=expected_path,
             actual_path=actual_path,
-            environment=build_no_write_environment(
-                cases_dir,
-                results_dir,
-                base_env=base_env,
-                case_id=case_id,
-                network_mode=replay_policy.network_mode,
-                replay_manifest_path=replay_policy.manifest_path,
-                recorded_urls=replay_policy.recorded_urls,
-            ),
+            environment=environment,
             variant=variant,
             features=tuple(features),
         )
