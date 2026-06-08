@@ -540,6 +540,7 @@ def _backport_actual_result(
     if srpm_path:
         actual["generated_artifacts"] = [str(srpm_path)]
 
+    actual.update(_state_diagnostics(state))
     return actual
 
 
