@@ -273,6 +273,7 @@ class ScoreCollectionReport:
     variant: str | None = None
     harness_version: str | None = None
     fixture_checksum: str | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_headline_failures(self) -> bool:
@@ -311,6 +312,7 @@ class ScoreCollectionReport:
             "variant": self.variant,
             "harness_version": self.harness_version,
             "fixture_checksum": self.fixture_checksum,
+            "provenance": self.provenance,
             "cases_dir": str(self.cases_dir),
             "actual_results_dir": str(self.actual_results_dir),
             "summary": self.summary(),
