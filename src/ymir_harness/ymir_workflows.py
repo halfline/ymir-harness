@@ -379,6 +379,12 @@ def _triage_actual_result(
         if name in data and data[name] is not None:
             actual[name] = data[name]
 
+    if "package" not in actual:
+        expected = load_json_file(request.expected_path)
+        pkg = expected.get("package")
+        if pkg:
+            actual["package"] = pkg
+
     target_branch = getattr(state, "target_branch", None)
     if target_branch:
         actual["target_branch"] = target_branch
