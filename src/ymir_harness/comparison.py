@@ -36,6 +36,7 @@ def compare_result_payloads(
 
 def render_comparison_markdown(report: ComparisonReport) -> str:
     summary = report.summary()
+    show_costs = any(_has_cost_fields(entry) for entry in report.entries)
     lines = [
         "# Result Comparison",
         "",
@@ -46,20 +47,44 @@ def render_comparison_markdown(report: ComparisonReport) -> str:
         f"- Headline regressions: `{summary['regressions']}`",
         f"- Non-headline cases: `{summary['non_headline']}`",
         "",
-        "| Case | Type | Headline | Reason | Baseline | Candidate | Delta |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for entry in report.entries:
-        lines.append(
-            "| "
-            f"{entry.case_id} | "
-            f"{entry.case_type or ''} | "
-            f"{_yes_no(entry.headline)} | "
-            f"{entry.headline_reason or ''} | "
-            f"{entry.baseline_status or ''} | "
-            f"{entry.candidate_status or ''} | "
-            f"{entry.delta} |"
+    if show_costs:
+        lines.extend(
+            [
+                (
+                    "| Case | Type | Headline | Reason | Baseline | Candidate | "
+                    "Delta | Baseline cost | Candidate cost | Cost delta |"
+                ),
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
         )
+    else:
+        lines.extend(
+            [
+                "| Case | Type | Headline | Reason | Baseline | Candidate | Delta |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+
+    for entry in report.entries:
+        row = [
+            entry.case_id,
+            entry.case_type or "",
+            _yes_no(entry.headline),
+            entry.headline_reason or "",
+            entry.baseline_status or "",
+            entry.candidate_status or "",
+            entry.delta,
+        ]
+        if show_costs:
+            row.extend(
+                [
+                    _format_cost(entry.baseline_total_cost_usd),
+                    _format_cost(entry.candidate_total_cost_usd),
+                    _format_cost(entry.cost_delta_usd),
+                ]
+            )
+        lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -89,6 +114,8 @@ def _compare_case(
     candidate_status = _status(candidate)
     delta = _delta(headline, baseline_status, candidate_status)
     headline_reason = None if headline else _headline_reason(baseline, candidate)
+    baseline_cost = _total_cost_usd(baseline)
+    candidate_cost = _total_cost_usd(candidate)
     return ComparisonEntry(
         case_id=case_id,
         case_type=case_type,
@@ -97,6 +124,9 @@ def _compare_case(
         candidate_status=candidate_status,
         delta=delta,
         headline_reason=headline_reason,
+        baseline_total_cost_usd=baseline_cost,
+        candidate_total_cost_usd=candidate_cost,
+        cost_delta_usd=_cost_delta(baseline_cost, candidate_cost),
     )
 
 
@@ -164,6 +194,58 @@ def _status(case: Mapping[str, Any] | None) -> str | None:
     if isinstance(status, str):
         return status
     return None
+
+
+def _total_cost_usd(case: Mapping[str, Any] | None) -> float | None:
+    if case is None:
+        return None
+    direct = _number_or_none(case.get("total_cost_usd"))
+    if direct is not None:
+        return direct
+
+    score = case.get("score")
+    if not isinstance(score, Mapping):
+        return None
+
+    advisory_metrics = score.get("advisory_metrics")
+    if not isinstance(advisory_metrics, list):
+        return None
+
+    for metric in advisory_metrics:
+        if not isinstance(metric, Mapping):
+            continue
+        if metric.get("name") == "total_cost_usd":
+            return _number_or_none(metric.get("value"))
+    return None
+
+
+def _cost_delta(baseline: float | None, candidate: float | None) -> float | None:
+    if baseline is None or candidate is None:
+        return None
+    return candidate - baseline
+
+
+def _number_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_cost_fields(entry: ComparisonEntry) -> bool:
+    return (
+        entry.baseline_total_cost_usd is not None
+        or entry.candidate_total_cost_usd is not None
+        or entry.cost_delta_usd is not None
+    )
+
+
+def _format_cost(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"{value:g}"
 
 
 def _yes_no(value: bool) -> str:
