@@ -327,6 +327,7 @@ class RunCaseResult:
     expected_path: Path | None = None
     actual_path: Path | None = None
     score: ScoreReport | None = None
+    runtime_seconds: float | None = None
     reason: str | None = None
 
     def to_json(self) -> dict[str, Any]:
@@ -340,6 +341,8 @@ class RunCaseResult:
         }
         if self.score is not None:
             payload["score"] = self.score.to_json()
+        if self.runtime_seconds is not None:
+            payload["runtime_seconds"] = self.runtime_seconds
         if self.reason:
             payload["reason"] = self.reason
         return payload
