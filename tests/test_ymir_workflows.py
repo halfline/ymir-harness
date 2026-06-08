@@ -346,7 +346,17 @@ def test_ymir_rebase_executor_runs_workflow_with_expected_inputs(
                     "srpm_path": "/tmp/build/dnsmasq.src.rpm",
                     "files_to_git_add": ["dnsmasq.spec", "dnsmasq-2.91.patch"],
                 }
-            )
+            ),
+            usage=_DiagnosticPayload(
+                {
+                    "input_tokens": 3200,
+                    "output_tokens": 700,
+                    "cache_read_tokens": 100,
+                }
+            ),
+            iteration=23,
+            tool_calls=[object(), object()],
+            cost=_DiagnosticPayload({"total_cost_usd": 12.5}),
         )
 
     executor = make_ymir_rebase_executor(workflow=workflow)
@@ -376,6 +386,14 @@ def test_ymir_rebase_executor_runs_workflow_with_expected_inputs(
         },
         "generated_artifacts": ["/tmp/build/dnsmasq.src.rpm"],
         "touched_files": ["dnsmasq.spec", "dnsmasq-2.91.patch"],
+        "token_usage": {
+            "input_tokens": 3200,
+            "output_tokens": 700,
+            "cache_read_tokens": 100,
+        },
+        "iteration_count": 23,
+        "tool_call_count": 2,
+        "total_cost_usd": 12.5,
     }
     assert calls == [
         {
@@ -845,6 +863,15 @@ class _BackportResult:
 
 
 class _RebaseResult:
+    def __init__(self, payload: dict[str, object]):
+        self._payload = payload
+
+    def model_dump(self, *, mode: str):
+        assert mode == "json"
+        return self._payload
+
+
+class _DiagnosticPayload:
     def __init__(self, payload: dict[str, object]):
         self._payload = payload
 
