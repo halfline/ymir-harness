@@ -617,6 +617,46 @@ def test_build_run_report_warns_on_cost_alert_threshold(tmp_path: Path) -> None:
     assert report.to_json()["cases"][0]["warnings"] == entry.warnings
 
 
+def test_build_run_report_records_provenance(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        ymir_sha="abc123",
+        features=["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"],
+        base_env={
+            "CHAT_MODEL": "vertexai:claude-opus-4-6",
+            "CONTAINER_IMAGE_DIGEST": "sha256:container",
+        },
+        provenance={"agentic_skills_sha": "def456"},
+    )
+
+    assert report.to_json()["provenance"] == {
+        "ymir_sha": "abc123",
+        "feature_flags": ["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"],
+        "container_image_digest": "sha256:container",
+        "chat_model": "vertexai:claude-opus-4-6",
+        "agentic_skills_sha": "def456",
+    }
+
+
 def test_build_run_report_fails_executor_score_mismatches(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
