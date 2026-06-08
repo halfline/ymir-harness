@@ -41,6 +41,10 @@ benchmark validate-cases benchmark_cases/
 ```
 
 `benchmark compare` is also accepted as an alias for `benchmark compare-results`.
+Use `--provenance KEY=VALUE` with `run` or `score-results` to add explicit
+run metadata such as `agentic_skills_sha`, `container_image_digest`, or model
+configuration.
+
 Validation writes:
 
 ```text
@@ -210,6 +214,11 @@ actual result path and the exception reason.
 Workflow adapters start from a no-write environment profile that forces
 `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
 known write credentials and Kerberos keytab paths from the process environment.
+Run reports include a `provenance` object populated from explicit
+`--provenance` entries and recognized environment variables such as
+`AGENTIC_SKILLS_SHA`, `AGENTIC_SKILLS_CHECKSUM`, `CONTAINER_IMAGE_DIGEST`,
+`CHAT_MODEL*`, `REASONING_EFFORT`, `BEEAI_MAX_ITERATIONS`,
+`BENCHMARK_PROMPT_CONFIG`, and `BENCHMARK_MODEL_SETTINGS`.
 Set `BENCHMARK_MAX_ITERATIONS_OVERRIDE` to pass a lower
 `BEEAI_MAX_ITERATIONS` value into each workflow environment. Set
 `BENCHMARK_MAX_COST_PER_RUN` to mark cases whose `total_cost_usd` exceeds the
