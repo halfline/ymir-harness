@@ -130,6 +130,14 @@ the manifest path and recorded URL list in the case environment, and derives
 `replay_violations` from actual-result event traces. For `network_denied`
 cases, any external HTTP URL in the event trace is reported as a replay
 violation.
+During `run`, executors are also wrapped in a runtime boundary guard. The guard
+blocks unsafe subprocess commands, blocks external subprocess URLs in
+`network_denied` and `replay_only` modes, blocks direct external socket
+connections, and serves recorded responses from `web_cache` to common Python
+HTTP clients (`urllib`, `requests`, and `aiohttp`) when the URL is declared in
+the replay manifest. Recorded shell `curl`/`wget` downloads made through
+`subprocess.run(..., stdout=PIPE)` are satisfied from cache; unsupported shell
+download forms are blocked instead of falling through to live network.
 
 Expected results may declare `required_artifacts`. Scoring compares that list
 with `generated_artifacts` in the actual result and fails the case when any
