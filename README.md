@@ -6,14 +6,32 @@ adjacent `ai-workflows/ymir-harness.md` document: validate case fixtures before
 execution, then compare an actual structured result against the expected
 outcome with field-level detail.
 
-The harness is offline by default. It only checks `pre_fix_ref` resolution when a
-mock fixture points at a local repository path or `file://` URL, and it requires
-`replay_only` cases to declare recorded web-cache files.
+Benchmark replay is offline by default. It only checks `pre_fix_ref` resolution
+when a mock fixture points at a local repository path or `file://` URL, and it
+requires `replay_only` cases to declare recorded web-cache files. Fixture
+collection can make explicit read-only Jira and GitLab requests to build those
+offline fixtures when a Jira URL or GitLab MR URL is provided.
 
 ## Commands
 
 ```bash
 ymir-harness validate-cases benchmark_cases/
+ymir-harness collect-case \
+  --cases benchmark_cases/ \
+  --case-id RHEL-12345 \
+  --case-type cve_backport \
+  --resolution backport \
+  --package dnsmasq \
+  --target-branch rhel-8.10.z \
+  --expected-basis merged_mr \
+  --network-mode replay_only \
+  --remote-url https://example.invalid/dnsmasq.git \
+  --pre-fix-ref abc123 \
+  --branch c9s \
+  --reference-patch evidence/fix.patch \
+  --reference-patch-mode scope_only \
+  --jira-issue-json evidence/issue.json \
+  --web-record https://example.invalid/fix.patch=evidence/fix.patch.response
 ymir-harness score-result \
   benchmark_cases/expected/RHEL-12345.expected.json \
   reports/RHEL-12345.actual.json
@@ -44,6 +62,42 @@ benchmark validate-cases benchmark_cases/
 Use `--provenance KEY=VALUE` with `run` or `score-results` to add explicit
 run metadata such as `agentic_skills_sha`, `container_image_digest`, or model
 configuration.
+
+`collect-case` scaffolds replayable fixture files from either local evidence or
+read-only fetches. Pass `--jira-url` or `--jira-base-url` to import a completed
+Jira issue. When omitted, `case_type`, `resolution`, `package`, `fix_version`,
+CVEs, and `expected_basis` are derived from Jira fields, Ymir/Jotnar result
+labels, and agent result comments when possible. Patch URLs and GitLab MRs found
+in result comments are recorded into replay evidence but removed from
+`starting-issue.json`. Pass `--gitlab-mr` to fetch GitLab MR
+metadata, commits, changes, and patch content into `web_cache/CASE_ID/`; if no
+MR is passed, a GitLab MR remote link or comment URL in the fetched Jira is used
+automatically.
+The MR patch is also copied to `mock_data/*/reference_patches/CASE_ID.patch`
+when mock repo metadata is provided and no local `--reference-patch` is
+supplied. Jira fetches use `JIRA_TOKEN` when it is set. Tokens are sent as
+bearer tokens by default; pass `--jira-email` or set `JIRA_EMAIL` /
+`ATLASSIAN_EMAIL` for Atlassian Basic auth, and use `--jira-token-file` when the
+token lives in a file. GitLab fetches use `GITLAB_TOKEN` as a private token when
+it is set. Override environment variable names with `--jira-token-env` or
+`--gitlab-token-env`.
+When `--network-mode` is omitted, `collect-case` keeps Jira-only cases
+`network_denied`, but switches to `replay_only` automatically for replay web
+evidence such as a GitLab MR, `--patch-url`, or `--web-record`.
+
+`collect-case` still accepts pre-collected local files through
+`--jira-issue-json`, `--jira-comments-json`, `--jira-links-json`,
+`--reference-patch`, `--web-record`, and source-cache options. It writes
+`cases.yaml`, `expected/`, `jiras/`, optional `mock_data/`, optional
+`web_cache/`, and optional `source_cache/` entries. New cases default to
+`case_status=quarantined` so they do not enter headline results until reviewed.
+Use `--overwrite` when intentionally regenerating an existing case scaffold.
+Checked-in Jira fixtures stay structured under `jiras/CASE_ID/`; validation
+also verifies they can be materialized into the flat mock shape that Ymir reads.
+`issue.json`, `comments.json`, and `links.json` preserve the completed Jira
+evidence. `starting-issue.json` is a redacted triage starting point that removes
+obvious Ymir result labels, closed status, result comments, and final remote
+links so triage reruns must rederive the answer.
 
 The repository includes a synthetic offline seed fixture under
 `examples/benchmark_cases/`. It is not a historical benchmark case, but it gives
@@ -100,6 +154,12 @@ materializes those repos under the run directory, checks out `pre_fix_ref`,
 writes a per-case gitconfig with `insteadOf` URL rewrites, exposes that
 gitconfig through `GIT_CONFIG_GLOBAL`, and exports `MOCK_BLOCKED_URLS` for the
 original URLs.
+When a runnable case has structured Jira evidence under `jiras/CASE_ID/`, `run`
+generates flat Ymir Jira mock files under `reports/runs/RUN_ID/repeat-N/jira-mock`
+and points `JIRA_MOCK_FILES` at that generated directory. If
+`starting-issue.json` is present, that redacted issue is what Ymir sees during
+triage replay; the completed Jira evidence remains available only as fixture
+ground truth.
 
 `score-results` reads every `benchmark_cases/expected/*.expected.json` file and
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
