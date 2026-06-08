@@ -23,6 +23,7 @@ from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
 
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
 MAX_ITERATIONS_OVERRIDE_ENV = "BENCHMARK_MAX_ITERATIONS_OVERRIDE"
+MAX_COST_PER_RUN_ENV = "BENCHMARK_MAX_COST_PER_RUN"
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
     "MOCK_JIRA": "true",
@@ -335,16 +336,17 @@ def _run_case_result(
                     actual_path=execution_actual_path,
                     reason=_actual_result_score_failure_reason(exc),
                 )
+        budget_reason = _budget_guardrail_reason(request.environment, execution.actual_result)
         return RunCaseResult(
             case_id=case_id,
             case_type=case_type,
-            status=_execution_status(execution, score),
+            status="timeout" if budget_reason else _execution_status(execution, score),
             repetition=repetition,
             expected_path=expected_path if expected_path.is_file() else None,
             actual_path=execution_actual_path,
             score=score,
             runtime_seconds=runtime_seconds,
-            reason=execution.reason or _execution_reason(execution, score),
+            reason=budget_reason or execution.reason or _execution_reason(execution, score),
         )
 
     return RunCaseResult(
@@ -402,6 +404,46 @@ def _execution_reason(
     if execution.status == "passed" and score is not None and not score.passed:
         return "deterministic score failed"
     return None
+
+
+def _budget_guardrail_reason(
+    environment: Mapping[str, str],
+    actual_result: Mapping[str, Any] | None,
+) -> str | None:
+    max_cost = _float_or_none(environment.get(MAX_COST_PER_RUN_ENV))
+    if max_cost is None or actual_result is None:
+        return None
+
+    total_cost = _float_or_none(_actual_result_field(actual_result, "total_cost_usd"))
+    if total_cost is None or total_cost <= max_cost:
+        return None
+
+    return (
+        "budget guardrail exceeded: "
+        f"total_cost_usd {_format_number(total_cost)} > "
+        f"{MAX_COST_PER_RUN_ENV} {_format_number(max_cost)}"
+    )
+
+
+def _actual_result_field(actual_result: Mapping[str, Any], name: str) -> Any:
+    data = actual_result.get("data")
+    nested = data if isinstance(data, Mapping) else {}
+    if actual_result.get(name) is not None:
+        return actual_result.get(name)
+    return nested.get(name)
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_number(value: float) -> str:
+    return f"{value:g}"
 
 
 def _write_actual_result(path: Path, actual_result: Mapping[str, Any]) -> None:
