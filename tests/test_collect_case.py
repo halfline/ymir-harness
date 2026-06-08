@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -134,6 +135,7 @@ def test_collect_case_rejects_network_denied_external_records(tmp_path: Path) ->
                 case_type="not_affected",
                 resolution="not_affected",
                 package="dnsmasq",
+                network_mode="network_denied",
                 patch_urls=("https://example.invalid/fix.patch",),
             )
         )
@@ -170,6 +172,7 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
             resolution="backport",
             package="dnsmasq",
             target_branch="rhel-8.10.z",
+            network_mode="network_denied",
             jira_url="https://issues.example.invalid/browse/RHEL-12345",
         )
     )
@@ -178,13 +181,400 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     issue = json.loads((jira_dir / "issue.json").read_text(encoding="utf-8"))
     comments = json.loads((jira_dir / "comments.json").read_text(encoding="utf-8"))
     links = json.loads((jira_dir / "links.json").read_text(encoding="utf-8"))
+    starting = json.loads((jira_dir / "starting-issue.json").read_text(encoding="utf-8"))
     assert issue["key"] == "RHEL-12345"
     assert comments["comments"][0]["body"] == "Please backport this fix."
     assert links["links"][0]["object"]["url"] == (
         "https://gitlab.example/group/pkg/-/merge_requests/7"
     )
+    assert starting["fields"]["comment"]["comments"] == [{"body": "Please backport this fix."}]
+    assert starting["remote_links"] == []
     assert result.fetched_urls == seen_urls == list(responses)
 
+
+def test_collect_case_fetches_jira_with_basic_auth_token_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+            "key": "RHEL-12345",
+            "fields": {"summary": "Backport CVE fix"},
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/comment": {"comments": []},
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [],
+    }
+    token_file = _write_text(tmp_path / "jira-token", "secret-token\n")
+    authorizations: list[str | None] = []
+
+    def fake_urlopen(request, timeout: float):
+        authorizations.append(request.get_header("Authorization"))
+        return _fake_urlopen(responses, [])(request, timeout)
+
+    monkeypatch.setattr(collect_case_module, "urlopen", fake_urlopen)
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            network_mode="network_denied",
+            jira_url="https://issues.example.invalid/browse/RHEL-12345",
+            jira_token_file=token_file,
+            jira_email="maintainer@example.invalid",
+        )
+    )
+
+    expected = "Basic " + base64.b64encode(b"maintainer@example.invalid:secret-token").decode(
+        "ascii"
+    )
+    assert authorizations == [expected, expected, expected]
+
+
+def test_collect_case_wraps_local_jira_link_arrays(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    issue_json = _write_json(
+        tmp_path / "inputs" / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": {"summary": "Not affected", "components": [{"name": "dnsmasq"}]},
+        },
+    )
+    comments_json = _write_json(tmp_path / "inputs" / "comments.json", {"comments": []})
+    links_json = _write_json(
+        tmp_path / "inputs" / "links.json",
+        [{"object": {"url": "https://example.invalid/reference"}}],
+    )
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="not_affected",
+            resolution="not_affected",
+            package="dnsmasq",
+            jira_issue_json=issue_json,
+            jira_comments_json=comments_json,
+            jira_links_json=links_json,
+        )
+    )
+
+    links = json.loads(
+        (cases_dir / "jiras" / "RHEL-12345" / "links.json").read_text(encoding="utf-8")
+    )
+    assert links["case_id"] == "RHEL-12345"
+    assert links["links"] == [{"object": {"url": "https://example.invalid/reference"}}]
+
+    report = validate_case_directory(cases_dir)
+    assert not report.has_blocking_errors
+
+
+def test_collect_case_imports_completed_jira_without_repeated_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+            "key": "RHEL-12345",
+            "fields": {
+                "summary": "CVE-2026-0001 in dnsmasq",
+                "description": "Reporter supplied reproducer.",
+                "customfield_10669": "dnsmasq",
+                "components": [{"name": "dnsmasq"}],
+                "fixVersions": [{"name": "rhel-8.10.z"}],
+                "labels": ["security", "ymir_triaged_backport"],
+                "status": {"name": "Closed"},
+            },
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/comment": {
+            "comments": [
+                {
+                    "body": "The reproducer fails before the upstream fix.",
+                    "author": {"displayName": "Reporter"},
+                },
+                {
+                    "body": "*Resolution*: backport\n*Package*: dnsmasq",
+                    "author": {"displayName": "Jotnar Project"},
+                },
+            ],
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [
+            {"object": {"url": "https://gitlab.example/group/pkg/-/merge_requests/7"}}
+        ],
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7": {
+            "iid": 7,
+            "web_url": "https://gitlab.example/group/pkg/-/merge_requests/7",
+        },
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/commits": [
+            {"id": "abc123", "title": "Fix CVE"}
+        ],
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/changes": {
+            "changes": [{"old_path": "source.c", "new_path": "source.c"}]
+        },
+        "https://gitlab.example/group/pkg/-/merge_requests/7.patch": (
+            "diff --git a/source.c b/source.c\n"
+        ),
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(responses, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            jira_url="https://issues.example.invalid/browse/RHEL-12345",
+        )
+    )
+
+    cases_dir = tmp_path / "benchmark_cases"
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["case_type"] == "cve_backport"
+    assert expected["resolution"] == "backport"
+    assert expected["package"] == "dnsmasq"
+    assert expected["fix_version"] == "rhel-8.10.z"
+    assert expected["cve_ids"] == ["CVE-2026-0001"]
+    assert expected["expected_basis"] == "historical_jira_state"
+    assert expected["network_mode"] == "replay_only"
+    assert expected["patch_urls"] == ["https://gitlab.example/group/pkg/-/merge_requests/7.patch"]
+    assert expected["fix_sources"] == ["https://gitlab.example/group/pkg/-/merge_requests/7"]
+
+    jira_dir = cases_dir / "jiras" / "RHEL-12345"
+    full_issue = json.loads((jira_dir / "issue.json").read_text(encoding="utf-8"))
+    starting = json.loads((jira_dir / "starting-issue.json").read_text(encoding="utf-8"))
+    assert full_issue["fields"]["status"]["name"] == "Closed"
+    assert full_issue["fields"]["labels"] == ["security", "ymir_triaged_backport"]
+    assert starting["fields"]["status"] == {"name": "New"}
+    assert starting["fields"]["labels"] == ["security"]
+    assert starting["fields"]["comment"]["comments"] == [
+        {
+            "body": "The reproducer fails before the upstream fix.",
+            "author": {"displayName": "Reporter"},
+        }
+    ]
+    assert starting["remote_links"] == []
+
+    report = validate_case_directory(cases_dir)
+    assert not report.has_blocking_errors
+    assert result.fetched_urls == seen_urls == list(responses)
+
+
+def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream_patch_url = "https://gitlab.gnome.example/GNOME/glib/-/commit/abc123.patch"
+    bad_patch_url = "https://gitlab.gnome.example/GNOME/glib/-/commit/not-a-patch.patch"
+    mr_url = "https://gitlab.example/redhat/rpms/glib2/-/merge_requests/64"
+    responses = {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+            "key": "RHEL-12345",
+            "fields": {
+                "summary": "CVE-2026-0001 in glib2",
+                "components": [{"name": "glib2"}],
+                "fixVersions": [{"name": "rhel-9.7.z"}],
+                "labels": [
+                    "security",
+                    "jotnar_backported",
+                    "jotnar_merged",
+                    "rhel-jotnar-pilot",
+                ],
+                "status": {"name": "Closed"},
+            },
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/comment": {
+            "comments": [
+                {
+                    "body": "Reporter supplied reproducer.",
+                    "author": {"displayName": "Reporter"},
+                },
+                {
+                    "body": (
+                        "Output from Triage Agent:\n\n"
+                        f"*Resolution*: backport\n*Patch URL*: {upstream_patch_url}\n"
+                        f"*Patch URL*: {bad_patch_url}\n"
+                    ),
+                    "author": {"displayName": "J\u00f6tnar Project"},
+                },
+                {
+                    "body": f"Output from Backport Agent:\n\n{mr_url}\n",
+                    "author": {"displayName": "J\u00f6tnar Project"},
+                },
+                {
+                    "body": "This ticket moved to Integration/Release Pending.",
+                    "author": {"displayName": "RHEL Jira bot"},
+                },
+                {
+                    "body": "Advisory RHBA-2025:12345 released on 2025-11-11.",
+                    "author": {"displayName": "e-tool"},
+                },
+            ],
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [],
+        "https://gitlab.example/api/v4/projects/redhat%2Frpms%2Fglib2/merge_requests/64": {
+            "iid": 64,
+            "web_url": mr_url,
+        },
+        "https://gitlab.example/api/v4/projects/redhat%2Frpms%2Fglib2/merge_requests/64/commits": [
+            {"id": "abc123", "title": "Fix CVE"}
+        ],
+        "https://gitlab.example/api/v4/projects/redhat%2Frpms%2Fglib2/merge_requests/64/changes": {
+            "changes": [{"old_path": "source.c", "new_path": "source.c"}]
+        },
+        f"{mr_url}.patch": "diff --git a/source.c b/source.c\n",
+        upstream_patch_url: "diff --git a/upstream.c b/upstream.c\n",
+        bad_patch_url: "<!DOCTYPE html><html><body>not a patch</body></html>",
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(responses, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            jira_url="https://issues.example.invalid/browse/RHEL-12345",
+        )
+    )
+
+    cases_dir = tmp_path / "benchmark_cases"
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["case_type"] == "cve_backport"
+    assert expected["resolution"] == "backport"
+    assert expected["package"] == "glib2"
+    assert expected["fix_version"] == "rhel-9.7.z"
+    assert expected["network_mode"] == "replay_only"
+    assert expected["patch_urls"] == [upstream_patch_url, f"{mr_url}.patch"]
+    assert expected["fix_sources"] == [mr_url]
+    assert any("fetched content is not a patch" in warning for warning in result.warnings)
+
+    starting = json.loads(
+        (cases_dir / "jiras" / "RHEL-12345" / "starting-issue.json").read_text(encoding="utf-8")
+    )
+    assert starting["fields"]["status"] == {"name": "New"}
+    assert starting["fields"]["labels"] == ["security"]
+    assert starting["fields"]["comment"]["comments"] == [
+        {
+            "body": "Reporter supplied reproducer.",
+            "author": {"displayName": "Reporter"},
+        }
+    ]
+    assert starting["remote_links"] == []
+
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["recorded_files"][upstream_patch_url] == "jira/patches/001.patch"
+    assert bad_patch_url not in manifest["recorded_files"]
+    assert manifest["recorded_files"][f"{mr_url}.patch"] == "gitlab/merge_request.patch"
+
+    report = validate_case_directory(cases_dir)
+    assert not report.has_blocking_errors
+    assert seen_urls == list(responses)
+
+
+def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7": {
+            "iid": 7,
+            "web_url": "https://gitlab.example/group/pkg/-/merge_requests/7",
+        },
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/commits": [
+            {"id": "abc123", "title": "Fix CVE"}
+        ],
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/changes": {
+            "changes": [{"old_path": "source.c", "new_path": "source.c"}]
+        },
+        "https://gitlab.example/group/pkg/-/merge_requests/7.patch": (
+            "diff --git a/source.c b/source.c\n"
+        ),
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(responses, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            reference_patch_mode="scope_only",
+            gitlab_mr_url="https://gitlab.example/group/pkg/-/merge_requests/7",
+            mock_repo=MockRepoInput(
+                remote_url="https://gitlab.example/group/pkg.git",
+                pre_fix_ref="abc123",
+                branch="c9s",
+            ),
+        )
+    )
+
+    cases_dir = tmp_path / "benchmark_cases"
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["patch_urls"] == [
+        "https://gitlab.example/group/pkg/-/merge_requests/7.patch"
+    ]
+    assert expected["fix_sources"] == [
+        "https://gitlab.example/group/pkg/-/merge_requests/7"
+    ]
+    reference_patch = (
+        cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch"
+    )
+    assert reference_patch.read_text(encoding="utf-8") == (
+        "diff --git a/source.c b/source.c\n"
+    )
+
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["required_urls"] == [
+        "https://gitlab.example/group/pkg/-/merge_requests/7.patch",
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7",
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/commits",
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/changes",
+    ]
+    assert manifest["recorded_files"] == {
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7": (
+            "gitlab/merge_request.json"
+        ),
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/commits": (
+            "gitlab/commits.json"
+        ),
+        "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/changes": (
+            "gitlab/changes.json"
+        ),
+        "https://gitlab.example/group/pkg/-/merge_requests/7.patch": (
+            "gitlab/merge_request.patch"
+        ),
+    }
+    assert result.fetched_urls == seen_urls == list(responses)
 
 
 def test_collect_case_overwrite_replaces_existing_files(tmp_path: Path) -> None:

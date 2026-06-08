@@ -8,6 +8,7 @@ import pytest
 from ymir_harness import __version__
 import ymir_harness.cli as cli_module
 from ymir_harness.cli import main
+from ymir_harness.collect_case import CollectCaseResult
 from ymir_harness.runner import RunCaseExecution
 
 
@@ -175,6 +176,100 @@ def test_cli_collect_case_writes_fixture_tree(
     assert (cases_dir / "mock_data" / "triage" / "RHEL-12345.json").is_file()
     assert (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").is_file()
 
+
+def test_cli_collect_case_fetch_options_leave_network_mode_for_collect(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests = []
+
+    def fake_collect_case(request):
+        captured_requests.append(request)
+        return CollectCaseResult(case_id=request.case_id, cases_dir=request.cases_dir)
+
+    monkeypatch.setattr(cli_module, "collect_case", fake_collect_case)
+
+    assert (
+        main(
+            [
+                "collect-case",
+                "--cases",
+                str(tmp_path / "benchmark_cases"),
+                "--case-id",
+                "RHEL-12345",
+                "--case-type",
+                "cve_backport",
+                "--resolution",
+                "backport",
+                "--package",
+                "dnsmasq",
+                "--target-branch",
+                "rhel-8.10.z",
+                "--jira-url",
+                "https://issues.example.invalid/browse/RHEL-12345",
+                "--jira-token-env",
+                "JIRA_API_TOKEN",
+                "--gitlab-mr",
+                "https://gitlab.example/group/pkg/-/merge_requests/7",
+                "--gitlab-token-env",
+                "GITLAB_API_TOKEN",
+                "--http-timeout",
+                "12.5",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["case_id"] == "RHEL-12345"
+    request = captured_requests[0]
+    assert request.network_mode is None
+    assert request.jira_url == "https://issues.example.invalid/browse/RHEL-12345"
+    assert request.jira_token_env == "JIRA_API_TOKEN"
+    assert request.gitlab_mr_url == "https://gitlab.example/group/pkg/-/merge_requests/7"
+    assert request.gitlab_token_env == "GITLAB_API_TOKEN"
+    assert request.http_timeout == 12.5
+
+
+def test_cli_collect_case_allows_jira_derived_metadata(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_requests = []
+
+    def fake_collect_case(request):
+        captured_requests.append(request)
+        return CollectCaseResult(case_id=request.case_id, cases_dir=request.cases_dir)
+
+    monkeypatch.setattr(cli_module, "collect_case", fake_collect_case)
+
+    assert (
+        main(
+            [
+                "collect-case",
+                "--cases",
+                str(tmp_path / "benchmark_cases"),
+                "--case-id",
+                "RHEL-12345",
+                "--jira-url",
+                "https://issues.example.invalid/browse/RHEL-12345",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["case_id"] == "RHEL-12345"
+    request = captured_requests[0]
+    assert request.case_type is None
+    assert request.resolution is None
+    assert request.package is None
+    assert request.expected_basis is None
+    assert request.network_mode is None
 
 
 def test_cli_run_writes_placeholder_report(
