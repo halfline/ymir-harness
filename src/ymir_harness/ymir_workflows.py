@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from ymir_harness.artifacts import merge_artifact_fields
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.runner import RunCaseExecution, RunCaseRequest
 from ymir_harness.scoring import load_json_file
@@ -541,6 +542,12 @@ def _backport_actual_result(
     if srpm_path:
         actual["generated_artifacts"] = [str(srpm_path)]
 
+    merge_artifact_fields(
+        actual,
+        request_artifact_dir=_request_artifact_dir(request),
+        state=state,
+        payload=payload,
+    )
     actual.update(_state_diagnostics(state))
     return actual
 
