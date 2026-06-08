@@ -7,7 +7,26 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ymir_harness import __version__
+from ymir_harness.collect_case import (
+    CollectCaseError,
+    CollectCaseRequest,
+    MockRepoInput,
+    collect_case,
+    load_alternate_outcomes,
+    parse_key_value_items,
+    parse_web_record_items,
+)
 from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
+from ymir_harness.models import (
+    ALLOWED_ANSWER_LEAKAGE,
+    ALLOWED_CASE_STATUSES,
+    ALLOWED_CASE_TYPES,
+    ALLOWED_EXPECTED_BASES,
+    ALLOWED_GROUND_TRUTH_CONFIDENCE,
+    ALLOWED_NETWORK_MODES,
+    ALLOWED_REFERENCE_PATCH_MODES,
+    ALLOWED_RESOLUTIONS,
+)
 from ymir_harness.reports import write_validation_reports
 from ymir_harness.runner import (
     append_global_issues,
@@ -57,6 +76,113 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the validation report JSON to stdout",
     )
     validate.set_defaults(func=_cmd_validate_cases)
+
+    collect = subparsers.add_parser(
+        "collect-case",
+        help="scaffold one benchmark case from locally collected evidence files",
+    )
+    collect.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
+    collect.add_argument("--case-id", required=True, help="Jira issue key / benchmark case id")
+    collect.add_argument("--case-type", choices=sorted(ALLOWED_CASE_TYPES), required=True)
+    collect.add_argument("--resolution", choices=sorted(ALLOWED_RESOLUTIONS), required=True)
+    collect.add_argument("--package", required=True, help="source package name")
+    collect.add_argument("--target-branch", help="expected target dist-git branch")
+    collect.add_argument("--fix-version", help="expected fix version when branch is not enough")
+    collect.add_argument(
+        "--expected-basis",
+        choices=sorted(ALLOWED_EXPECTED_BASES),
+        default="manual_review",
+    )
+    collect.add_argument(
+        "--ground-truth-confidence",
+        choices=sorted(ALLOWED_GROUND_TRUTH_CONFIDENCE),
+        default="medium",
+    )
+    collect.add_argument(
+        "--answer-leakage",
+        choices=sorted(ALLOWED_ANSWER_LEAKAGE),
+        default="none",
+    )
+    collect.add_argument(
+        "--case-status",
+        choices=sorted(ALLOWED_CASE_STATUSES),
+        default="quarantined",
+    )
+    collect.add_argument(
+        "--case-status-reason",
+        default="fixture scaffold requires ground-truth review",
+    )
+    collect.add_argument(
+        "--network-mode",
+        choices=sorted(ALLOWED_NETWORK_MODES),
+        default="network_denied",
+    )
+    collect.add_argument("--cve-id", dest="cve_ids", action="append", default=[])
+    collect.add_argument("--patch-url", dest="patch_urls", action="append", default=[])
+    collect.add_argument("--fix-source", dest="fix_sources", action="append", default=[])
+    collect.add_argument("--notes")
+    collect.add_argument(
+        "--alternate-outcome",
+        dest="alternate_outcomes",
+        action="append",
+        type=Path,
+        default=[],
+        help="JSON object with expected-result overrides for an acceptable alternate",
+    )
+    collect.add_argument("--mock-agent", default="triage")
+    collect.add_argument("--remote-url", help="mock repo original remote URL or local path")
+    collect.add_argument("--pre-fix-ref", help="commit/ref before the historical fix")
+    collect.add_argument("--branch", help="mock repo source branch")
+    collect.add_argument(
+        "--zstream-override",
+        action="append",
+        default=[],
+        metavar="MAJOR=BRANCH",
+    )
+    collect.add_argument(
+        "--blocked-original-url",
+        action="append",
+        default=[],
+        help="extra original URL prefix to block during replay",
+    )
+    collect.add_argument(
+        "--reference-patch",
+        type=Path,
+        help="local patch file to copy into mock_data/*/reference_patches",
+    )
+    collect.add_argument(
+        "--reference-patch-mode",
+        choices=sorted(ALLOWED_REFERENCE_PATCH_MODES),
+    )
+    collect.add_argument("--jira-issue-json", type=Path)
+    collect.add_argument("--jira-comments-json", type=Path)
+    collect.add_argument("--jira-links-json", type=Path)
+    collect.add_argument("--attachment", dest="attachments", action="append", type=Path, default=[])
+    collect.add_argument(
+        "--web-record",
+        dest="web_records",
+        action="append",
+        default=[],
+        metavar="URL=PATH",
+        help="copy a recorded response file and map it to URL in web_cache manifest",
+    )
+    collect.add_argument(
+        "--source-upstream",
+        action="append",
+        type=Path,
+        default=[],
+        help="copy upstream source archive or clone into source_cache/CASE/upstream",
+    )
+    collect.add_argument(
+        "--source-lookaside",
+        action="append",
+        type=Path,
+        default=[],
+        help="copy lookaside artifact into source_cache/CASE/lookaside",
+    )
+    collect.add_argument("--overwrite", action="store_true")
+    collect.add_argument("--json", action="store_true", help="print collection result JSON")
+    collect.set_defaults(func=_cmd_collect_case)
 
     score = subparsers.add_parser(
         "score-result",
@@ -203,6 +329,92 @@ def _cmd_validate_cases(args: argparse.Namespace) -> int:
         sys.stdout.write(f"reports written to {reports_dir}\n")
 
     return 1 if report.has_blocking_errors else 0
+
+
+def _cmd_collect_case(args: argparse.Namespace) -> int:
+    try:
+        request = _collect_case_request(args)
+        result = collect_case(request)
+    except (CollectCaseError, ValueError) as exc:
+        sys.stderr.write(f"collect-case failed: {exc}\n")
+        return 1
+
+    if args.json:
+        json.dump(result.to_json(), sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(
+            f"collected {result.case_id}: {len(result.written_paths)} files written\n"
+        )
+        if result.warnings:
+            for warning in result.warnings:
+                sys.stdout.write(f"warning: {warning}\n")
+    return 0
+
+
+def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
+    mock_repo = _collect_mock_repo(args)
+    return CollectCaseRequest(
+        cases_dir=args.cases,
+        case_id=args.case_id,
+        case_type=args.case_type,
+        resolution=args.resolution,
+        package=args.package,
+        expected_basis=args.expected_basis,
+        ground_truth_confidence=args.ground_truth_confidence,
+        answer_leakage=args.answer_leakage,
+        case_status=args.case_status,
+        case_status_reason=args.case_status_reason,
+        network_mode=args.network_mode,
+        target_branch=args.target_branch,
+        fix_version=args.fix_version,
+        cve_ids=tuple(args.cve_ids),
+        patch_urls=tuple(args.patch_urls),
+        fix_sources=tuple(args.fix_sources),
+        notes=args.notes,
+        alternate_acceptable_outcomes=load_alternate_outcomes(args.alternate_outcomes),
+        reference_patch_mode=args.reference_patch_mode,
+        mock_repo=mock_repo,
+        jira_issue_json=args.jira_issue_json,
+        jira_comments_json=args.jira_comments_json,
+        jira_links_json=args.jira_links_json,
+        attachments=tuple(args.attachments),
+        reference_patch=args.reference_patch,
+        web_records=parse_web_record_items(args.web_records),
+        source_upstream=tuple(args.source_upstream),
+        source_lookaside=tuple(args.source_lookaside),
+        overwrite=args.overwrite,
+    )
+
+
+
+def _collect_mock_repo(args: argparse.Namespace) -> MockRepoInput | None:
+    values = {
+        "remote_url": args.remote_url,
+        "pre_fix_ref": args.pre_fix_ref,
+        "branch": args.branch,
+    }
+    if not any(values.values()):
+        if args.reference_patch is not None:
+            msg = "--reference-patch requires --remote-url, --pre-fix-ref, and --branch"
+            raise ValueError(msg)
+        return None
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        missing_options = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+        msg = f"mock repo metadata is incomplete; missing {missing_options}"
+        raise ValueError(msg)
+    return MockRepoInput(
+        remote_url=args.remote_url,
+        pre_fix_ref=args.pre_fix_ref,
+        branch=args.branch,
+        agent=args.mock_agent,
+        zstream_override=parse_key_value_items(
+            args.zstream_override,
+            option_name="--zstream-override",
+        ),
+        blocked_original_urls=tuple(args.blocked_original_url),
+    )
 
 
 def _cmd_score_result(args: argparse.Namespace) -> int:
