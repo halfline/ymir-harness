@@ -46,6 +46,9 @@ from ymir_harness.ymir_workflows import (
 )
 
 
+WORKFLOW_CHOICES = ("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ymir-harness",
@@ -65,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate.add_argument("cases_dir", type=Path)
     validate.add_argument("--phase", type=int, choices=(1, 2), default=1)
+    validate.add_argument(
+        "--workflow",
+        choices=WORKFLOW_CHOICES,
+        default="none",
+        help="validate requirements for a selected workflow; defaults to full case validation",
+    )
     validate.add_argument(
         "--reports-dir",
         type=Path,
@@ -322,7 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true", help="print the run report JSON to stdout")
     run.add_argument(
         "--workflow",
-        choices=("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild"),
+        choices=WORKFLOW_CHOICES,
         default="none",
         help="workflow executor to invoke; defaults to placeholder run entries",
     )
@@ -364,7 +373,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _cmd_validate_cases(args: argparse.Namespace) -> int:
-    report = validate_case_directory(args.cases_dir, phase=args.phase)
+    report = validate_case_directory(
+        args.cases_dir,
+        phase=args.phase,
+        workflow=_validation_workflow(args.workflow),
+    )
     reports_dir = args.reports_dir or args.cases_dir / "reports"
     write_validation_reports(report, reports_dir)
 
@@ -526,7 +539,11 @@ def _cmd_score_results(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     run_id = args.run_id or args.variant
     results_dir = args.results_dir or default_results_dir(args.cases, run_id)
-    validation_report = validate_case_directory(args.cases, phase=args.phase)
+    validation_report = validate_case_directory(
+        args.cases,
+        phase=args.phase,
+        workflow=_validation_workflow(args.workflow),
+    )
     manifest_case_ids, manifest_issues = load_case_manifest(args.cases)
     validation_report = append_global_issues(validation_report, manifest_issues)
     validation_report = select_validation_cases(
@@ -588,6 +605,12 @@ def _run_executor(workflow: str):
     if workflow == "ymir-rebuild":
         return make_ymir_rebuild_executor()
     return None
+
+
+def _validation_workflow(workflow: str) -> str | None:
+    if workflow == "none":
+        return None
+    return workflow
 
 
 def _positive_int(value: str) -> int:

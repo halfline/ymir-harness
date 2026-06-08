@@ -55,7 +55,12 @@ class ReferencePatchTarget:
     mock_path: Path
 
 
-def validate_case_directory(cases_dir: Path, *, phase: int = 1) -> ValidationReport:
+def validate_case_directory(
+    cases_dir: Path,
+    *,
+    phase: int = 1,
+    workflow: str | None = None,
+) -> ValidationReport:
     if phase not in {1, 2}:
         msg = f"unsupported validation phase: {phase}"
         raise ValueError(msg)
@@ -86,14 +91,19 @@ def validate_case_directory(cases_dir: Path, *, phase: int = 1) -> ValidationRep
         return report
 
     for case_id in case_ids:
-        case_result = _validate_case(cases_dir, case_id, phase)
+        case_result = _validate_case(cases_dir, case_id, phase, workflow)
         case_result.finalize()
         report.cases.append(case_result)
 
     return report
 
 
-def _validate_case(cases_dir: Path, case_id: str, phase: int) -> CaseValidationResult:
+def _validate_case(
+    cases_dir: Path,
+    case_id: str,
+    phase: int,
+    workflow: str | None,
+) -> CaseValidationResult:
     result = CaseValidationResult(case_id=case_id)
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
     expected = _load_json_object(expected_path, result, required=True)
@@ -104,12 +114,19 @@ def _validate_case(cases_dir: Path, case_id: str, phase: int) -> CaseValidationR
         result.case_type = _string_or_none(expected.get("case_type"))
         result.case_status = _string_or_none(expected.get("case_status"))
         _validate_network_policy(cases_dir, expected, result, phase)
-        _validate_source_cache(cases_dir, expected, expected_path, result, phase)
+        _validate_source_cache(cases_dir, expected, expected_path, result, phase, workflow)
 
     reference_patch_targets = _validate_mock_fixtures(mock_paths, expected, result, phase)
 
     if expected is not None:
-        _validate_reference_patch(cases_dir, expected, result, phase, reference_patch_targets)
+        _validate_reference_patch(
+            cases_dir,
+            expected,
+            result,
+            phase,
+            reference_patch_targets,
+            workflow,
+        )
 
     if expected is not None:
         _validate_case_consistency(cases_dir, expected, result)
@@ -514,8 +531,9 @@ def _validate_source_cache(
     expected_path: Path,
     result: CaseValidationResult,
     phase: int,
+    workflow: str | None,
 ) -> None:
-    if phase < 2 or not _implementation_case_requires_source_cache(expected):
+    if phase < 2 or not _workflow_requires_source_cache(workflow, expected):
         return
 
     source_cache_dir = cases_dir / "source_cache" / result.case_id
@@ -913,14 +931,21 @@ def _implementation_case_requires_source_cache(expected: Mapping[str, Any]) -> b
     return expected.get("resolution") in {"backport", "rebase", "rebuild"}
 
 
+def _workflow_requires_source_cache(workflow: str | None, expected: Mapping[str, Any]) -> bool:
+    if workflow == "ymir-triage":
+        return False
+    return _implementation_case_requires_source_cache(expected)
+
+
 def _validate_reference_patch(
     cases_dir: Path,
     expected: Mapping[str, Any],
     result: CaseValidationResult,
     phase: int,
     _source_targets: list[ReferencePatchTarget],
+    workflow: str | None,
 ) -> None:
-    if phase < 2 or not _implementation_case_requires_reference_patch(expected):
+    if phase < 2 or not _workflow_requires_reference_patch(workflow, expected):
         return
 
     patch_paths = sorted(
@@ -953,6 +978,12 @@ def _implementation_case_requires_reference_patch(expected: Mapping[str, Any]) -
     if expected.get("expected_basis") != "merged_mr":
         return False
     return expected.get("resolution") in {"backport", "rebase", "rebuild"}
+
+
+def _workflow_requires_reference_patch(workflow: str | None, expected: Mapping[str, Any]) -> bool:
+    if workflow == "ymir-triage":
+        return False
+    return _implementation_case_requires_reference_patch(expected)
 
 
 def _reference_patch_should_apply(expected: Mapping[str, Any]) -> bool:
