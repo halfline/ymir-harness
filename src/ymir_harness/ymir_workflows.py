@@ -648,6 +648,7 @@ def _rebuild_actual_result(
     if sibling_issues:
         actual["sibling_issues"] = sibling_issues
 
+    actual.update(_state_diagnostics(state))
     return actual
 
 
