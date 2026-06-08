@@ -62,5 +62,16 @@ def collect_provenance(
     return provenance
 
 
+def parse_provenance_items(items: Sequence[str]) -> dict[str, str]:
+    parsed = {}
+    for item in items:
+        key, separator, value = item.partition("=")
+        if not separator or not key:
+            msg = f"provenance entries must use KEY=VALUE: {item}"
+            raise ValueError(msg)
+        parsed[key] = value
+    return parsed
+
+
 def _provenance_key(name: str) -> str:
     return name.lower()
