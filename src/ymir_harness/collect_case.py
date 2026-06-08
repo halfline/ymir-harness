@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import base64
+import copy
 import json
+import os
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import yaml
 
@@ -44,7 +49,10 @@ class MockRepoInput:
 
 @dataclass(frozen=True)
 class FetchedEvidence:
-    pass
+    jira_issue: Mapping[str, Any] | None = None
+    jira_comments: Mapping[str, Any] | None = None
+    jira_links: Any = None
+
 
 @dataclass(frozen=True)
 class CollectCaseRequest:
@@ -68,6 +76,12 @@ class CollectCaseRequest:
     alternate_acceptable_outcomes: tuple[Mapping[str, Any], ...] = ()
     reference_patch_mode: str | None = None
     mock_repo: MockRepoInput | None = None
+    jira_url: str | None = None
+    jira_base_url: str | None = None
+    jira_token_env: str = "JIRA_TOKEN"
+    jira_token_file: Path | None = None
+    jira_email: str | None = None
+    http_timeout: float = 30.0
     jira_issue_json: Path | None = None
     jira_comments_json: Path | None = None
     jira_links_json: Path | None = None
@@ -85,6 +99,7 @@ class CollectCaseResult:
     cases_dir: Path
     written_paths: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    fetched_urls: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -92,6 +107,7 @@ class CollectCaseResult:
             "cases_dir": str(self.cases_dir),
             "written_paths": [str(path) for path in self.written_paths],
             "warnings": self.warnings,
+            "fetched_urls": self.fetched_urls,
         }
 
 
@@ -150,9 +166,162 @@ def _fetch_evidence(
     request: CollectCaseRequest,
     result: CollectCaseResult,
 ) -> FetchedEvidence:
-    del request, result
-    return FetchedEvidence()
+    jira_issue = None
+    jira_comments = None
+    jira_links = None
 
+    if request.jira_url or request.jira_base_url:
+        jira_urls = _jira_urls(request)
+        jira_headers = _jira_headers(
+            request.jira_token_env,
+            token_file=request.jira_token_file,
+            email=request.jira_email,
+        )
+        jira_issue = _fetch_json(
+            jira_urls["issue"], headers=jira_headers, request=request, result=result
+        )
+        jira_comments = _fetch_json(
+            jira_urls["comments"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+        jira_links = _fetch_json_value(
+            jira_urls["links"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+
+    return FetchedEvidence(
+        jira_issue=jira_issue,
+        jira_comments=jira_comments,
+        jira_links=jira_links,
+    )
+
+
+
+def _jira_urls(request: CollectCaseRequest) -> dict[str, str]:
+    if request.jira_url:
+        issue_url = _jira_issue_api_url(request.jira_url, request.case_id)
+    elif request.jira_base_url:
+        issue_url = _join_url(
+            request.jira_base_url,
+            f"/rest/api/2/issue/{request.case_id}",
+        )
+    else:
+        raise CollectCaseError("jira URL configuration is missing")
+
+    issue_base = issue_url.split("?", 1)[0].rstrip("/")
+    return {
+        "issue": issue_url,
+        "comments": f"{issue_base}/comment",
+        "links": f"{issue_base}/remotelink",
+    }
+
+
+def _jira_issue_api_url(url: str, case_id: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise CollectCaseError(f"Jira URL must be absolute: {url}")
+
+    if "/rest/api/" in parsed.path and "/issue/" in parsed.path:
+        return url
+    if "/browse/" in parsed.path:
+        return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}")
+    return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}")
+
+
+def _join_url(base_url: str, path: str) -> str:
+    return _origin(base_url) + path
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise CollectCaseError(f"URL must be absolute: {url}")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _jira_headers(
+    token_env: str,
+    *,
+    token_file: Path | None,
+    email: str | None,
+) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    token = _jira_token(token_env, token_file)
+    if token:
+        headers["Authorization"] = _jira_authorization(token, email)
+    return headers
+
+
+def _jira_token(token_env: str, token_file: Path | None) -> str | None:
+    if token_file is not None:
+        return token_file.read_text(encoding="utf-8").strip()
+    token = os.environ.get(token_env)
+    return token.strip() if token else None
+
+
+def _jira_authorization(token: str, email: str | None) -> str:
+    lowered = token.lower()
+    if lowered.startswith("bearer ") or lowered.startswith("basic "):
+        return token
+
+    basic_email = email or os.environ.get("JIRA_EMAIL") or os.environ.get("ATLASSIAN_EMAIL")
+    if basic_email:
+        raw = f"{basic_email}:{token}".encode("utf-8")
+        return "Basic " + base64.b64encode(raw).decode("ascii")
+
+    return f"Bearer {token}"
+
+
+def _fetch_json(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> Mapping[str, Any]:
+    body = _fetch_bytes(url, headers=headers, request=request, result=result)
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CollectCaseError(f"fetched URL did not return JSON: {url}") from exc
+    if not isinstance(data, Mapping):
+        raise CollectCaseError(f"fetched URL returned non-object JSON: {url}")
+    return data
+
+
+def _fetch_json_value(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> Any:
+    body = _fetch_bytes(url, headers=headers, request=request, result=result)
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CollectCaseError(f"fetched URL did not return JSON: {url}") from exc
+
+
+def _fetch_bytes(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> bytes:
+    http_request = Request(url, headers=dict(headers), method="GET")
+    try:
+        with urlopen(http_request, timeout=request.http_timeout) as response:
+            body = response.read()
+    except OSError as exc:
+        raise CollectCaseError(f"failed to fetch {url}: {exc}") from exc
+    result.fetched_urls.append(url)
+    return body
 
 
 def _validate_request(request: CollectCaseRequest) -> None:
@@ -197,6 +366,7 @@ def _input_paths(request: CollectCaseRequest) -> list[Path]:
         request.jira_issue_json,
         request.jira_comments_json,
         request.jira_links_json,
+        request.jira_token_file,
         request.reference_patch,
         *request.attachments,
         *request.source_upstream,
@@ -291,9 +461,15 @@ def _write_jira_fixtures(
     fetched: FetchedEvidence,
     result: CollectCaseResult,
 ) -> None:
-    del fetched
     jira_dir = cases_dir / "jiras" / request.case_id
-    if request.jira_issue_json is not None:
+    if fetched.jira_issue is not None:
+        _write_json(
+            jira_dir / "issue.json",
+            fetched.jira_issue,
+            overwrite=request.overwrite,
+            result=result,
+        )
+    elif request.jira_issue_json is not None:
         _copy_file(
             request.jira_issue_json,
             jira_dir / "issue.json",
@@ -317,7 +493,14 @@ def _write_jira_fixtures(
             result=result,
         )
 
-    if request.jira_comments_json is not None:
+    if fetched.jira_comments is not None:
+        _write_json(
+            jira_dir / "comments.json",
+            fetched.jira_comments,
+            overwrite=request.overwrite,
+            result=result,
+        )
+    elif request.jira_comments_json is not None:
         _copy_file(
             request.jira_comments_json,
             jira_dir / "comments.json",
@@ -337,10 +520,17 @@ def _write_jira_fixtures(
             result=result,
         )
 
-    if request.jira_links_json is not None:
-        _copy_file(
-            request.jira_links_json,
+    if fetched.jira_links is not None:
+        _write_json(
             jira_dir / "links.json",
+            _jira_links_fixture_payload(request, fetched.jira_links),
+            overwrite=request.overwrite,
+            result=result,
+        )
+    elif request.jira_links_json is not None:
+        _write_json(
+            jira_dir / "links.json",
+            _jira_links_fixture_payload(request, _load_json(request.jira_links_json)),
             overwrite=request.overwrite,
             result=result,
         )
@@ -365,6 +555,36 @@ def _write_jira_fixtures(
             result=result,
         )
 
+
+def _jira_links_fixture_payload(request: CollectCaseRequest, links: Any) -> dict[str, Any]:
+    if isinstance(links, Mapping):
+        payload = copy.deepcopy(dict(links))
+        link_values = _links_value(payload)
+    elif isinstance(links, list):
+        payload = {}
+        link_values = copy.deepcopy(links)
+    else:
+        raise CollectCaseError("Jira links JSON must contain an object or list")
+
+    if not isinstance(link_values, list):
+        raise CollectCaseError("Jira links must be a list")
+
+    payload.setdefault("schema_version", SCHEMA_VERSION)
+    payload.setdefault("case_id", request.case_id)
+    if request.case_type is not None:
+        payload.setdefault("case_type", request.case_type)
+    payload["links"] = link_values
+    return payload
+
+
+def _links_value(links: Any) -> Any:
+    if isinstance(links, Mapping):
+        if "links" in links:
+            return links["links"]
+        if "remote_links" in links:
+            return links["remote_links"]
+        return []
+    return links
 
 
 def _write_mock_data(

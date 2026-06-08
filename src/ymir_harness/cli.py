@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     collect = subparsers.add_parser(
         "collect-case",
-        help="scaffold one benchmark case from locally collected evidence files",
+        help="scaffold one benchmark case from local files or Jira fetches",
     )
     collect.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
     collect.add_argument("--case-id", required=True, help="Jira issue key / benchmark case id")
@@ -157,6 +157,34 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--jira-issue-json", type=Path)
     collect.add_argument("--jira-comments-json", type=Path)
     collect.add_argument("--jira-links-json", type=Path)
+    collect.add_argument(
+        "--jira-url",
+        help="Jira issue browse or REST API URL to fetch into jiras/CASE_ID",
+    )
+    collect.add_argument(
+        "--jira-base-url",
+        help="Jira instance base URL used to fetch CASE_ID into jiras/CASE_ID",
+    )
+    collect.add_argument(
+        "--jira-token-env",
+        default="JIRA_TOKEN",
+        help="environment variable containing a Jira token",
+    )
+    collect.add_argument(
+        "--jira-token-file",
+        type=Path,
+        help="file containing a Jira token",
+    )
+    collect.add_argument(
+        "--jira-email",
+        help="Atlassian account email for Jira Basic auth",
+    )
+    collect.add_argument(
+        "--http-timeout",
+        type=float,
+        default=30.0,
+        help="timeout in seconds for Jira fetches",
+    )
     collect.add_argument("--attachment", dest="attachments", action="append", type=Path, default=[])
     collect.add_argument(
         "--web-record",
@@ -375,6 +403,12 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         alternate_acceptable_outcomes=load_alternate_outcomes(args.alternate_outcomes),
         reference_patch_mode=args.reference_patch_mode,
         mock_repo=mock_repo,
+        jira_url=args.jira_url,
+        jira_base_url=args.jira_base_url,
+        jira_token_env=args.jira_token_env,
+        jira_token_file=args.jira_token_file,
+        jira_email=args.jira_email,
+        http_timeout=args.http_timeout,
         jira_issue_json=args.jira_issue_json,
         jira_comments_json=args.jira_comments_json,
         jira_links_json=args.jira_links_json,
