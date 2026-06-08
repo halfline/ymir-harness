@@ -1,0 +1,16 @@
+{
+  "case_id": "RHEL-114059",
+  "case_type": "cve_backport",
+  "repos": [
+    {
+      "branch": "c9s",
+      "package": "glib2",
+      "pre_fix_ref": "299f2b4c8f0ff23434b172bde8db6e88f7cea84e",
+      "remote_url": "https://gitlab.com/redhat/centos-stream/rpms/glib2.git"
+    }
+  ],
+  "schema_version": 1,
+  "zstream_override": {
+    "9": "rhel-9.7.z"
+  }
+}

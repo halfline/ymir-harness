@@ -1,0 +1,130 @@
+From 942a9794732fac94ba977dbc4e41534a5ff0ac62 Mon Sep 17 00:00:00 2001
+From: RHEL Packaging Agent <jotnar@redhat.com>
+Date: Wed, 17 Sep 2025 17:57:45 +0000
+Subject: [PATCH] gdbusconnection: Prevent sending a serial of zero on overflow
+
+Backport a patch from upstream to prevent GDBusConnection from sending
+a message with a serial of zero when the serial counter overflows.
+This is not allowed by the D-Bus specification.
+
+Upstream fix: https://gitlab.gnome.org/GNOME/glib/-/commit/b94b44407a088e6e8278d9db8b59fb377e84bda4.patch
+Resolves: RHEL-114059
+
+This commit was backported by Jotnar, a Red Hat Enterprise Linux software maintenance AI agent.
+
+Assisted-by: Jotnar
+---
+ RHEL-114059.patch | 70 +++++++++++++++++++++++++++++++++++++++++++++++
+ glib2.spec        |  7 ++++-
+ 2 files changed, 76 insertions(+), 1 deletion(-)
+ create mode 100644 RHEL-114059.patch
+
+diff --git a/RHEL-114059.patch b/RHEL-114059.patch
+new file mode 100644
+index 0000000..fa7c094
+--- /dev/null
++++ b/RHEL-114059.patch
+@@ -0,0 +1,70 @@
++From 95f006a2d14fcc41c0b1823d07e2b8b871195548 Mon Sep 17 00:00:00 2001
++From: Philip Withnall <pwithnall@gnome.org>
++Date: Mon, 3 Feb 2025 18:27:21 +0000
++Subject: [PATCH] gdbusconnection: Prevent sending a serial of zero on overflow
++MIME-Version: 1.0
++Content-Type: text/plain; charset=UTF-8
++Content-Transfer-Encoding: 8bit
++
++It finally happened: someone managed to keep a process alive long
++enough, and using a single `GDBusConnection`, to overflow the
++`last_serial` counter in the connection and send an invalid message with
++serial of zero (which is disallowed by the D-Bus specification).
++
++Avoid that happening in future by skipping serials of zero on overflow,
++and wrapping straight back around to 1.
++
++This looks a little more confusing than it is, because `last_serial` is
++pre-incremented on use, so to skip zero, we explicitly set it to zero.
++This is exactly what happens when the `GDBusConnection` is initialised
++anyway.
++
++I can’t think of a way to add a unit test for this — there is no way to
++affect the value of `last_serial` except by sending messages (each one
++increments it), and in order to get it to overflow by sending messages
++at 1kHz, the test would have to run for 49 days.
++
++Instead, I tested this manually by temporarily modifying
++`GDBusConnection` to initialise `last_serial` to `G_MAXUINT32 - 3`, then
++checked that the unit tests all still passed, and that the overflow code
++was being executed.
++
++Signed-off-by: Philip Withnall <pwithnall@gnome.org>
++
++Fixes: #3592
++---
++ gio/gdbusconnection.c | 17 +++++++++++++++--
++ 1 file changed, 15 insertions(+), 2 deletions(-)
++
++diff --git a/gio/gdbusconnection.c b/gio/gdbusconnection.c
++index 348b5b9..96faaa1 100644
++--- a/gio/gdbusconnection.c
+++++ b/gio/gdbusconnection.c
++@@ -1794,9 +1794,22 @@ g_dbus_connection_send_message_unlocked (GDBusConnection   *connection,
++     goto out;
++
++   if (flags & G_DBUS_SEND_MESSAGE_FLAGS_PRESERVE_SERIAL)
++-    serial_to_use = g_dbus_message_get_serial (message);
+++    {
+++      serial_to_use = g_dbus_message_get_serial (message);
+++    }
++   else
++-    serial_to_use = ++connection->last_serial; /* TODO: handle overflow */
+++    {
+++      /* The serial_to_use must not be zero, as per
+++       * https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-messages. */
+++      if (connection->last_serial == G_MAXUINT32)
+++        connection->last_serial = 1;
+++      else
+++        connection->last_serial++;
+++
+++      serial_to_use = connection->last_serial;
+++    }
+++
+++  g_assert (serial_to_use != 0);
++
++   switch (blob[0])
++     {
++--
++2.47.3
++
+diff --git a/glib2.spec b/glib2.spec
+index 3ae9808..3807196 100644
+--- a/glib2.spec
++++ b/glib2.spec
+@@ -1,6 +1,6 @@
+ Name: glib2
+ Version: 2.68.4
+-Release: 17%{?dist}
++Release: 18%{?dist}
+ Summary: A library of handy utility functions
+
+ License: LGPLv2+
+@@ -72,6 +72,7 @@ Patch: CVE-2025-4373.patch
+
+ # https://gitlab.gnome.org/GNOME/glib/-/merge_requests/4356
+ Patch: gdatetime-test.patch
++Patch: RHEL-114059.patch
+
+ BuildRequires: chrpath
+ BuildRequires: gcc
+@@ -288,6 +289,10 @@ glib-compile-schemas %{_datadir}/glib-2.0/schemas &> /dev/null || :
+ %{_datadir}/installed-tests
+
+ %changelog
++* Wed Sep 17 2025 RHEL Packaging Agent <jotnar@redhat.com> - 2.68.4-18
++- gdbusconnection: Prevent sending a serial of zero on overflow
++- Resolves: RHEL-114059
++
+ * Fri Jul 11 2025 Michael Catanzaro <mcatanzaro@redhat.com> - 2.68.4-17
+ - Add patches for CVE-2024-52533 and CVE-2025-4373
+ - Update GDateTime test for new tzdata
+--
+GitLab

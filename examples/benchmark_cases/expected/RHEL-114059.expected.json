@@ -1,0 +1,21 @@
+{
+  "answer_leakage": "none",
+  "case_id": "RHEL-114059",
+  "case_status": "quarantined",
+  "case_status_reason": "fixture scaffold requires ground-truth review",
+  "case_type": "cve_backport",
+  "expected_basis": "historical_jira_state",
+  "fix_sources": [
+    "https://gitlab.com/redhat/centos-stream/rpms/glib2/-/merge_requests/64"
+  ],
+  "fix_version": "rhel-9.7.z",
+  "ground_truth_confidence": "medium",
+  "network_mode": "replay_only",
+  "package": "glib2",
+  "patch_urls": [
+    "https://gitlab.gnome.org/GNOME/glib/-/commit/b94b44407a088e6e8278d9db8b59fb377e84bda4.patch",
+    "https://gitlab.com/redhat/centos-stream/rpms/glib2/-/merge_requests/64.patch"
+  ],
+  "resolution": "backport",
+  "schema_version": 1
+}
