@@ -34,19 +34,27 @@ def test_run_report_serializes_case_results() -> None:
                 runtime_seconds=12.5,
                 reason="workflow adapter is missing",
             ),
+            RunCaseResult(
+                case_id="RHEL-34567",
+                case_type="cve_backport",
+                status="timeout",
+                expected_path=Path("/tmp/benchmark_cases/expected/RHEL-34567.expected.json"),
+                reason="budget guardrail exceeded",
+            ),
         ],
     )
 
     payload = report.to_json()
 
     assert report.summary() == {
-        "total": 2,
+        "total": 3,
         "not_run": 1,
         "passed": 0,
         "failed": 0,
         "skipped": 0,
         "unsupported": 1,
-        "has_failures": False,
+        "has_failures": True,
+        "timeout": 1,
     }
     assert payload["schema_version"] == 1
     assert payload["run_id"] == "baseline-2026-06-04T120000Z"
@@ -60,7 +68,9 @@ def test_run_report_serializes_case_results() -> None:
     assert payload["results_dir"] == "/tmp/reports/baseline"
     assert payload["cases"][0]["repetition"] == 1
     assert payload["cases"][1]["repetition"] == 2
+    assert payload["cases"][2]["status"] == "timeout"
     assert payload["cases"][0]["actual_path"] is None
     assert payload["cases"][0]["reason"] == "runner is not wired yet"
     assert payload["cases"][1]["actual_path"] == "/tmp/reports/baseline/RHEL-23456.actual.json"
     assert payload["cases"][1]["runtime_seconds"] == 12.5
+    assert payload["cases"][2]["reason"] == "budget guardrail exceeded"
