@@ -40,6 +40,7 @@ The `benchmark` script is an alias for the same CLI:
 benchmark validate-cases benchmark_cases/
 ```
 
+`benchmark compare` is also accepted as an alias for `benchmark compare-results`.
 Validation writes:
 
 ```text
