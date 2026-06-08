@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -601,6 +602,46 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     assert result.fetched_urls == seen_urls == list(responses)
 
 
+def test_collect_case_caches_mock_repo_source(tmp_path: Path) -> None:
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    cases_dir = tmp_path / "benchmark_cases"
+    cache_dir = tmp_path / "repo-cache"
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            mock_repo=MockRepoInput(
+                remote_url="https://gitlab.example/group/pkg.git",
+                source_url=str(source_repo),
+                pre_fix_ref=pre_fix_ref,
+                branch="c9s",
+            ),
+            mock_repo_cache=cache_dir,
+        )
+    )
+
+    mock = json.loads(
+        (cases_dir / "mock_data" / "triage" / "RHEL-12345.json").read_text(encoding="utf-8")
+    )
+    repo = mock["repos"][0]
+    cached_repo = Path(repo["source_url"])
+    assert repo["remote_url"] == "https://gitlab.example/group/pkg.git"
+    assert cached_repo.is_dir()
+    assert cached_repo.parent == cache_dir.resolve()
+    subprocess.run(
+        ["git", "-C", str(cached_repo), "cat-file", "-e", f"{pre_fix_ref}^{{commit}}"],
+        check=True,
+    )
+
+    report = validate_case_directory(cases_dir)
+    assert not report.has_blocking_errors
+
+
 def test_collect_case_overwrite_replaces_existing_files(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     request = CollectCaseRequest(
@@ -658,6 +699,26 @@ class _FakeHttpResponse:
 
     def read(self) -> bytes:
         return self._body
+
+
+def _create_git_repo(tmp_path: Path) -> tuple[Path, str]:
+    repo_path = tmp_path / "source-repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "-C", str(repo_path), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_path), "config", "user.email", "dev@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "Dev"], check=True)
+    (repo_path / "source.c").write_text("pre-fix\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "add", "source.c"], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-q", "-m", "initial"], check=True)
+    pre_fix_ref = subprocess.check_output(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    (repo_path / "source.c").write_text("fixed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-am", "fix", "-q"], check=True)
+    return repo_path, pre_fix_ref
 
 
 def _write_json(path: Path, payload: object) -> Path:
