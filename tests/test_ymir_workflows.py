@@ -49,6 +49,10 @@ def test_ymir_triage_executor_runs_workflow_with_no_write_environment(
                 }
             ),
             target_branch="rhel-8.10.z",
+            usage={"input_tokens": 1200, "output_tokens": 300},
+            iteration=9,
+            steps=[object(), object(), object()],
+            cost=_State(total=4.25),
         )
 
     def agent_factory(_gateway_tools, _local_tool_options):
@@ -89,6 +93,10 @@ def test_ymir_triage_executor_runs_workflow_with_no_write_environment(
         "cve_id": "CVE-2026-0001",
         "fix_version": "rhel-8.10.z",
         "target_branch": "rhel-8.10.z",
+        "token_usage": {"input_tokens": 1200, "output_tokens": 300},
+        "iteration_count": 9,
+        "tool_call_count": 3,
+        "total_cost_usd": 4.25,
     }
     assert calls == [
         {
