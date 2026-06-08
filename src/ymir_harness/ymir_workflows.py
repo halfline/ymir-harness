@@ -584,6 +584,12 @@ def _rebase_actual_result(
     if files_to_git_add:
         actual["touched_files"] = files_to_git_add
 
+    merge_artifact_fields(
+        actual,
+        request_artifact_dir=_request_artifact_dir(request),
+        state=state,
+        payload=payload,
+    )
     actual.update(_state_diagnostics(state))
     return actual
 
