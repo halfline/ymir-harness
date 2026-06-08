@@ -249,6 +249,65 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     assert entries["RHEL-23456", 2].actual_path is None
 
 
+def test_build_run_report_passes_replay_policy_environment(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+            "network_mode": "replay_only",
+        },
+    )
+    _write_web_manifest(
+        cases_dir,
+        "RHEL-12345",
+        ["https://example.invalid/advisory"],
+    )
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+    requests = []
+
+    def executor(request):
+        requests.append(request)
+        return RunCaseExecution(status="passed")
+
+    build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    env = requests[0].environment
+    assert env["YMIR_BENCHMARK_NETWORK_MODE"] == "replay_only"
+    assert env["YMIR_BENCHMARK_REPLAY_MANIFEST"] == str(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").resolve()
+    )
+    assert json.loads(env["YMIR_BENCHMARK_RECORDED_URLS"]) == ["https://example.invalid/advisory"]
+    assert env["YMIR_BENCHMARK_WEB_CACHE_DIR"] == str(
+        (cases_dir / "web_cache" / "RHEL-12345").resolve()
+    )
+    assert env["YMIR_BENCHMARK_SOURCE_CACHE_DIR"] == str(
+        (cases_dir / "source_cache" / "RHEL-12345").resolve()
+    )
+
+
 def test_build_run_report_writes_executor_actual_result(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
@@ -358,6 +417,89 @@ def test_build_run_report_scores_executor_actual_result(tmp_path: Path) -> None:
     assert {metric["name"]: metric["status"] for metric in payload["metrics"]}["package"] == "pass"
 
 
+def test_build_run_report_enforces_event_safety_and_replay(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+            "network_mode": "replay_only",
+        },
+    )
+    _write_web_manifest(
+        cases_dir,
+        "RHEL-12345",
+        ["https://example.invalid/recorded"],
+    )
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "package": "dnsmasq",
+                "resolution": "not_affected",
+                "events": [
+                    {
+                        "tool": "http",
+                        "method": "GET",
+                        "url": "https://example.invalid/unrecorded",
+                    },
+                    {
+                        "tool": "shell",
+                        "argv": ["git", "push", "origin", "HEAD"],
+                    },
+                ],
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    entry = report.entries[0]
+    assert entry.status == "failed"
+    assert entry.reason == "deterministic score failed"
+    assert entry.score is not None
+    failed = {metric.name: metric for metric in entry.score.metrics if metric.status == "fail"}
+    assert failed["unsafe_operations"].actual == [
+        "{'category': 'git_push', 'detail': 'git push: git push origin HEAD', 'source': 'shell'}"
+    ]
+    assert failed["replay_violations"].actual == [
+        "unrecorded URL: https://example.invalid/unrecorded"
+    ]
+    actual = json.loads(entry.actual_path.read_text(encoding="utf-8"))
+    assert actual["unsafe_operations"] == [
+        {
+            "category": "git_push",
+            "detail": "git push: git push origin HEAD",
+            "source": "shell",
+        }
+    ]
+    assert actual["replay_violations"] == ["unrecorded URL: https://example.invalid/unrecorded"]
+
+
 def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
@@ -414,6 +556,65 @@ def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> Non
     assert entry.score is not None
     assert entry.score.passed
     assert json.loads(entry.actual_path.read_text(encoding="utf-8"))["total_cost_usd"] == 7.25
+
+
+def test_build_run_report_warns_on_cost_alert_threshold(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+        },
+    )
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "package": "dnsmasq",
+                "resolution": "not_affected",
+                "total_cost_usd": 7.25,
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+        base_env={
+            "BENCHMARK_COST_ALERT_THRESHOLD": "5",
+            "BENCHMARK_MAX_COST_PER_RUN": "10",
+        },
+    )
+
+    assert not report.has_failures
+    assert report.summary()["warnings"] == 1
+    entry = report.entries[0]
+    assert entry.status == "passed"
+    assert entry.warnings == [
+        "budget alert threshold exceeded: total_cost_usd 7.25 > BENCHMARK_COST_ALERT_THRESHOLD 5"
+    ]
+    assert report.to_json()["cases"][0]["warnings"] == entry.warnings
 
 
 def test_build_run_report_fails_executor_score_mismatches(tmp_path: Path) -> None:
@@ -555,3 +756,21 @@ def _write_expected(cases_dir: Path, case_id: str, data: object | None = None) -
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
     expected_path.parent.mkdir(parents=True, exist_ok=True)
     expected_path.write_text(json.dumps(data or {}) + "\n", encoding="utf-8")
+
+
+def _write_web_manifest(cases_dir: Path, case_id: str, required_urls: list[str]) -> None:
+    manifest_path = cases_dir / "web_cache" / case_id / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "case_id": case_id,
+                "case_type": "not_affected",
+                "required_urls": required_urls,
+                "recorded_files": {url: "recorded.txt" for url in required_urls},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
