@@ -156,16 +156,17 @@ that token with `reference_patch_apply_status` in the actual result to check
 whether the reference patch applied as expected.
 
 Actual results may include advisory diagnostics such as `runtime_seconds`,
-`token_usage`, `tool_call_count`, `retry_count`, `diff_similarity`,
-`rationale_quality`, or `llm_judge_notes`. Scoring reports carry these as
-`advisory_metrics` without using them for pass/fail status.
+`token_usage`, `iteration_count`, `tool_call_count`, `retry_count`,
+`total_cost_usd`, `diff_similarity`, `rationale_quality`, or
+`llm_judge_notes`. Scoring reports carry these as `advisory_metrics` without
+using them for pass/fail status.
 
 Phase 3 runner reports use `run_id`, `variant`, optional `ymir_sha`,
 `harness_version`, `fixture_checksum`, `features`, and `repeat` metadata. Each
 case entry includes `case_id`, `case_type`, `status`, `repetition`, optional
-`expected_path`, optional `actual_path`, optional `score`, and optional
-`reason`. Initial case status values are `not_run`, `passed`, `failed`,
-`skipped`, and `unsupported`.
+`expected_path`, optional `actual_path`, optional `score`, optional
+`runtime_seconds`, and optional `reason`. Case status values are `not_run`,
+`passed`, `failed`, `timeout`, `skipped`, and `unsupported`.
 The default `run` command writes validation reports first, then writes
 `benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
 Without `--workflow`, it does not invoke Ymir workflows, so each runnable case
@@ -201,6 +202,10 @@ actual result path and the exception reason.
 Workflow adapters start from a no-write environment profile that forces
 `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
 known write credentials and Kerberos keytab paths from the process environment.
+Set `BENCHMARK_MAX_ITERATIONS_OVERRIDE` to pass a lower
+`BEEAI_MAX_ITERATIONS` value into each workflow environment. Set
+`BENCHMARK_MAX_COST_PER_RUN` to mark cases whose `total_cost_usd` exceeds the
+cap as `timeout`.
 Unsafe-operation detection currently classifies git push attempts, Jira write
 attempts, GitLab write attempts, Errata write attempts, Testing Farm
 submissions, GreenWave mutations, ResultsDB mutations, and `rhpkg` lookaside
@@ -219,6 +224,9 @@ report. A headline regression or missing candidate case returns a nonzero exit
 status.
 Comparison output carries `headline_reason` for non-headline cases when the
 aggregate inputs provide it.
+When score reports carry `total_cost_usd` advisory metrics, comparison output
+adds baseline cost, candidate cost, and cost delta fields. Markdown comparison
+tables include matching cost columns only when cost data is present.
 
 ## Development
 
