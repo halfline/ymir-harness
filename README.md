@@ -129,6 +129,8 @@ benchmark_cases/reports/fixture-validation-errors.md
 ```
 
 Use `--phase 2` once pilot fixtures are ready for stricter metadata checks.
+Pass `--workflow ymir-triage` when validating a triage-only run so phase 2
+does not require implementation-only source cache or reference patch artifacts.
 Phase 2 also checks that an expected `target_branch` or `fix_version` is
 declared by a mock repo `branch` or `zstream_override` value.
 Replay web cache manifests must list expected `patch_urls` in `required_urls`.
