@@ -460,10 +460,21 @@ def _run_case_result(
 
 
 def _executor_failure_reason(exc: Exception) -> str:
+    return "executor failed: " + _exception_summary(exc)
+
+
+def _exception_summary(exc: BaseException) -> str:
     detail = str(exc)
     if detail:
-        return f"executor failed: {type(exc).__name__}: {detail}"
-    return f"executor failed: {type(exc).__name__}"
+        summary = f"{type(exc).__name__}: {detail}"
+    else:
+        summary = type(exc).__name__
+
+    if isinstance(exc, BaseExceptionGroup):
+        child_summaries = "; ".join(_exception_summary(child) for child in exc.exceptions)
+        if child_summaries:
+            return f"{summary} [{child_summaries}]"
+    return summary
 
 
 def _mock_repo_setup_failure_reason(exc: Exception) -> str:
