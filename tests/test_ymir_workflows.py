@@ -11,6 +11,7 @@ import pytest
 from ymir_harness.runner import RunCaseRequest
 from ymir_harness.ymir_workflows import (
     make_ymir_backport_executor,
+    make_ymir_rebuild_executor,
     make_ymir_rebase_executor,
     make_ymir_triage_executor,
 )
@@ -520,6 +521,233 @@ def test_ymir_rebase_executor_rejects_module_level_workflow_by_default(
 
     with pytest.raises(ImportError, match="agent class with run_workflow"):
         executor(request)
+
+
+def test_ymir_rebuild_executor_runs_workflow_with_expected_inputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OUTER_ONLY", "kept")
+    request = _request(
+        tmp_path,
+        case_type="dependency_rebuild",
+        environment={
+            "PATH": "/usr/bin",
+            "DRY_RUN": "true",
+        },
+        features=("YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK",),
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "dependency_rebuild",
+            "resolution": "rebuild",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "rationale": "Dependency update requires a rebuild",
+            "dependency_issues": ["RHEL-23456"],
+            "dependency_component": "golang",
+            "sibling_issues": ["RHEL-34567"],
+            "consolidation_summary": "Rebuild siblings share the same dependency",
+        },
+    )
+    calls = []
+
+    async def workflow(**kwargs):
+        calls.append(
+            {
+                **kwargs,
+                "dry_run_env": os.environ["DRY_RUN"],
+                "feature_env": os.environ["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"],
+                "outer_only": os.environ.get("OUTER_ONLY"),
+            }
+        )
+        return _State(
+            package="dnsmasq",
+            dist_git_branch="rhel-8.10.z",
+            rebuild_success=True,
+            rebuild_error=None,
+            merge_request_url="https://gitlab.example.invalid/dnsmasq/-/merge_requests/1",
+            dependency_issue="RHEL-23456",
+            dependency_component="golang",
+            consolidated_issues=[
+                _State(
+                    issue_key="RHEL-34567",
+                    dependency_issue="RHEL-23456",
+                    dependency_component="golang",
+                )
+            ],
+            consolidation_summary="Rebuild siblings share the same dependency",
+        )
+
+    executor = make_ymir_rebuild_executor(workflow=workflow)
+
+    execution = executor(request)
+
+    assert os.environ["OUTER_ONLY"] == "kept"
+    assert execution.status == "passed"
+    assert execution.actual_result == {
+        "schema_version": 1,
+        "case_id": "RHEL-12345",
+        "case_type": "dependency_rebuild",
+        "workflow": "ymir-rebuild",
+        "resolution": "rebuild",
+        "package": "dnsmasq",
+        "target_branch": "rhel-8.10.z",
+        "build_result": "passed",
+        "rebuild_status": "rebuilt",
+        "rebuild_error": None,
+        "data": {
+            "success": True,
+            "status": "rebuilt",
+            "merge_request_url": "https://gitlab.example.invalid/dnsmasq/-/merge_requests/1",
+            "error": None,
+            "dependency_issues": ["RHEL-23456"],
+            "dependency_components": ["golang"],
+            "sibling_issues": ["RHEL-34567"],
+            "consolidated_issues": [
+                {
+                    "issue_key": "RHEL-34567",
+                    "dependency_issue": "RHEL-23456",
+                    "dependency_component": "golang",
+                }
+            ],
+            "consolidation_summary": "Rebuild siblings share the same dependency",
+        },
+        "merge_request_url": "https://gitlab.example.invalid/dnsmasq/-/merge_requests/1",
+        "dependency_issues": ["RHEL-23456"],
+        "dependency_components": ["golang"],
+        "sibling_issues": ["RHEL-34567"],
+    }
+    assert calls == [
+        {
+            "package": "dnsmasq",
+            "dist_git_branch": "rhel-8.10.z",
+            "jira_issue": "RHEL-12345",
+            "justification": "Dependency update requires a rebuild",
+            "dependency_issue": "RHEL-23456",
+            "dependency_component": "golang",
+            "consolidated_issues": [
+                {
+                    "issue_key": "RHEL-34567",
+                    "dependency_issue": "RHEL-23456",
+                    "dependency_component": "golang",
+                }
+            ],
+            "consolidation_summary": "Rebuild siblings share the same dependency",
+            "dry_run_env": "true",
+            "feature_env": "true",
+            "outer_only": None,
+        }
+    ]
+
+
+def test_ymir_rebuild_executor_reports_missing_expected_inputs(tmp_path: Path) -> None:
+    request = _request(tmp_path, case_type="dependency_rebuild")
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "dependency_rebuild",
+            "resolution": "rebuild",
+            "package": "dnsmasq",
+        },
+    )
+    calls = []
+
+    async def workflow(**kwargs):
+        calls.append(kwargs)
+        return _State(rebuild_success=True)
+
+    executor = make_ymir_rebuild_executor(workflow=workflow)
+
+    execution = executor(request)
+
+    assert execution.status == "failed"
+    assert execution.actual_result is None
+    assert execution.reason == "ymir rebuild workflow missing expected dist_git_branch"
+    assert calls == []
+
+
+def test_ymir_rebuild_executor_reports_missing_rebuild_result(tmp_path: Path) -> None:
+    request = _request(tmp_path, case_type="dependency_rebuild")
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "dependency_rebuild",
+            "resolution": "rebuild",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+        },
+    )
+
+    async def workflow(**_kwargs):
+        return _State()
+
+    executor = make_ymir_rebuild_executor(workflow=workflow)
+
+    execution = executor(request)
+
+    assert execution.status == "failed"
+    assert execution.actual_result is None
+    assert execution.reason == "ymir rebuild workflow returned no rebuild result"
+
+
+def test_ymir_rebuild_executor_uses_class_workflow_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    request = _request(tmp_path, case_type="dependency_rebuild")
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "dependency_rebuild",
+            "resolution": "rebuild",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+        },
+    )
+    calls = []
+
+    async def stale_module_workflow(**_kwargs):
+        raise AssertionError("module-level run_workflow must not be used")
+
+    class RebuildAgent:
+        async def run_workflow(self, **kwargs):
+            calls.append(kwargs)
+            return _State(rebuild_success=True, rebuild_error=None)
+
+    _install_fake_ymir_agent(
+        monkeypatch,
+        "rebuild_agent",
+        workflow_class=RebuildAgent,
+        module_run_workflow=stale_module_workflow,
+    )
+
+    executor = make_ymir_rebuild_executor()
+
+    execution = executor(request)
+
+    assert execution.status == "passed"
+    assert calls == [
+        {
+            "package": "dnsmasq",
+            "dist_git_branch": "rhel-8.10.z",
+            "jira_issue": "RHEL-12345",
+            "justification": None,
+            "dependency_issue": None,
+            "dependency_component": None,
+            "consolidated_issues": [],
+            "consolidation_summary": None,
+        }
+    ]
 
 
 def _request(
