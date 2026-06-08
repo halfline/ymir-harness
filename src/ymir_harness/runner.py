@@ -19,11 +19,14 @@ from ymir_harness.models import (
     ValidationIssue,
     ValidationReport,
 )
+from ymir_harness.safety import detect_replay_violations, detect_unsafe_operations
 from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
 
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
 MAX_ITERATIONS_OVERRIDE_ENV = "BENCHMARK_MAX_ITERATIONS_OVERRIDE"
 MAX_COST_PER_RUN_ENV = "BENCHMARK_MAX_COST_PER_RUN"
+COST_ALERT_THRESHOLD_ENV = "BENCHMARK_COST_ALERT_THRESHOLD"
+EVENT_TRACE_FIELDS = ("events", "tool_events", "tool_calls", "trace")
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
     "MOCK_JIRA": "true",
@@ -72,6 +75,13 @@ class RunCaseExecution:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class ReplayPolicy:
+    network_mode: str | None
+    manifest_path: Path | None
+    recorded_urls: tuple[str, ...] = ()
+
+
 def default_results_dir(cases_dir: Path, run_id: str) -> Path:
     return cases_dir / "reports" / "runs" / run_id
 
@@ -86,6 +96,9 @@ def build_no_write_environment(
     *,
     base_env: Mapping[str, str] | None = None,
     case_id: str | None = None,
+    network_mode: str | None = None,
+    replay_manifest_path: Path | None = None,
+    recorded_urls: Sequence[str] = (),
 ) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
     for name in SENSITIVE_ENVIRONMENT_NAMES:
@@ -100,10 +113,28 @@ def build_no_write_environment(
     max_iterations = env.get(MAX_ITERATIONS_OVERRIDE_ENV)
     if max_iterations:
         env["BEEAI_MAX_ITERATIONS"] = max_iterations
+    if network_mode:
+        env["YMIR_BENCHMARK_NETWORK_MODE"] = network_mode
+    else:
+        env.pop("YMIR_BENCHMARK_NETWORK_MODE", None)
+    if replay_manifest_path is not None:
+        env["YMIR_BENCHMARK_REPLAY_MANIFEST"] = str(replay_manifest_path.resolve())
+    else:
+        env.pop("YMIR_BENCHMARK_REPLAY_MANIFEST", None)
+    if network_mode in {"replay_only", "network_denied"} or recorded_urls:
+        env["YMIR_BENCHMARK_RECORDED_URLS"] = json.dumps(list(recorded_urls))
+    else:
+        env.pop("YMIR_BENCHMARK_RECORDED_URLS", None)
     if case_id:
         env["YMIR_BENCHMARK_CASE_ID"] = case_id
+        env["YMIR_BENCHMARK_WEB_CACHE_DIR"] = str((cases_dir / "web_cache" / case_id).resolve())
+        env["YMIR_BENCHMARK_SOURCE_CACHE_DIR"] = str(
+            (cases_dir / "source_cache" / case_id).resolve()
+        )
     else:
         env.pop("YMIR_BENCHMARK_CASE_ID", None)
+        env.pop("YMIR_BENCHMARK_WEB_CACHE_DIR", None)
+        env.pop("YMIR_BENCHMARK_SOURCE_CACHE_DIR", None)
     return env
 
 
@@ -278,6 +309,8 @@ def _run_case_result(
 
     actual_path = actual_result_path(results_dir, case_id, repetition)
     if executor is not None:
+        expected = _load_expected_for_policy(expected_path)
+        replay_policy = _replay_policy(cases_dir, case_id, expected)
         request = RunCaseRequest(
             case_id=case_id,
             case_type=case_type,
@@ -291,6 +324,9 @@ def _run_case_result(
                 results_dir,
                 base_env=base_env,
                 case_id=case_id,
+                network_mode=replay_policy.network_mode,
+                replay_manifest_path=replay_policy.manifest_path,
+                recorded_urls=replay_policy.recorded_urls,
             ),
             variant=variant,
             features=tuple(features),
@@ -311,9 +347,15 @@ def _run_case_result(
             )
         execution_actual_path = execution.actual_path or actual_path
         score = None
-        if execution.actual_result is not None:
+        actual_result = _apply_run_policies(
+            cases_dir,
+            case_id,
+            expected,
+            execution.actual_result,
+        )
+        if actual_result is not None:
             try:
-                _write_actual_result(execution_actual_path, execution.actual_result)
+                _write_actual_result(execution_actual_path, actual_result)
             except Exception as exc:
                 return RunCaseResult(
                     case_id=case_id,
@@ -325,7 +367,7 @@ def _run_case_result(
                     reason=_actual_result_write_failure_reason(exc),
                 )
             try:
-                score = _score_actual_result(expected_path, execution.actual_result)
+                score = _score_actual_result(expected_path, actual_result)
             except Exception as exc:
                 return RunCaseResult(
                     case_id=case_id,
@@ -336,7 +378,7 @@ def _run_case_result(
                     actual_path=execution_actual_path,
                     reason=_actual_result_score_failure_reason(exc),
                 )
-        budget_reason = _budget_guardrail_reason(request.environment, execution.actual_result)
+        budget_reason = _budget_guardrail_reason(request.environment, actual_result)
         return RunCaseResult(
             case_id=case_id,
             case_type=case_type,
@@ -347,6 +389,7 @@ def _run_case_result(
             score=score,
             runtime_seconds=runtime_seconds,
             reason=budget_reason or execution.reason or _execution_reason(execution, score),
+            warnings=_budget_guardrail_warnings(request.environment, actual_result),
         )
 
     return RunCaseResult(
@@ -406,6 +449,134 @@ def _execution_reason(
     return None
 
 
+def _load_expected_for_policy(expected_path: Path) -> Mapping[str, Any]:
+    if not expected_path.is_file():
+        return {}
+    try:
+        return load_json_file(expected_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _replay_policy(
+    cases_dir: Path,
+    case_id: str,
+    expected: Mapping[str, Any],
+) -> ReplayPolicy:
+    network_mode = expected.get("network_mode")
+    if not isinstance(network_mode, str):
+        network_mode = None
+
+    manifest_path = cases_dir / "web_cache" / case_id / "manifest.json"
+    if network_mode == "replay_only":
+        return ReplayPolicy(
+            network_mode=network_mode,
+            manifest_path=manifest_path,
+            recorded_urls=tuple(_recorded_urls(manifest_path)),
+        )
+    if network_mode == "network_denied":
+        return ReplayPolicy(network_mode=network_mode, manifest_path=None)
+    return ReplayPolicy(network_mode=network_mode, manifest_path=None)
+
+
+def _recorded_urls(manifest_path: Path) -> list[str]:
+    try:
+        manifest = load_json_file(manifest_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+
+    urls = []
+    required_urls = manifest.get("required_urls")
+    if isinstance(required_urls, list):
+        urls.extend(url for url in required_urls if isinstance(url, str) and url)
+
+    recorded_files = manifest.get("recorded_files")
+    if isinstance(recorded_files, Mapping):
+        urls.extend(url for url in recorded_files if isinstance(url, str) and url)
+    return list(dict.fromkeys(urls))
+
+
+def _apply_run_policies(
+    cases_dir: Path,
+    case_id: str,
+    expected: Mapping[str, Any],
+    actual_result: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    if actual_result is None:
+        return None
+
+    payload = dict(actual_result)
+    events = _actual_result_events(payload)
+    if not events:
+        return payload
+
+    unsafe_operations = detect_unsafe_operations(events)
+    if unsafe_operations:
+        _append_result_values(
+            payload,
+            "unsafe_operations",
+            [operation.to_json() for operation in unsafe_operations],
+        )
+
+    network_mode = expected.get("network_mode")
+    if network_mode in {None, "replay_only", "network_denied"}:
+        recorded_urls = []
+        if network_mode in {None, "replay_only"}:
+            recorded_urls = _recorded_urls(cases_dir / "web_cache" / case_id / "manifest.json")
+        replay_violations = detect_replay_violations(events, recorded_urls=recorded_urls)
+        if replay_violations:
+            _append_result_values(payload, "replay_violations", replay_violations)
+
+    return payload
+
+
+def _actual_result_events(actual_result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    events = []
+    for container in _event_containers(actual_result):
+        for field in EVENT_TRACE_FIELDS:
+            events.extend(_event_values(container.get(field)))
+    return events
+
+
+def _event_containers(actual_result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    containers = [actual_result]
+    data = actual_result.get("data")
+    if isinstance(data, Mapping):
+        containers.append(data)
+    return containers
+
+
+def _event_values(value: Any) -> list[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        return [value]
+    if not isinstance(value, list | tuple):
+        return []
+
+    events = []
+    for item in value:
+        if isinstance(item, Mapping):
+            events.append(item)
+    return events
+
+
+def _append_result_values(
+    payload: dict[str, Any],
+    name: str,
+    additions: Sequence[Any],
+) -> None:
+    if not additions:
+        return
+
+    values = []
+    existing = payload.get(name)
+    if isinstance(existing, list):
+        values.extend(existing)
+    elif existing is not None:
+        values.append(existing)
+    values.extend(additions)
+    payload[name] = values
+
+
 def _budget_guardrail_reason(
     environment: Mapping[str, str],
     actual_result: Mapping[str, Any] | None,
@@ -423,6 +594,28 @@ def _budget_guardrail_reason(
         f"total_cost_usd {_format_number(total_cost)} > "
         f"{MAX_COST_PER_RUN_ENV} {_format_number(max_cost)}"
     )
+
+
+def _budget_guardrail_warnings(
+    environment: Mapping[str, str],
+    actual_result: Mapping[str, Any] | None,
+) -> list[str]:
+    alert_threshold = _float_or_none(environment.get(COST_ALERT_THRESHOLD_ENV))
+    if alert_threshold is None or actual_result is None:
+        return []
+
+    total_cost = _float_or_none(_actual_result_field(actual_result, "total_cost_usd"))
+    max_cost = _float_or_none(environment.get(MAX_COST_PER_RUN_ENV))
+    if total_cost is None or total_cost <= alert_threshold:
+        return []
+    if max_cost is not None and total_cost > max_cost:
+        return []
+
+    return [
+        "budget alert threshold exceeded: "
+        f"total_cost_usd {_format_number(total_cost)} > "
+        f"{COST_ALERT_THRESHOLD_ENV} {_format_number(alert_threshold)}"
+    ]
 
 
 def _actual_result_field(actual_result: Mapping[str, Any], name: str) -> Any:
