@@ -37,6 +37,18 @@ class RebaseInputs:
     justification: str | None
 
 
+@dataclass(frozen=True)
+class RebuildInputs:
+    package: str
+    dist_git_branch: str
+    jira_issue: str
+    justification: str | None
+    dependency_issue: str | None
+    dependency_component: str | None
+    consolidated_issues: tuple[Mapping[str, Any], ...]
+    consolidation_summary: str | None
+
+
 def make_ymir_triage_executor(
     *,
     workflow: AsyncWorkflow | None = None,
@@ -78,6 +90,21 @@ def make_ymir_rebase_executor(
     def executor(request: RunCaseRequest) -> RunCaseExecution:
         return asyncio.run(
             _run_ymir_rebase(
+                request,
+                workflow=workflow,
+            )
+        )
+
+    return executor
+
+
+def make_ymir_rebuild_executor(
+    *,
+    workflow: AsyncWorkflow | None = None,
+) -> Callable[[RunCaseRequest], RunCaseExecution]:
+    def executor(request: RunCaseRequest) -> RunCaseExecution:
+        return asyncio.run(
+            _run_ymir_rebuild(
                 request,
                 workflow=workflow,
             )
@@ -188,6 +215,41 @@ async def _run_ymir_rebase(
     )
 
 
+async def _run_ymir_rebuild(
+    request: RunCaseRequest,
+    *,
+    workflow: AsyncWorkflow | None,
+) -> RunCaseExecution:
+    inputs = _rebuild_inputs(request)
+    if isinstance(inputs, RunCaseExecution):
+        return inputs
+
+    workflow_runner = _rebuild_dependencies(workflow)
+
+    with _request_environment(request):
+        state = await workflow_runner(
+            package=inputs.package,
+            dist_git_branch=inputs.dist_git_branch,
+            jira_issue=inputs.jira_issue,
+            justification=inputs.justification,
+            dependency_issue=inputs.dependency_issue,
+            dependency_component=inputs.dependency_component,
+            consolidated_issues=list(inputs.consolidated_issues),
+            consolidation_summary=inputs.consolidation_summary,
+        )
+
+    if not hasattr(state, "rebuild_success"):
+        return RunCaseExecution(
+            status="failed",
+            reason="ymir rebuild workflow returned no rebuild result",
+        )
+
+    return RunCaseExecution(
+        status="passed",
+        actual_result=_rebuild_actual_result(request, inputs, state),
+    )
+
+
 def _triage_dependencies(
     workflow: AsyncWorkflow | None,
     agent_factory: AgentFactory | None,
@@ -225,6 +287,16 @@ def _rebase_dependencies(workflow: AsyncWorkflow | None) -> AsyncWorkflow:
     return _agent_class_workflow(
         "ymir.agents.rebase_agent",
         class_names=("RebaseAgent", "RebaseWorkflow"),
+    )
+
+
+def _rebuild_dependencies(workflow: AsyncWorkflow | None) -> AsyncWorkflow:
+    if workflow is not None:
+        return workflow
+
+    return _agent_class_workflow(
+        "ymir.agents.rebuild_agent",
+        class_names=("RebuildAgent", "RebuildWorkflow"),
     )
 
 
@@ -383,6 +455,53 @@ def _rebase_inputs(request: RunCaseRequest) -> RebaseInputs | RunCaseExecution:
     )
 
 
+def _rebuild_inputs(request: RunCaseRequest) -> RebuildInputs | RunCaseExecution:
+    expected = load_json_file(request.expected_path)
+    dependency_issue = _first_string(
+        expected.get("dependency_issue"),
+        expected.get("dependency_issues"),
+    )
+    dependency_component = _first_string(
+        expected.get("dependency_component"),
+        expected.get("dependency_components"),
+    )
+    values = {
+        "package": _string_or_none(expected.get("package")),
+        "dist_git_branch": _string_or_none(
+            expected.get("dist_git_branch")
+            or expected.get("target_branch")
+            or expected.get("fix_version")
+        ),
+        "jira_issue": _string_or_none(expected.get("jira_issue") or expected.get("case_id"))
+        or request.case_id,
+    }
+    missing = [name for name, value in values.items() if value is None or value == ""]
+    if missing:
+        return RunCaseExecution(
+            status="failed",
+            reason=f"ymir rebuild workflow missing expected {', '.join(missing)}",
+        )
+
+    return RebuildInputs(
+        package=values["package"],
+        dist_git_branch=values["dist_git_branch"],
+        jira_issue=values["jira_issue"],
+        justification=_string_or_none(
+            expected.get("justification") or expected.get("rationale") or expected.get("notes")
+        ),
+        dependency_issue=dependency_issue,
+        dependency_component=dependency_component,
+        consolidated_issues=tuple(
+            _expected_consolidated_issues(
+                expected,
+                dependency_issue=dependency_issue,
+                dependency_component=dependency_component,
+            )
+        ),
+        consolidation_summary=_string_or_none(expected.get("consolidation_summary")),
+    )
+
+
 def _backport_actual_result(
     request: RunCaseRequest,
     inputs: BackportInputs,
@@ -452,6 +571,77 @@ def _rebase_actual_result(
     return actual
 
 
+def _rebuild_actual_result(
+    request: RunCaseRequest,
+    inputs: RebuildInputs,
+    state: Any,
+) -> dict[str, Any]:
+    success = bool(getattr(state, "rebuild_success"))
+    package = getattr(state, "package", None) or inputs.package
+    dist_git_branch = getattr(state, "dist_git_branch", None) or inputs.dist_git_branch
+    dependency_issue = getattr(state, "dependency_issue", None) or inputs.dependency_issue
+    dependency_component = (
+        getattr(state, "dependency_component", None) or inputs.dependency_component
+    )
+    consolidated_issues = _consolidated_issue_payloads(
+        getattr(state, "consolidated_issues", None) or inputs.consolidated_issues
+    )
+    dependency_issues = _unique_strings(
+        [
+            dependency_issue,
+            *[issue.get("dependency_issue") for issue in consolidated_issues],
+        ]
+    )
+    dependency_components = _unique_strings(
+        [
+            dependency_component,
+            *[issue.get("dependency_component") for issue in consolidated_issues],
+        ]
+    )
+    sibling_issues = _unique_strings(issue.get("issue_key") for issue in consolidated_issues)
+    merge_request_url = _string_or_none(getattr(state, "merge_request_url", None))
+    rebuild_error = _string_or_none(getattr(state, "rebuild_error", None))
+    consolidation_summary = (
+        _string_or_none(getattr(state, "consolidation_summary", None))
+        or inputs.consolidation_summary
+    )
+    status = "rebuilt" if success else "failed"
+    data: dict[str, Any] = {
+        "success": success,
+        "status": status,
+        "merge_request_url": merge_request_url,
+        "error": rebuild_error,
+        "dependency_issues": dependency_issues,
+        "dependency_components": dependency_components,
+        "sibling_issues": sibling_issues,
+        "consolidated_issues": consolidated_issues,
+        "consolidation_summary": consolidation_summary,
+    }
+    actual: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "case_id": request.case_id,
+        "case_type": request.case_type,
+        "workflow": "ymir-rebuild",
+        "resolution": "rebuild",
+        "package": package,
+        "target_branch": dist_git_branch,
+        "build_result": "passed" if success else "failed",
+        "rebuild_status": status,
+        "rebuild_error": rebuild_error,
+        "data": data,
+    }
+    if merge_request_url:
+        actual["merge_request_url"] = merge_request_url
+    if dependency_issues:
+        actual["dependency_issues"] = dependency_issues
+    if dependency_components:
+        actual["dependency_components"] = dependency_components
+    if sibling_issues:
+        actual["sibling_issues"] = sibling_issues
+
+    return actual
+
+
 def _model_payload(value: Any) -> dict[str, Any]:
     if hasattr(value, "model_dump"):
         payload = value.model_dump(mode="json")
@@ -489,6 +679,66 @@ def _first_string(*values: Any) -> str | None:
         if strings:
             return strings[0]
     return None
+
+
+def _expected_consolidated_issues(
+    expected: Mapping[str, Any],
+    *,
+    dependency_issue: str | None,
+    dependency_component: str | None,
+) -> list[Mapping[str, Any]]:
+    payloads = _consolidated_issue_payloads(expected.get("consolidated_issues"))
+    if payloads:
+        return payloads
+
+    return [
+        {
+            "issue_key": issue,
+            "dependency_issue": dependency_issue,
+            "dependency_component": dependency_component,
+        }
+        for issue in _string_list(expected.get("sibling_issues"))
+    ]
+
+
+def _consolidated_issue_payloads(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    payloads = []
+    for item in value:
+        payload = _consolidated_issue_payload(item)
+        if payload is not None:
+            payloads.append(payload)
+    return payloads
+
+
+def _consolidated_issue_payload(value: Any) -> dict[str, Any] | None:
+    issue_key = _string_or_none(_field_value(value, "issue_key"))
+    if issue_key is None:
+        return None
+    return {
+        "issue_key": issue_key,
+        "dependency_issue": _string_or_none(_field_value(value, "dependency_issue")),
+        "dependency_component": _string_or_none(_field_value(value, "dependency_component")),
+    }
+
+
+def _field_value(value: Any, name: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _unique_strings(values: Any) -> list[str]:
+    seen = set()
+    strings = []
+    for value in values:
+        string = _string_or_none(value)
+        if string is None or string in seen:
+            continue
+        seen.add(string)
+        strings.append(string)
+    return strings
 
 
 @contextmanager
