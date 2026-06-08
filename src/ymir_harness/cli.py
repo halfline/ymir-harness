@@ -145,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--pre-fix-ref", help="commit/ref before the historical fix")
     collect.add_argument("--branch", help="mock repo source branch")
     collect.add_argument(
+        "--mock-repo-cache",
+        type=Path,
+        help="clone/fetch mock repos into this local cache and write source_url",
+    )
+    collect.add_argument(
         "--zstream-override",
         action="append",
         default=[],
@@ -423,6 +428,7 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         reference_patch_mode=args.reference_patch_mode,
         mock_repo=mock_repo,
         mock_agent=args.mock_agent,
+        mock_repo_cache=args.mock_repo_cache,
         jira_url=args.jira_url,
         jira_base_url=args.jira_base_url,
         jira_token_env=args.jira_token_env,
