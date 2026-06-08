@@ -576,6 +576,7 @@ def _rebase_actual_result(
     if files_to_git_add:
         actual["touched_files"] = files_to_git_add
 
+    actual.update(_state_diagnostics(state))
     return actual
 
 
