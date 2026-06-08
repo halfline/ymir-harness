@@ -106,6 +106,77 @@ def test_cli_scores_result_directory(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert output["variant"] == "baseline"
 
 
+def test_cli_collect_case_writes_fixture_tree(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    issue_json = tmp_path / "inputs" / "issue.json"
+    web_record = tmp_path / "inputs" / "advisory.html"
+    patch_path = tmp_path / "inputs" / "fix.patch"
+    _write_json(
+        issue_json,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "key": "RHEL-12345",
+        },
+    )
+    web_record.parent.mkdir(parents=True, exist_ok=True)
+    web_record.write_text("cached advisory\n", encoding="utf-8")
+    patch_path.write_text("diff --git a/source.c b/source.c\n", encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "collect-case",
+                "--cases",
+                str(cases_dir),
+                "--case-id",
+                "RHEL-12345",
+                "--case-type",
+                "cve_backport",
+                "--resolution",
+                "backport",
+                "--package",
+                "dnsmasq",
+                "--target-branch",
+                "rhel-8.10.z",
+                "--expected-basis",
+                "merged_mr",
+                "--network-mode",
+                "replay_only",
+                "--patch-url",
+                "https://example.invalid/advisory",
+                "--web-record",
+                f"https://example.invalid/advisory={web_record}",
+                "--remote-url",
+                "https://example.invalid/dnsmasq.git",
+                "--pre-fix-ref",
+                "abc123",
+                "--branch",
+                "c9s",
+                "--reference-patch",
+                str(patch_path),
+                "--reference-patch-mode",
+                "scope_only",
+                "--jira-issue-json",
+                str(issue_json),
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["case_id"] == "RHEL-12345"
+    assert (cases_dir / "expected" / "RHEL-12345.expected.json").is_file()
+    assert (cases_dir / "mock_data" / "triage" / "RHEL-12345.json").is_file()
+    assert (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").is_file()
+
+
+
 def test_cli_run_writes_placeholder_report(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
