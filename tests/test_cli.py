@@ -479,6 +479,84 @@ def test_cli_run_can_use_ymir_triage_workflow(
     assert Path(output["cases"][0]["actual_path"]).is_file()
 
 
+def test_cli_run_validates_phase2_for_selected_triage_workflow(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    output_path = tmp_path / "reports" / "run.json"
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "expected_basis": "historical_jira_state",
+            "ground_truth_confidence": "high",
+            "answer_leakage": "none",
+            "case_status": "active",
+            "network_mode": "network_denied",
+            "requires_source_cache": True,
+        },
+    )
+    requests = []
+
+    def make_executor():
+        def executor(request):
+            requests.append(request)
+            return RunCaseExecution(
+                status="passed",
+                actual_result={
+                    "case_id": "RHEL-12345",
+                    "case_type": "cve_backport",
+                    "resolution": "backport",
+                    "package": "dnsmasq",
+                    "target_branch": "rhel-8.10.z",
+                },
+            )
+
+        return executor
+
+    monkeypatch.setattr(cli_module, "make_ymir_triage_executor", make_executor)
+
+    assert (
+        main(
+            [
+                "run",
+                "--cases",
+                str(cases_dir),
+                "--variant",
+                "baseline",
+                "--workflow",
+                "ymir-triage",
+                "--phase",
+                "2",
+                "--output",
+                str(output_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert len(requests) == 1
+    assert output["summary"]["passed"] == 1
+    validation = json.loads(
+        (cases_dir / "reports" / "fixture-validation.json").read_text(encoding="utf-8")
+    )
+    assert validation["summary"]["invalid"] == 0
+    assert not any(
+        issue["category"] == "source_cache_incomplete"
+        for case in validation["cases"]
+        for issue in case["issues"]
+    )
+
+
 def test_cli_run_can_use_ymir_backport_workflow(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
