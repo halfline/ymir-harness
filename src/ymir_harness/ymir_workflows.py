@@ -383,6 +383,7 @@ def _triage_actual_result(
     if target_branch:
         actual["target_branch"] = target_branch
 
+    actual.update(_state_diagnostics(state))
     return actual
 
 
