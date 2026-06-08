@@ -95,6 +95,12 @@ local mock repo at `pre_fix_ref`.
 It must not reverse-apply to `pre_fix_ref`, which indicates the fix is already
 present.
 
+When a runnable case has local or `file://` mock repos in `mock_data/*`, `run`
+materializes those repos under the run directory, checks out `pre_fix_ref`,
+writes a per-case gitconfig with `insteadOf` URL rewrites, exposes that
+gitconfig through `GIT_CONFIG_GLOBAL`, and exports `MOCK_BLOCKED_URLS` for the
+original URLs.
+
 `score-results` reads every `benchmark_cases/expected/*.expected.json` file and
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
 actual-results directory. It writes aggregate JSON to
