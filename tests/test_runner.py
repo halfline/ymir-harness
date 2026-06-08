@@ -30,6 +30,8 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
             "KEYTAB_FILE": "/etc/ymir/prod.keytab",
             "KRB5CCNAME": "/tmp/prod-krb5",
             "YMIR_BENCHMARK_CASE_ID": "RHEL-OLD",
+            "BENCHMARK_MAX_ITERATIONS_OVERRIDE": "50",
+            "BEEAI_MAX_ITERATIONS": "255",
         },
     )
 
@@ -40,6 +42,8 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["AUTO_CHAIN"] == "false"
     assert env["SILENT_RUN"] == "true"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["BENCHMARK_MAX_ITERATIONS_OVERRIDE"] == "50"
+    assert env["BEEAI_MAX_ITERATIONS"] == "50"
     assert "GITLAB_TOKEN" not in env
     assert "JIRA_PASSWORD" not in env
     assert "KEYTAB_FILE" not in env
