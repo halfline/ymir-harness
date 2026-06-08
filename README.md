@@ -45,6 +45,15 @@ Use `--provenance KEY=VALUE` with `run` or `score-results` to add explicit
 run metadata such as `agentic_skills_sha`, `container_image_digest`, or model
 configuration.
 
+The repository includes a synthetic offline seed fixture under
+`examples/benchmark_cases/`. It is not a historical benchmark case, but it gives
+new users a checked-in fixture layout to validate before adding real pilot data:
+
+```bash
+ymir-harness validate-cases examples/benchmark_cases/
+ymir-harness run --cases examples/benchmark_cases/ --variant example
+```
+
 Validation writes:
 
 ```text
