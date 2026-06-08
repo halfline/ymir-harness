@@ -18,7 +18,7 @@ from ymir_harness.runner import (
 )
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 from ymir_harness.validation import validate_case_directory
-from ymir_harness.ymir_workflows import make_ymir_triage_executor
+from ymir_harness.ymir_workflows import make_ymir_backport_executor, make_ymir_triage_executor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true", help="print the run report JSON to stdout")
     run.add_argument(
         "--workflow",
-        choices=("none", "ymir-triage"),
+        choices=("none", "ymir-triage", "ymir-backport"),
         default="none",
         help="workflow executor to invoke; defaults to placeholder run entries",
     )
@@ -285,6 +285,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _run_executor(workflow: str):
     if workflow == "ymir-triage":
         return make_ymir_triage_executor()
+    if workflow == "ymir-backport":
+        return make_ymir_backport_executor()
     return None
 
 
