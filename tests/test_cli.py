@@ -402,6 +402,78 @@ def test_cli_run_can_use_ymir_backport_workflow(
     assert Path(output["cases"][0]["actual_path"]).is_file()
 
 
+def test_cli_run_can_use_ymir_rebase_workflow(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    output_path = tmp_path / "reports" / "run.json"
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "rebase",
+            "resolution": "rebase",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "version": "2.91",
+            "expected_basis": "maintainer_decision",
+            "ground_truth_confidence": "high",
+            "answer_leakage": "none",
+            "case_status": "active",
+            "network_mode": "network_denied",
+        },
+    )
+    requests = []
+
+    def make_executor():
+        def executor(request):
+            requests.append(request)
+            return RunCaseExecution(
+                status="passed",
+                actual_result={
+                    "case_id": "RHEL-12345",
+                    "case_type": "rebase",
+                    "resolution": "rebase",
+                    "package": "dnsmasq",
+                    "target_branch": "rhel-8.10.z",
+                    "version": "2.91",
+                },
+            )
+
+        return executor
+
+    monkeypatch.setattr(cli_module, "make_ymir_rebase_executor", make_executor)
+
+    assert (
+        main(
+            [
+                "run",
+                "--cases",
+                str(cases_dir),
+                "--variant",
+                "baseline",
+                "--workflow",
+                "ymir-rebase",
+                "--output",
+                str(output_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert len(requests) == 1
+    assert requests[0].case_id == "RHEL-12345"
+    assert output["summary"]["passed"] == 1
+    assert output["cases"][0]["status"] == "passed"
+    assert output["cases"][0]["score"]["summary"]["passed"] is True
+    assert Path(output["cases"][0]["actual_path"]).is_file()
+
+
 def test_cli_run_blocks_invalid_fixtures(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
