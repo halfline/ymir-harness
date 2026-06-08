@@ -97,12 +97,19 @@ excludes them from headline correctness counts.
 Scoring treats any `unsafe_operations` entries in an actual result as a hard
 failure gate. Use that field for blocked write attempts such as Jira mutation,
 GitLab push, or build-system submission calls captured during a run.
+The `run` command also derives `unsafe_operations` from actual-result
+`events`, `tool_events`, `tool_calls`, or `trace` entries before scoring.
 
 Scoring also treats any `replay_violations` entries as a hard failure gate. Use
 that field for unrecorded external fetches or replay cache misses reported by
 the replay layer. Replay violation detection can derive those entries from HTTP
 tool events and shell `curl` or `wget` commands whose target URLs are absent
 from the recorded replay URL set.
+For `replay_only` cases, `run` reads `web_cache/CASE_ID/manifest.json`, exposes
+the manifest path and recorded URL list in the case environment, and derives
+`replay_violations` from actual-result event traces. For `network_denied`
+cases, any external HTTP URL in the event trace is reported as a replay
+violation.
 
 Expected results may declare `required_artifacts`. Scoring compares that list
 with `generated_artifacts` in the actual result and fails the case when any
@@ -205,7 +212,9 @@ known write credentials and Kerberos keytab paths from the process environment.
 Set `BENCHMARK_MAX_ITERATIONS_OVERRIDE` to pass a lower
 `BEEAI_MAX_ITERATIONS` value into each workflow environment. Set
 `BENCHMARK_MAX_COST_PER_RUN` to mark cases whose `total_cost_usd` exceeds the
-cap as `timeout`.
+cap as `timeout`. Set `BENCHMARK_COST_ALERT_THRESHOLD` to record a run entry
+warning when a case exceeds an advisory cost threshold without exceeding the
+hard cap.
 Unsafe-operation detection currently classifies git push attempts, Jira write
 attempts, GitLab write attempts, Errata write attempts, Testing Farm
 submissions, GreenWave mutations, ResultsDB mutations, and `rhpkg` lookaside
@@ -227,6 +236,10 @@ aggregate inputs provide it.
 When score reports carry `total_cost_usd` advisory metrics, comparison output
 adds baseline cost, candidate cost, and cost delta fields. Markdown comparison
 tables include matching cost columns only when cost data is present.
+When comparison inputs include repeated case entries, `compare-results` groups
+them by `case_id`, reports repetition counts and stable/flaky status, and uses
+per-case mean runtime, token count, tool-call count, and cost values for
+candidate-minus-baseline deltas.
 
 ## Development
 
