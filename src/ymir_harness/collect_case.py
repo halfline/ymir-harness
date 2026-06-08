@@ -4,12 +4,14 @@ import base64
 import copy
 import json
 import os
+import re
 import shutil
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+import unicodedata
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 import yaml
@@ -25,6 +27,74 @@ from ymir_harness.models import (
     ALLOWED_RESOLUTIONS,
     SCHEMA_VERSION,
 )
+
+
+YMIR_RESULT_LABELS = {
+    "ymir_needs_attention",
+    "ymir_triaged",
+    "ymir_triage_in_progress",
+    "ymir_triaged_backport",
+    "ymir_triaged_rebase",
+    "ymir_triaged_rebuild",
+    "ymir_rebased",
+    "ymir_backported",
+    "ymir_rebuilt",
+    "ymir_merged",
+    "ymir_rebase_errored",
+    "ymir_backport_errored",
+    "ymir_rebuild_errored",
+    "ymir_triage_errored",
+    "ymir_rebase_failed",
+    "ymir_backport_failed",
+    "ymir_rebuild_failed",
+    "ymir_triaged_postponed",
+    "ymir_triaged_not_affected",
+    "ymir_retry_needed",
+}
+RESOLUTION_LABELS = {
+    "jotnar_backported": "backport",
+    "jotnar_rebased": "rebase",
+    "jotnar_rebuilt": "rebuild",
+    "ymir_triaged_backport": "backport",
+    "ymir_triaged_rebase": "rebase",
+    "ymir_triaged_rebuild": "rebuild",
+    "ymir_triaged_postponed": "postponed",
+    "ymir_triaged_not_affected": "not_affected",
+    "ymir_needs_attention": "clarification_needed",
+}
+COMMENT_RESOLUTION_MAP = {
+    "backport": "backport",
+    "rebase": "rebase",
+    "rebuild": "rebuild",
+    "postponed": "postponed",
+    "not-affected": "not_affected",
+    "not_affected": "not_affected",
+    "clarification-needed": "clarification_needed",
+    "clarification_needed": "clarification_needed",
+}
+CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
+URL_PATTERN = re.compile(r"https?://[^\s<>\]\[\"']+")
+RESULT_COMMENT_PATTERNS = (
+    "*resolution*",
+    "advisory ",
+    "agent failed to perform",
+    "ai-generated contribution",
+    "errata",
+    "integration/release pending",
+    "output from backport agent",
+    "output from rebuild agent",
+    "output from rebase agent",
+    "output from triage agent",
+    "push_ready",
+    "rel_prep",
+    "released on",
+    "resolved in a recent advisory",
+    "ymir_triaged",
+    "ymir_backported",
+    "ymir_rebased",
+    "ymir_rebuilt",
+)
+CLOSED_STATUS_NAMES = {"closed", "done", "resolved", "verified"}
 
 
 class CollectCaseError(RuntimeError):
@@ -48,25 +118,37 @@ class MockRepoInput:
 
 
 @dataclass(frozen=True)
+class FetchedRecord:
+    url: str
+    relative_path: str
+    body: bytes
+
+
+@dataclass(frozen=True)
 class FetchedEvidence:
     jira_issue: Mapping[str, Any] | None = None
     jira_comments: Mapping[str, Any] | None = None
     jira_links: Any = None
+    jira_patch_urls: tuple[str, ...] = ()
+    gitlab_mr_url: str | None = None
+    gitlab_patch_url: str | None = None
+    gitlab_patch_body: bytes | None = None
+    web_records: tuple[FetchedRecord, ...] = ()
 
 
 @dataclass(frozen=True)
 class CollectCaseRequest:
     cases_dir: Path
     case_id: str
-    case_type: str
-    resolution: str
-    package: str
-    expected_basis: str = "manual_review"
+    case_type: str | None = None
+    resolution: str | None = None
+    package: str | None = None
+    expected_basis: str | None = None
     ground_truth_confidence: str = "medium"
     answer_leakage: str = "none"
     case_status: str = "quarantined"
     case_status_reason: str | None = "fixture scaffold requires ground-truth review"
-    network_mode: str = "network_denied"
+    network_mode: str | None = None
     target_branch: str | None = None
     fix_version: str | None = None
     cve_ids: tuple[str, ...] = ()
@@ -81,6 +163,8 @@ class CollectCaseRequest:
     jira_token_env: str = "JIRA_TOKEN"
     jira_token_file: Path | None = None
     jira_email: str | None = None
+    gitlab_mr_url: str | None = None
+    gitlab_token_env: str = "GITLAB_TOKEN"
     http_timeout: float = 30.0
     jira_issue_json: Path | None = None
     jira_comments_json: Path | None = None
@@ -112,10 +196,12 @@ class CollectCaseResult:
 
 
 def collect_case(request: CollectCaseRequest) -> CollectCaseResult:
-    _validate_request(request)
+    _validate_request(request, require_metadata=False)
     cases_dir = request.cases_dir.resolve()
     result = CollectCaseResult(case_id=request.case_id, cases_dir=cases_dir)
     fetched = _fetch_evidence(request, result)
+    request = _complete_request(request, fetched)
+    _validate_request(request, require_metadata=True)
     cases_dir.mkdir(parents=True, exist_ok=True)
 
     _write_cases_manifest(cases_dir / "cases.yaml", request.case_id, request.overwrite, result)
@@ -169,6 +255,10 @@ def _fetch_evidence(
     jira_issue = None
     jira_comments = None
     jira_links = None
+    jira_patch_urls: tuple[str, ...] = ()
+    gitlab_records: list[FetchedRecord] = []
+    gitlab_patch_url = None
+    gitlab_patch_body = None
 
     if request.jira_url or request.jira_base_url:
         jira_urls = _jira_urls(request)
@@ -193,12 +283,121 @@ def _fetch_evidence(
             result=result,
         )
 
+    jira_issue_source = _jira_issue_source(request, jira_issue)
+    jira_comments_source = _jira_comments_source(request, jira_comments)
+    jira_links_source = _jira_links_source(request, jira_links)
+    if request.network_mode != "network_denied":
+        jira_patch_urls = tuple(
+            _patch_urls_from_jira_evidence(jira_issue_source, jira_comments_source)
+        )
+
+    gitlab_mr_url = request.gitlab_mr_url
+    if gitlab_mr_url is None and request.network_mode != "network_denied":
+        gitlab_mr_url = _gitlab_mr_url_from_jira_evidence(
+            jira_links_source,
+            jira_issue_source,
+            jira_comments_source,
+        )
+
+    if gitlab_mr_url:
+        gitlab_urls = _gitlab_mr_urls(gitlab_mr_url)
+        gitlab_headers = _gitlab_headers(request.gitlab_token_env)
+        for name in ("merge_request", "commits", "changes"):
+            url = gitlab_urls[name]
+            body = _fetch_bytes(url, headers=gitlab_headers, request=request, result=result)
+            gitlab_records.append(
+                FetchedRecord(
+                    url=url,
+                    relative_path=f"gitlab/{name}.json",
+                    body=body,
+                )
+            )
+
+        gitlab_patch_url = gitlab_urls["patch"]
+        gitlab_patch_body = _fetch_bytes(
+            gitlab_patch_url,
+            headers=gitlab_headers,
+            request=request,
+            result=result,
+        )
+        gitlab_records.append(
+            FetchedRecord(
+                url=gitlab_patch_url,
+                relative_path="gitlab/merge_request.patch",
+                body=gitlab_patch_body,
+            )
+        )
+
+    recorded_patch_urls = {gitlab_patch_url} if gitlab_patch_url else set()
+    valid_jira_patch_urls: list[str] = []
+    for index, patch_url in enumerate(jira_patch_urls, start=1):
+        if patch_url in recorded_patch_urls:
+            continue
+        try:
+            patch_body = _fetch_bytes(
+                patch_url,
+                headers={"Accept": "*/*"},
+                request=request,
+                result=result,
+            )
+        except CollectCaseError as exc:
+            result.warnings.append(f"skipped Jira patch URL {patch_url}: {exc}")
+            continue
+        if not _looks_like_patch(patch_body):
+            result.warnings.append(
+                f"skipped Jira patch URL {patch_url}: fetched content is not a patch"
+            )
+            continue
+        valid_jira_patch_urls.append(patch_url)
+        gitlab_records.append(
+            FetchedRecord(
+                url=patch_url,
+                relative_path=(
+                    f"jira/patches/{len(valid_jira_patch_urls):03d}{_patch_suffix(patch_url)}"
+                ),
+                body=patch_body,
+            )
+        )
+    jira_patch_urls = tuple(valid_jira_patch_urls)
+
     return FetchedEvidence(
         jira_issue=jira_issue,
         jira_comments=jira_comments,
         jira_links=jira_links,
+        jira_patch_urls=jira_patch_urls,
+        gitlab_mr_url=gitlab_mr_url,
+        gitlab_patch_url=gitlab_patch_url,
+        gitlab_patch_body=gitlab_patch_body,
+        web_records=tuple(gitlab_records),
     )
 
+
+def _jira_issue_source(
+    request: CollectCaseRequest,
+    jira_issue: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    if jira_issue is not None:
+        return jira_issue
+    if request.jira_issue_json is None:
+        return None
+    data = _load_json(request.jira_issue_json)
+    return data if isinstance(data, Mapping) else None
+
+
+def _jira_comments_source(request: CollectCaseRequest, jira_comments: Any) -> Any:
+    if jira_comments is not None:
+        return jira_comments
+    if request.jira_comments_json is None:
+        return None
+    return _load_json(request.jira_comments_json)
+
+
+def _jira_links_source(request: CollectCaseRequest, jira_links: Any) -> Any:
+    if jira_links is not None:
+        return jira_links
+    if request.jira_links_json is None:
+        return None
+    return _links_value(_load_json(request.jira_links_json))
 
 
 def _jira_urls(request: CollectCaseRequest) -> dict[str, str]:
@@ -230,6 +429,87 @@ def _jira_issue_api_url(url: str, case_id: str) -> str:
     if "/browse/" in parsed.path:
         return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}")
     return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}")
+
+
+def _gitlab_mr_urls(url: str) -> dict[str, str]:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise CollectCaseError(f"GitLab MR URL must be absolute: {url}")
+
+    marker = "/-/merge_requests/"
+    if marker not in parsed.path:
+        raise CollectCaseError(f"GitLab MR URL must contain {marker}: {url}")
+
+    project_path, iid_part = parsed.path.strip("/").split(marker, 1)
+    iid = iid_part.strip("/").split("/", 1)[0].removesuffix(".patch")
+    if not iid:
+        raise CollectCaseError(f"GitLab MR URL is missing merge request id: {url}")
+
+    project = quote(unquote(project_path), safe="")
+    api_base = f"{parsed.scheme}://{parsed.netloc}/api/v4/projects/{project}/merge_requests/{iid}"
+    normalized_mr_url = f"{parsed.scheme}://{parsed.netloc}/{project_path}/-/merge_requests/{iid}"
+    return {
+        "merge_request": api_base,
+        "commits": f"{api_base}/commits",
+        "changes": f"{api_base}/changes",
+        "patch": f"{normalized_mr_url}.patch",
+    }
+
+
+def _gitlab_mr_url_from_jira_evidence(*values: Any) -> str | None:
+    for value in _string_values(values):
+        for candidate in _urls_from_text(value):
+            if "/-/merge_requests/" not in candidate:
+                continue
+            parsed = urlparse(candidate)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                return candidate.removesuffix(".patch")
+    return None
+
+
+def _patch_urls_from_jira_evidence(issue: Mapping[str, Any] | None, comments: Any) -> list[str]:
+    urls: list[str] = []
+    for text in [*_issue_text_values(issue), *_comment_bodies(comments)]:
+        for url in _urls_from_text(text):
+            if _is_patch_url(url):
+                urls.append(url)
+    return list(dict.fromkeys(urls))
+
+
+def _urls_from_text(text: str) -> list[str]:
+    return [match.group(0).rstrip(".,;:)]}\"'") for match in URL_PATTERN.finditer(text)]
+
+
+def _is_patch_url(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return path.endswith((".patch", ".diff"))
+
+
+def _patch_suffix(url: str) -> str:
+    path = urlparse(url).path.lower()
+    if path.endswith(".diff"):
+        return ".diff"
+    return ".patch"
+
+
+def _looks_like_patch(body: bytes) -> bool:
+    prefix = body[:4096].decode("utf-8", errors="ignore").lstrip()
+    return (
+        prefix.startswith("From ") or prefix.startswith("diff --git ") or "\ndiff --git " in prefix
+    )
+
+
+def _string_values(value: Any) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, Mapping):
+        for item in value.values():
+            yield from _string_values(item)
+        return
+    if isinstance(value, list | tuple):
+        for item in value:
+            yield from _string_values(item)
 
 
 def _join_url(base_url: str, path: str) -> str:
@@ -274,6 +554,14 @@ def _jira_authorization(token: str, email: str | None) -> str:
         return "Basic " + base64.b64encode(raw).decode("ascii")
 
     return f"Bearer {token}"
+
+
+def _gitlab_headers(token_env: str) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    token = os.environ.get(token_env)
+    if token:
+        headers["PRIVATE-TOKEN"] = token
+    return headers
 
 
 def _fetch_json(
@@ -324,10 +612,223 @@ def _fetch_bytes(
     return body
 
 
-def _validate_request(request: CollectCaseRequest) -> None:
-    _validate_allowed(request.case_type, ALLOWED_CASE_TYPES, "case_type")
-    _validate_allowed(request.resolution, ALLOWED_RESOLUTIONS, "resolution")
-    _validate_allowed(request.expected_basis, ALLOWED_EXPECTED_BASES, "expected_basis")
+def _complete_request(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> CollectCaseRequest:
+    issue = _evidence_issue(request, fetched)
+    comments = _evidence_comments(request, fetched)
+    resolution = request.resolution or _derive_resolution(issue, comments)
+
+    return replace(
+        request,
+        case_type=request.case_type or _derive_case_type(resolution),
+        resolution=resolution,
+        package=request.package or _derive_package(issue),
+        expected_basis=request.expected_basis
+        or ("historical_jira_state" if issue is not None else "manual_review"),
+        network_mode=request.network_mode or _derive_network_mode(request, fetched),
+        fix_version=request.fix_version or _derive_fix_version(issue),
+        cve_ids=request.cve_ids or tuple(_derive_cve_ids(issue, comments)),
+    )
+
+
+def _evidence_issue(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> Mapping[str, Any] | None:
+    if fetched.jira_issue is not None:
+        return fetched.jira_issue
+    if request.jira_issue_json is None:
+        return None
+    data = _load_json(request.jira_issue_json)
+    return data if isinstance(data, Mapping) else None
+
+
+def _evidence_comments(request: CollectCaseRequest, fetched: FetchedEvidence) -> Any:
+    if fetched.jira_comments is not None:
+        return fetched.jira_comments
+    if request.jira_comments_json is None:
+        return None
+    return _load_json(request.jira_comments_json)
+
+
+def _derive_resolution(issue: Mapping[str, Any] | None, comments: Any) -> str | None:
+    for label in _issue_labels(issue):
+        resolution = RESOLUTION_LABELS.get(label)
+        if resolution is not None:
+            return resolution
+
+    for body in _comment_bodies(comments):
+        if resolution := _comment_resolution(body):
+            return resolution
+    return None
+
+
+def _derive_case_type(resolution: str | None) -> str | None:
+    if resolution is None:
+        return None
+    return {
+        "backport": "cve_backport",
+        "rebase": "rebase",
+        "rebuild": "dependency_rebuild",
+        "not_affected": "not_affected",
+        "postponed": "postponed",
+        "clarification_needed": "clarification_needed",
+    }.get(resolution)
+
+
+def _derive_package(issue: Mapping[str, Any] | None) -> str | None:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return None
+
+    downstream = fields.get("customfield_10669") or fields.get("Downstream Component Name")
+    if package := _component_name(downstream):
+        return package
+
+    components = fields.get("components")
+    if isinstance(components, list):
+        for component in components:
+            if isinstance(component, Mapping):
+                if package := _component_name(component.get("name")):
+                    return package
+            elif package := _component_name(component):
+                return package
+    return None
+
+
+def _derive_fix_version(issue: Mapping[str, Any] | None) -> str | None:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return None
+
+    fix_versions = fields.get("fixVersions")
+    if not isinstance(fix_versions, list):
+        return None
+    for version in fix_versions:
+        if isinstance(version, Mapping):
+            name = version.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        elif isinstance(version, str) and version.strip():
+            return version.strip()
+    return None
+
+
+def _derive_cve_ids(issue: Mapping[str, Any] | None, comments: Any) -> list[str]:
+    values: list[str] = []
+    for text in [*_issue_text_values(issue), *_comment_bodies(comments)]:
+        values.extend(match.group(0).upper() for match in CVE_PATTERN.finditer(text))
+    return list(dict.fromkeys(values))
+
+
+def _derive_network_mode(request: CollectCaseRequest, fetched: FetchedEvidence) -> str:
+    if (
+        request.gitlab_mr_url
+        or fetched.gitlab_patch_url
+        or fetched.jira_patch_urls
+        or request.patch_urls
+        or request.web_records
+    ):
+        return "replay_only"
+    return "network_denied"
+
+
+def _issue_fields(issue: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    if issue is None:
+        return None
+    fields = issue.get("fields")
+    return fields if isinstance(fields, Mapping) else None
+
+
+def _issue_labels(issue: Mapping[str, Any] | None) -> list[str]:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return []
+    labels = fields.get("labels")
+    if not isinstance(labels, list):
+        return []
+    return [label.strip() for label in labels if isinstance(label, str) and label.strip()]
+
+
+def _issue_text_values(issue: Mapping[str, Any] | None) -> list[str]:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return []
+    values = []
+    for name in ("summary", "description"):
+        value = fields.get(name)
+        if isinstance(value, str):
+            values.append(value)
+    for label in _issue_labels(issue):
+        values.append(label)
+    return values
+
+
+def _comment_bodies(comments: Any) -> list[str]:
+    bodies = []
+    for comment in _comment_values(comments):
+        body = comment.get("body")
+        if isinstance(body, str):
+            bodies.append(body)
+        elif body is not None:
+            bodies.append(json.dumps(body, sort_keys=True))
+    return bodies
+
+
+def _comment_values(comments: Any) -> list[Mapping[str, Any]]:
+    source = comments
+    if isinstance(source, Mapping):
+        source = source.get("comments", [])
+    if not isinstance(source, list):
+        return []
+    return [comment for comment in source if isinstance(comment, Mapping)]
+
+
+def _comment_resolution(body: str) -> str | None:
+    match = re.search(r"\*?resolution\*?\s*[:=-]\s*([A-Za-z_-]+)", body, re.IGNORECASE)
+    if match is None:
+        return None
+    token = match.group(1).lower().replace("_", "-")
+    return COMMENT_RESOLUTION_MAP.get(token)
+
+
+def _component_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if "/" in value:
+        value = value.rsplit("/", 1)[-1]
+    return value.strip() or None
+
+
+def _validate_request(request: CollectCaseRequest, *, require_metadata: bool) -> None:
+    if require_metadata:
+        missing = [
+            option
+            for option, value in (
+                ("--case-type", request.case_type),
+                ("--resolution", request.resolution),
+                ("--package", request.package),
+                ("--expected-basis", request.expected_basis),
+                ("--network-mode", request.network_mode),
+            )
+            if not isinstance(value, str) or not value
+        ]
+        if missing:
+            raise CollectCaseError(
+                "could not derive required case metadata; provide " + ", ".join(missing)
+            )
+
+    if request.case_type is not None:
+        _validate_allowed(request.case_type, ALLOWED_CASE_TYPES, "case_type")
+    if request.resolution is not None:
+        _validate_allowed(request.resolution, ALLOWED_RESOLUTIONS, "resolution")
+    if request.expected_basis is not None:
+        _validate_allowed(request.expected_basis, ALLOWED_EXPECTED_BASES, "expected_basis")
     _validate_allowed(
         request.ground_truth_confidence,
         ALLOWED_GROUND_TRUTH_CONFIDENCE,
@@ -335,21 +836,25 @@ def _validate_request(request: CollectCaseRequest) -> None:
     )
     _validate_allowed(request.answer_leakage, ALLOWED_ANSWER_LEAKAGE, "answer_leakage")
     _validate_allowed(request.case_status, ALLOWED_CASE_STATUSES, "case_status")
-    _validate_allowed(request.network_mode, ALLOWED_NETWORK_MODES, "network_mode")
+    if request.network_mode is not None:
+        _validate_allowed(request.network_mode, ALLOWED_NETWORK_MODES, "network_mode")
     if request.reference_patch_mode is not None:
         _validate_allowed(
             request.reference_patch_mode,
             ALLOWED_REFERENCE_PATCH_MODES,
             "reference_patch_mode",
         )
-    if request.resolution in {"backport", "rebase", "rebuild"}:
+    if require_metadata and request.resolution in {"backport", "rebase", "rebuild"}:
         if request.target_branch is None and request.fix_version is None:
             msg = "implementation cases should include target_branch or fix_version"
             raise CollectCaseError(msg)
     if request.network_mode == "network_denied" and (
-        request.patch_urls or request.web_records
+        request.patch_urls or request.web_records or request.gitlab_mr_url
     ):
-        msg = "network_denied cases must not declare patch URLs or web records; use replay_only"
+        msg = (
+            "network_denied cases must not declare patch URLs, web records, "
+            "or GitLab MR URLs; use replay_only"
+        )
         raise CollectCaseError(msg)
     for path in _input_paths(request):
         if not path.exists():
@@ -462,7 +967,10 @@ def _write_jira_fixtures(
     result: CollectCaseResult,
 ) -> None:
     jira_dir = cases_dir / "jiras" / request.case_id
+    issue_for_start: Mapping[str, Any] | None = None
+    comments_for_start: Any = None
     if fetched.jira_issue is not None:
+        issue_for_start = fetched.jira_issue
         _write_json(
             jira_dir / "issue.json",
             fetched.jira_issue,
@@ -470,6 +978,9 @@ def _write_jira_fixtures(
             result=result,
         )
     elif request.jira_issue_json is not None:
+        issue_data = _load_json(request.jira_issue_json)
+        if isinstance(issue_data, Mapping):
+            issue_for_start = issue_data
         _copy_file(
             request.jira_issue_json,
             jira_dir / "issue.json",
@@ -477,23 +988,25 @@ def _write_jira_fixtures(
             result=result,
         )
     else:
+        issue_for_start = {
+            "schema_version": SCHEMA_VERSION,
+            "case_id": request.case_id,
+            "case_type": request.case_type,
+            "key": request.case_id,
+            "fields": {
+                "summary": f"TODO: collect Jira summary for {request.case_id}",
+                "components": [{"name": request.package}],
+            },
+        }
         _write_json(
             jira_dir / "issue.json",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "case_id": request.case_id,
-                "case_type": request.case_type,
-                "key": request.case_id,
-                "fields": {
-                    "summary": f"TODO: collect Jira summary for {request.case_id}",
-                    "components": [{"name": request.package}],
-                },
-            },
+            issue_for_start,
             overwrite=request.overwrite,
             result=result,
         )
 
     if fetched.jira_comments is not None:
+        comments_for_start = fetched.jira_comments
         _write_json(
             jira_dir / "comments.json",
             fetched.jira_comments,
@@ -501,6 +1014,7 @@ def _write_jira_fixtures(
             result=result,
         )
     elif request.jira_comments_json is not None:
+        comments_for_start = _load_json(request.jira_comments_json)
         _copy_file(
             request.jira_comments_json,
             jira_dir / "comments.json",
@@ -508,14 +1022,15 @@ def _write_jira_fixtures(
             result=result,
         )
     else:
+        comments_for_start = {
+            "schema_version": SCHEMA_VERSION,
+            "case_id": request.case_id,
+            "case_type": request.case_type,
+            "comments": [],
+        }
         _write_json(
             jira_dir / "comments.json",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "case_id": request.case_id,
-                "case_type": request.case_type,
-                "comments": [],
-            },
+            comments_for_start,
             overwrite=request.overwrite,
             result=result,
         )
@@ -543,6 +1058,19 @@ def _write_jira_fixtures(
                 "case_type": request.case_type,
                 "links": [],
             },
+            overwrite=request.overwrite,
+            result=result,
+        )
+
+    if issue_for_start is not None:
+        _write_json(
+            jira_dir / "starting-issue.json",
+            _build_starting_jira_issue(
+                issue_for_start,
+                comments_for_start,
+                case_id=request.case_id,
+                case_type=request.case_type,
+            ),
             overwrite=request.overwrite,
             result=result,
         )
@@ -585,6 +1113,115 @@ def _links_value(links: Any) -> Any:
             return links["remote_links"]
         return []
     return links
+
+
+def _build_starting_jira_issue(
+    issue: Mapping[str, Any],
+    comments: Any,
+    *,
+    case_id: str,
+    case_type: str | None,
+) -> dict[str, Any]:
+    payload = copy.deepcopy(dict(issue))
+    payload.setdefault("schema_version", SCHEMA_VERSION)
+    payload.setdefault("case_id", case_id)
+    if case_type is not None:
+        payload.setdefault("case_type", case_type)
+    payload.setdefault("key", case_id)
+
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        fields = {}
+    else:
+        fields = copy.deepcopy(dict(fields))
+    payload["fields"] = fields
+
+    fields.setdefault("summary", f"TODO: collect Jira summary for {case_id}")
+    fields.setdefault("description", "")
+    fields.setdefault("components", [])
+    fields.setdefault("fixVersions", [])
+    fields["labels"] = _starting_labels(fields.get("labels"))
+    fields["status"] = _starting_status(fields.get("status"))
+    fields["resolution"] = None
+    fields["comment"] = _starting_comment_block(comments, fields.get("comment"))
+    payload["remote_links"] = []
+    return payload
+
+
+def _starting_labels(labels: Any) -> list[str]:
+    if not isinstance(labels, list):
+        return []
+    return [
+        label
+        for label in labels
+        if isinstance(label, str)
+        and label
+        and label not in YMIR_RESULT_LABELS
+        and not label.startswith("ymir_")
+        and not label.startswith("jotnar_")
+        and "jotnar" not in label
+    ]
+
+
+def _starting_status(status: Any) -> Any:
+    if not isinstance(status, Mapping):
+        return {"name": "New"}
+    name = status.get("name")
+    if isinstance(name, str) and name.lower() in CLOSED_STATUS_NAMES:
+        return {"name": "New"}
+    return copy.deepcopy(dict(status))
+
+
+def _starting_comment_block(comments: Any, issue_comment: Any) -> dict[str, Any]:
+    source = comments if comments is not None else issue_comment
+    comment_values = [
+        copy.deepcopy(dict(comment))
+        for comment in _comment_values(source)
+        if not _is_result_comment(comment)
+    ]
+    return {
+        "comments": comment_values,
+        "maxResults": len(comment_values),
+        "startAt": 0,
+        "total": len(comment_values),
+    }
+
+
+def _is_result_comment(comment: Mapping[str, Any]) -> bool:
+    body = comment.get("body")
+    body_text = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
+    lowered_body = _normalized_text(body_text)
+    if any(pattern in lowered_body for pattern in RESULT_COMMENT_PATTERNS):
+        return True
+
+    author = comment.get("author")
+    if isinstance(author, Mapping):
+        author_text = _normalized_text(
+            " ".join(
+                value
+                for value in (
+                    author.get("name"),
+                    author.get("key"),
+                    author.get("displayName"),
+                    author.get("emailAddress"),
+                )
+                if isinstance(value, str)
+            )
+        )
+        if (
+            "automation bot" in author_text
+            or "e-tool" in author_text
+            or "errata-tool" in author_text
+            or "jotnar" in author_text
+            or "ymir" in author_text
+            or "rhel jira bot" in author_text
+        ):
+            return True
+    return False
+
+
+def _normalized_text(value: str) -> str:
+    return unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower()
 
 
 def _write_mock_data(
@@ -632,6 +1269,17 @@ def _write_mock_data(
             overwrite=request.overwrite,
             result=result,
         )
+    elif fetched.gitlab_patch_body is not None:
+        _write_bytes(
+            cases_dir
+            / "mock_data"
+            / mock_repo.agent
+            / "reference_patches"
+            / f"{request.case_id}.patch",
+            fetched.gitlab_patch_body,
+            overwrite=request.overwrite,
+            result=result,
+        )
 
 
 def _write_web_cache(
@@ -647,8 +1295,9 @@ def _write_web_cache(
     required_urls = list(
         dict.fromkeys(
             [
-                *request.patch_urls,
+                *_effective_patch_urls(request, fetched),
                 *[record.url for record in request.web_records],
+                *[record.url for record in fetched.web_records],
             ]
         )
     )
@@ -657,6 +1306,11 @@ def _write_web_cache(
         destination = cache_dir / "recorded" / f"{index:03d}-{record.source_path.name}"
         _copy_file(record.source_path, destination, overwrite=request.overwrite, result=result)
         recorded_files[record.url] = destination.relative_to(cache_dir).as_posix()
+
+    for record in fetched.web_records:
+        destination = cache_dir / record.relative_path
+        _write_bytes(destination, record.body, overwrite=request.overwrite, result=result)
+        recorded_files[record.url] = record.relative_path
 
     if required_urls or request.network_mode == "replay_only":
         _write_json(
@@ -702,8 +1356,13 @@ def _append_completion_warnings(
     if request.mock_repo is None:
         result.warnings.append("mock_data fixture was not written; provide mock repo metadata")
     if request.network_mode == "replay_only":
-        recorded_urls = {record.url for record in request.web_records}
-        missing = [url for url in request.patch_urls if url not in recorded_urls]
+        recorded_urls = {
+            *[record.url for record in request.web_records],
+            *[record.url for record in fetched.web_records],
+        }
+        missing = [
+            url for url in _effective_patch_urls(request, fetched) if url not in recorded_urls
+        ]
         if missing:
             result.warnings.append(
                 "web_cache manifest requires recorded files for: " + ", ".join(missing)
@@ -716,17 +1375,21 @@ def _effective_patch_urls(
     request: CollectCaseRequest,
     fetched: FetchedEvidence,
 ) -> tuple[str, ...]:
-    del fetched
-    return request.patch_urls
+    urls = [*request.patch_urls]
+    urls.extend(fetched.jira_patch_urls)
+    if fetched.gitlab_patch_url:
+        urls.append(fetched.gitlab_patch_url)
+    return tuple(dict.fromkeys(urls))
 
 
 def _effective_fix_sources(
     request: CollectCaseRequest,
     fetched: FetchedEvidence,
 ) -> tuple[str, ...]:
-    del fetched
-    return request.fix_sources
-
+    sources = [*request.fix_sources]
+    if fetched.gitlab_mr_url:
+        sources.append(fetched.gitlab_mr_url)
+    return tuple(dict.fromkeys(sources))
 
 
 def _write_json(

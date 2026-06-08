@@ -79,19 +79,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     collect = subparsers.add_parser(
         "collect-case",
-        help="scaffold one benchmark case from local evidence files",
+        help="scaffold one benchmark case from local files or read-only evidence fetches",
     )
     collect.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
     collect.add_argument("--case-id", required=True, help="Jira issue key / benchmark case id")
-    collect.add_argument("--case-type", choices=sorted(ALLOWED_CASE_TYPES), required=True)
-    collect.add_argument("--resolution", choices=sorted(ALLOWED_RESOLUTIONS), required=True)
-    collect.add_argument("--package", required=True, help="source package name")
+    collect.add_argument(
+        "--case-type",
+        choices=sorted(ALLOWED_CASE_TYPES),
+        help="benchmark case type; derived from Jira when omitted",
+    )
+    collect.add_argument(
+        "--resolution",
+        choices=sorted(ALLOWED_RESOLUTIONS),
+        help="expected resolution; derived from completed Jira when omitted",
+    )
+    collect.add_argument("--package", help="source package name; derived from Jira when omitted")
     collect.add_argument("--target-branch", help="expected target dist-git branch")
     collect.add_argument("--fix-version", help="expected fix version when branch is not enough")
     collect.add_argument(
         "--expected-basis",
         choices=sorted(ALLOWED_EXPECTED_BASES),
-        default="manual_review",
+        help="ground-truth basis; defaults to historical_jira_state for Jira imports",
     )
     collect.add_argument(
         "--ground-truth-confidence",
@@ -117,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(ALLOWED_NETWORK_MODES),
         help=(
             "expected replay network policy; defaults to replay_only when "
-            "patch/web evidence is provided, otherwise network_denied"
+            "patch/web/GitLab MR evidence is provided, otherwise network_denied"
         ),
     )
     collect.add_argument("--cve-id", dest="cve_ids", action="append", default=[])
@@ -183,10 +191,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Atlassian account email for Jira Basic auth",
     )
     collect.add_argument(
+        "--gitlab-mr",
+        dest="gitlab_mr_url",
+        help="GitLab merge request URL to fetch into web_cache and mock_data",
+    )
+    collect.add_argument(
+        "--gitlab-token-env",
+        default="GITLAB_TOKEN",
+        help="environment variable containing a GitLab private token",
+    )
+    collect.add_argument(
         "--http-timeout",
         type=float,
         default=30.0,
-        help="timeout in seconds for Jira fetches",
+        help="timeout in seconds for Jira/GitLab fetches",
     )
     collect.add_argument("--attachment", dest="attachments", action="append", type=Path, default=[])
     collect.add_argument(
@@ -396,7 +414,7 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         answer_leakage=args.answer_leakage,
         case_status=args.case_status,
         case_status_reason=args.case_status_reason,
-        network_mode=_collect_network_mode(args),
+        network_mode=args.network_mode,
         target_branch=args.target_branch,
         fix_version=args.fix_version,
         cve_ids=tuple(args.cve_ids),
@@ -411,6 +429,8 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         jira_token_env=args.jira_token_env,
         jira_token_file=args.jira_token_file,
         jira_email=args.jira_email,
+        gitlab_mr_url=args.gitlab_mr_url,
+        gitlab_token_env=args.gitlab_token_env,
         http_timeout=args.http_timeout,
         jira_issue_json=args.jira_issue_json,
         jira_comments_json=args.jira_comments_json,
@@ -422,15 +442,6 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         source_lookaside=tuple(args.source_lookaside),
         overwrite=args.overwrite,
     )
-
-
-
-def _collect_network_mode(args: argparse.Namespace) -> str:
-    if args.network_mode is not None:
-        return args.network_mode
-    if args.patch_urls or args.web_records:
-        return "replay_only"
-    return "network_denied"
 
 
 def _collect_mock_repo(args: argparse.Namespace) -> MockRepoInput | None:
