@@ -305,7 +305,13 @@ def test_collect_case_imports_completed_jira_without_repeated_metadata(
         ],
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7": {
             "iid": 7,
+            "target_branch": "c8s",
             "web_url": "https://gitlab.example/group/pkg/-/merge_requests/7",
+            "diff_refs": {
+                "base_sha": "base123",
+                "head_sha": "head123",
+                "start_sha": "start123",
+            },
         },
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/commits": [
             {"id": "abc123", "title": "Fix CVE"}
@@ -345,6 +351,22 @@ def test_collect_case_imports_completed_jira_without_repeated_metadata(
     assert expected["network_mode"] == "replay_only"
     assert expected["patch_urls"] == ["https://gitlab.example/group/pkg/-/merge_requests/7.patch"]
     assert expected["fix_sources"] == ["https://gitlab.example/group/pkg/-/merge_requests/7"]
+    assert result.warnings == []
+
+    mock = json.loads(
+        (cases_dir / "mock_data" / "triage" / "RHEL-12345.json").read_text(encoding="utf-8")
+    )
+    assert mock["repos"] == [
+        {
+            "branch": "c8s",
+            "package": "dnsmasq",
+            "pre_fix_ref": "base123",
+            "remote_url": "https://gitlab.example/group/pkg.git",
+        }
+    ]
+    assert mock["zstream_override"] == {"8": "rhel-8.10.z"}
+    reference_patch = cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch"
+    assert reference_patch.read_text(encoding="utf-8") == "diff --git a/source.c b/source.c\n"
 
     jira_dir = cases_dir / "jiras" / "RHEL-12345"
     full_issue = json.loads((jira_dir / "issue.json").read_text(encoding="utf-8"))
@@ -492,7 +514,13 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     responses = {
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7": {
             "iid": 7,
+            "target_branch": "c9s",
             "web_url": "https://gitlab.example/group/pkg/-/merge_requests/7",
+            "diff_refs": {
+                "base_sha": "inferred-base",
+                "head_sha": "head123",
+                "start_sha": "start123",
+            },
         },
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/commits": [
             {"id": "abc123", "title": "Fix CVE"}
@@ -537,6 +565,15 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     )
     assert expected["patch_urls"] == ["https://gitlab.example/group/pkg/-/merge_requests/7.patch"]
     assert expected["fix_sources"] == ["https://gitlab.example/group/pkg/-/merge_requests/7"]
+    mock = json.loads(
+        (cases_dir / "mock_data" / "triage" / "RHEL-12345.json").read_text(encoding="utf-8")
+    )
+    assert mock["repos"][0] == {
+        "branch": "c9s",
+        "package": "dnsmasq",
+        "pre_fix_ref": "abc123",
+        "remote_url": "https://gitlab.example/group/pkg.git",
+    }
     reference_patch = cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch"
     assert reference_patch.read_text(encoding="utf-8") == ("diff --git a/source.c b/source.c\n")
 
