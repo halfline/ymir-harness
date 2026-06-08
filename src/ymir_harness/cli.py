@@ -99,6 +99,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--variant",
         help="record the benchmark variant name in the aggregate score report",
     )
+    score_many.add_argument(
+        "--provenance",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="record additional run provenance; may be provided more than once",
+    )
     score_many.set_defaults(func=_cmd_score_results)
 
     run = subparsers.add_parser(
@@ -212,6 +219,7 @@ def _cmd_score_results(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         ymir_sha=args.ymir_sha,
         variant=args.variant,
+        provenance=_parse_provenance_or_exit(args.provenance),
     )
     output_path = args.output or args.cases_dir / "reports" / "results.json"
     payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
