@@ -28,6 +28,23 @@ def test_validate_case_directory_accepts_replay_fixture(tmp_path: Path) -> None:
     assert report.cases[0].case_id == "RHEL-12345"
 
 
+def test_validate_case_directory_checks_mock_repo_source_url(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        remote_url="https://gitlab.example/group/pkg.git",
+        source_url=str(repo_path),
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert not report.has_blocking_errors
+    assert report.cases[0].status == "valid"
+
+
 def test_validate_case_directory_reports_blocking_errors(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     _write_json(
@@ -732,6 +749,8 @@ def _write_replay_case(
     patch_urls: list[str] | None = None,
     reference_patch_mode: str | None = "applies",
     reference_patch_exists: bool = True,
+    remote_url: str | None = None,
+    source_url: str | None = None,
     reference_patch_text: str = (
         "diff --git a/source.c b/source.c\n"
         "index 4447cd3..c8c45c2 100644\n"
@@ -774,12 +793,14 @@ def _write_replay_case(
         "repos": [
             {
                 "package": "dnsmasq",
-                "remote_url": str(repo_path),
+                "remote_url": remote_url or str(repo_path),
                 "pre_fix_ref": pre_fix_ref,
                 "branch": "c9s",
             }
         ],
     }
+    if source_url is not None:
+        mock_data["repos"][0]["source_url"] = source_url
     if zstream_override is not None:
         mock_data["zstream_override"] = zstream_override
     _write_json(cases_dir / "mock_data" / "triage" / f"{case_id}.json", mock_data)

@@ -642,6 +642,85 @@ def test_build_run_report_materializes_local_mock_repos(tmp_path: Path) -> None:
     assert json.loads(env["YMIR_BENCHMARK_ZSTREAM_OVERRIDE"]) == {"8": "rhel-8.10.z"}
 
 
+def test_build_run_report_clones_mock_repo_source_url(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    original_url = "https://gitlab.example/group/pkg.git"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "network_mode": "network_denied",
+        },
+    )
+    _write_json(
+        cases_dir / "mock_data" / "triage" / "RHEL-12345.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "repos": [
+                {
+                    "package": "dnsmasq",
+                    "remote_url": original_url,
+                    "source_url": str(source_repo),
+                    "pre_fix_ref": pre_fix_ref,
+                    "branch": "c9s",
+                }
+            ],
+        },
+    )
+    requests = []
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        phase=1,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(request):
+        requests.append(request)
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    env = requests[0].environment
+    repos = json.loads(env["YMIR_BENCHMARK_MOCK_REPOS"])
+    local_path = Path(repos[0]["local_path"])
+    gitconfig_text = Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
+    assert report.entries[0].status == "passed"
+    assert (local_path / "source.c").read_text(encoding="utf-8") == "pre-fix\n"
+    assert repos[0]["original_url"] == original_url
+    assert original_url in gitconfig_text
+    assert str(source_repo) not in gitconfig_text
+    assert env["MOCK_BLOCKED_URLS"] == original_url
+
+
 def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
