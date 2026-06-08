@@ -12,6 +12,11 @@ import yaml
 
 from ymir_harness import __version__
 from ymir_harness.artifacts import artifact_environment
+from ymir_harness.jira_mock import (
+    JiraMockMaterializationError,
+    has_structured_jira_fixture,
+    materialize_ymir_jira_mock,
+)
 from ymir_harness.models import (
     RunCaseResult,
     RunCaseStatus,
@@ -20,6 +25,7 @@ from ymir_harness.models import (
     ValidationIssue,
     ValidationReport,
 )
+from ymir_harness.mock_repos import MockRepoMaterializationError, materialize_case_mock_repos
 from ymir_harness.provenance import collect_provenance
 from ymir_harness.safety import detect_replay_violations, detect_unsafe_operations
 from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
@@ -98,6 +104,7 @@ def build_no_write_environment(
     *,
     base_env: Mapping[str, str] | None = None,
     case_id: str | None = None,
+    jira_mock_dir: Path | None = None,
     network_mode: str | None = None,
     replay_manifest_path: Path | None = None,
     recorded_urls: Sequence[str] = (),
@@ -107,7 +114,7 @@ def build_no_write_environment(
         env.pop(name, None)
 
     env.update(NO_WRITE_ENVIRONMENT)
-    env["JIRA_MOCK_FILES"] = str((cases_dir / "jiras").resolve())
+    env["JIRA_MOCK_FILES"] = str((jira_mock_dir or cases_dir / "jiras").resolve())
     env["MOCK_REPOS_DIR"] = str((cases_dir / "mock_data").resolve())
     env.setdefault("GIT_REPO_BASEPATH", str(results_dir.resolve()))
     env["YMIR_BENCHMARK_CASES_DIR"] = str(cases_dir.resolve())
@@ -320,16 +327,42 @@ def _run_case_result(
     if executor is not None:
         expected = _load_expected_for_policy(expected_path)
         replay_policy = _replay_policy(cases_dir, case_id, expected)
+        try:
+            mock_repo_env = _mock_repo_environment(cases_dir, results_dir, case_id, repetition)
+        except MockRepoMaterializationError as exc:
+            return RunCaseResult(
+                case_id=case_id,
+                case_type=case_type,
+                status="failed",
+                repetition=repetition,
+                expected_path=expected_path if expected_path.is_file() else None,
+                actual_path=actual_path,
+                reason=_mock_repo_setup_failure_reason(exc),
+            )
+        try:
+            jira_mock_dir = _jira_mock_directory(cases_dir, results_dir, case_id, repetition)
+        except JiraMockMaterializationError as exc:
+            return RunCaseResult(
+                case_id=case_id,
+                case_type=case_type,
+                status="failed",
+                repetition=repetition,
+                expected_path=expected_path if expected_path.is_file() else None,
+                actual_path=actual_path,
+                reason=_jira_mock_setup_failure_reason(exc),
+            )
         environment = build_no_write_environment(
             cases_dir,
             results_dir,
             base_env=base_env,
             case_id=case_id,
+            jira_mock_dir=jira_mock_dir,
             network_mode=replay_policy.network_mode,
             replay_manifest_path=replay_policy.manifest_path,
             recorded_urls=replay_policy.recorded_urls,
         )
         environment.update(artifact_environment(actual_path))
+        environment.update(mock_repo_env)
         request = RunCaseRequest(
             case_id=case_id,
             case_type=case_type,
@@ -419,6 +452,53 @@ def _executor_failure_reason(exc: Exception) -> str:
     if detail:
         return f"executor failed: {type(exc).__name__}: {detail}"
     return f"executor failed: {type(exc).__name__}"
+
+
+def _mock_repo_setup_failure_reason(exc: Exception) -> str:
+    detail = str(exc)
+    if detail:
+        return f"mock repo setup failed: {type(exc).__name__}: {detail}"
+    return f"mock repo setup failed: {type(exc).__name__}"
+
+
+def _jira_mock_setup_failure_reason(exc: Exception) -> str:
+    detail = str(exc)
+    if detail:
+        return f"Jira mock setup failed: {type(exc).__name__}: {detail}"
+    return f"Jira mock setup failed: {type(exc).__name__}"
+
+
+def _mock_repo_environment(
+    cases_dir: Path,
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+) -> dict[str, str]:
+    materialized = materialize_case_mock_repos(
+        cases_dir,
+        results_dir,
+        case_id,
+        repetition=repetition,
+    )
+    if materialized is None:
+        return {}
+    return materialized.to_environment()
+
+
+def _jira_mock_directory(
+    cases_dir: Path,
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+) -> Path | None:
+    if not has_structured_jira_fixture(cases_dir, case_id):
+        return None
+    return materialize_ymir_jira_mock(
+        cases_dir,
+        results_dir,
+        case_id,
+        repetition=repetition,
+    )
 
 
 def _actual_result_write_failure_reason(exc: Exception) -> str:
