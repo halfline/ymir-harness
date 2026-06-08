@@ -1,0 +1,14 @@
+{
+  "answer_leakage": "none",
+  "case_id": "RHEL-00001",
+  "case_status": "quarantined",
+  "case_status_reason": "e2e smoke test requiring live LLM access",
+  "case_type": "not_affected",
+  "expected_basis": "manual_review",
+  "ground_truth_confidence": "high",
+  "network_mode": "live_non_reproducible",
+  "notes": "Synthetic seed fixture proving the offline benchmark layout without requiring private historical data.",
+  "package": "dnsmasq",
+  "resolution": "not_affected",
+  "schema_version": 1
+}
