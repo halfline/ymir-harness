@@ -231,6 +231,49 @@ def test_capture_missing_preserves_http_error_status_for_replay(
     assert exc_info.value.read() == b"missing patch\n"
 
 
+def test_capture_missing_records_transport_error_for_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.json"
+    url = "https://gitlab.example/group/pkg/-/commit/missing.patch"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(run_file, f'{{"reason": "unrecorded replay URL blocked: {url}"}}\n')
+
+    def fake_urlopen(_request, timeout: float):
+        assert timeout == 30.0
+        raise OSError("Remote end closed connection without response")
+
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            allowed_hosts=("gitlab.example",),
+        )
+    )
+
+    manifest_path = cases_dir / "web_cache" / "RHEL-12345" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result.failed == []
+    assert result.captured[0].status == 599
+    assert manifest["response_metadata"][url]["status"] == 599
+    assert (
+        manifest["response_metadata"][url]["capture_error"]
+        == "OSError: Remote end closed connection without response"
+    )
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        with pytest.raises(HTTPError) as exc_info:
+            urllib.request.urlopen(url)
+
+    assert exc_info.value.code == 599
+    assert b"Remote end closed connection" in exc_info.value.read()
+
+
 def test_capture_missing_records_jira_search_with_as_of_filter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
