@@ -443,7 +443,9 @@ def _fetch_evidence(
         and (request.jira_url or request.jira_base_url)
     ):
         try:
-            gitlab_records.extend(_fetch_internal_rhel_branch_records(package, request, result))
+            gitlab_records.extend(
+                _fetch_internal_rhel_branch_records(package, fix_version, request, result)
+            )
         except CollectCaseError as exc:
             result.warnings.append(f"skipped internal RHEL branches for {package}: {exc}")
 
@@ -781,16 +783,29 @@ def _maintainer_rules_url(package: str) -> str:
 
 def _fetch_internal_rhel_branch_records(
     package: str,
+    fix_version: str,
     request: CollectCaseRequest,
     result: CollectCaseResult,
 ) -> tuple[FetchedRecord, ...]:
     project_url = _internal_rhel_project_url(package)
-    project_body = _fetch_bytes(
+    project_request = Request(
         project_url,
         headers=_gitlab_headers(request.gitlab_token_env),
-        request=request,
-        result=result,
+        method="GET",
     )
+    try:
+        with urlopen(project_request, timeout=request.http_timeout) as response:
+            project_body = response.read()
+    except HTTPError as exc:
+        result.fetched_urls.append(project_url)
+        if exc.code != 404:
+            raise CollectCaseError(f"failed to fetch {project_url}: HTTP {exc.code}") from exc
+        return _synthetic_internal_rhel_branch_records(package, fix_version, project_url)
+    except OSError as exc:
+        raise CollectCaseError(f"failed to fetch {project_url}: {exc}") from exc
+    else:
+        result.fetched_urls.append(project_url)
+
     project = _json_object_from_body(project_body, project_url)
     project_id = project.get("id")
     if not isinstance(project_id, int):
@@ -815,6 +830,59 @@ def _fetch_internal_rhel_branch_records(
             body=branches_body,
         ),
     )
+
+
+def _synthetic_internal_rhel_branch_records(
+    package: str,
+    fix_version: str,
+    project_url: str,
+) -> tuple[FetchedRecord, ...]:
+    project_id = _synthetic_internal_rhel_project_id(package)
+    project_path = f"redhat/rhel/rpms/{package}"
+    repository_url = f"https://gitlab.com/{project_path}"
+    branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
+    return (
+        FetchedRecord(
+            url=project_url,
+            relative_path=f"gitlab/internal_rhel/{package}/project.json",
+            body=_json_body(
+                {
+                    "id": project_id,
+                    "path_with_namespace": project_path,
+                    "web_url": repository_url,
+                    "http_url_to_repo": f"{repository_url}.git",
+                }
+            ),
+        ),
+        FetchedRecord(
+            url=branches_url,
+            relative_path=f"gitlab/internal_rhel/{package}/branches.json",
+            body=_json_body(
+                [
+                    {
+                        "name": fix_version,
+                        "commit": {"id": "0" * 40, "short_id": "0" * 8},
+                        "merged": False,
+                        "protected": True,
+                        "default": False,
+                        "developers_can_push": False,
+                        "developers_can_merge": False,
+                        "can_push": False,
+                        "web_url": f"{repository_url}/-/tree/{fix_version}",
+                    }
+                ]
+            ),
+        ),
+    )
+
+
+def _synthetic_internal_rhel_project_id(package: str) -> int:
+    digest = hashlib.sha256(f"redhat/rhel/rpms/{package}".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def _json_body(value: Any) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def _internal_rhel_project_url(package: str) -> str:
