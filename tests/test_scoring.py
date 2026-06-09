@@ -55,6 +55,29 @@ def test_score_case_reports_field_failures() -> None:
     assert failed == {"package"}
 
 
+def test_score_case_does_not_treat_fix_version_as_target_branch() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "fix_version": "rhel-8.10.z",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "target_branch": "c8s",
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["target_branch"].status == "skipped"
+
+
 def test_score_case_accepts_alternate_acceptable_outcome() -> None:
     expected = {
         "case_id": "RHEL-12345",
@@ -396,6 +419,28 @@ def test_score_case_reports_fix_source_failures() -> None:
     failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
     assert failed["fix_sources"].expected == ["upstream commit abc123"]
     assert failed["fix_sources"].actual == []
+
+
+def test_score_case_skips_fix_sources_missing_from_actual() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "fix_sources": ["upstream commit abc123"],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["fix_sources"].status == "skipped"
 
 
 def test_score_case_reports_dependency_issue_failures() -> None:
