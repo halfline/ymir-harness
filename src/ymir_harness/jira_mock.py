@@ -104,6 +104,13 @@ def _build_ymir_jira_mock_issue_from_dir(jira_dir: Path, case_id: str) -> dict[s
         links_path if has_links_fixture else issue_path,
         links_required=has_links_fixture,
     )
+    dev_status = _load_json(jira_dir / "dev-status.json", required=False)
+    if isinstance(dev_status, Mapping):
+        payload["dev_status"] = {
+            key: copy.deepcopy(value)
+            for key, value in dev_status.items()
+            if key not in {"schema_version", "case_id", "case_type", "reconstruction"}
+        }
     return payload
 
 
