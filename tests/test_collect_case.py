@@ -599,6 +599,22 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
         "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frules%2Fdnsmasq"
         "/repository/files/AGENTS.md/raw?ref=main"
     )
+    commit_one = "a" * 40
+    commit_two = "b" * 40
+    mr_patch_body = (
+        f"From {commit_one} Mon Sep 17 00:00:00 2001\n"
+        "Subject: [PATCH 1/2] Fix CVE\n"
+        "\n"
+        "diff --git a/source.c b/source.c\n"
+        f"From {commit_two} Mon Sep 17 00:00:00 2001\n"
+        "Subject: [PATCH 2/2] Add regression test\n"
+        "\n"
+        "diff --git a/test.c b/test.c\n"
+    )
+    commit_one_patch_url = f"https://gitlab.example/group/pkg/-/commit/{commit_one}.patch"
+    commit_one_format_url = f"https://gitlab.example/group/pkg/-/commit/{commit_one}?format=.patch"
+    commit_two_patch_url = f"https://gitlab.example/group/pkg/-/commit/{commit_two}.patch"
+    commit_two_format_url = f"https://gitlab.example/group/pkg/-/commit/{commit_two}?format=.patch"
     responses = {
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7": {
             "iid": 7,
@@ -616,9 +632,9 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/changes": {
             "changes": [{"old_path": "source.c", "new_path": "source.c"}]
         },
-        "https://gitlab.example/group/pkg/-/merge_requests/7.patch": (
-            "diff --git a/source.c b/source.c\n"
-        ),
+        "https://gitlab.example/group/pkg/-/merge_requests/7.patch": mr_patch_body,
+        commit_one_patch_url: "diff --git a/source.c b/source.c\n",
+        commit_two_patch_url: "diff --git a/test.c b/test.c\n",
         rules_url: "Follow dnsmasq maintainer rules.\n",
     }
     seen_urls: list[str] = []
@@ -664,7 +680,7 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
         "remote_url": "https://gitlab.example/group/pkg.git",
     }
     reference_patch = cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch"
-    assert reference_patch.read_text(encoding="utf-8") == ("diff --git a/source.c b/source.c\n")
+    assert reference_patch.read_text(encoding="utf-8") == mr_patch_body
 
     manifest = json.loads(
         (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
@@ -674,6 +690,10 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7",
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/commits",
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/changes",
+        commit_one_patch_url,
+        commit_one_format_url,
+        commit_two_patch_url,
+        commit_two_format_url,
         rules_url,
     ]
     assert manifest["recorded_files"] == {
@@ -687,6 +707,10 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
             "gitlab/changes.json"
         ),
         "https://gitlab.example/group/pkg/-/merge_requests/7.patch": ("gitlab/merge_request.patch"),
+        commit_one_patch_url: f"gitlab/commit_patches/{commit_one}.patch",
+        commit_one_format_url: f"gitlab/commit_patches/{commit_one}-format.patch",
+        commit_two_patch_url: f"gitlab/commit_patches/{commit_two}.patch",
+        commit_two_format_url: f"gitlab/commit_patches/{commit_two}-format.patch",
         rules_url: "gitlab/maintainer_rules/dnsmasq/AGENTS.md",
     }
     assert result.fetched_urls == seen_urls == list(responses)
