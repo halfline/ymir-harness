@@ -922,6 +922,75 @@ def test_collect_case_synthesizes_hidden_internal_branch_fixture(
     )
 
 
+def test_collect_case_fetches_internal_branch_records_from_local_jira(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue_json = _write_json(
+        tmp_path / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": {
+                "summary": "Backport CVE fix",
+                "components": [{"name": "glib2"}],
+                "fixVersions": [{"name": "rhel-9.7.z"}],
+                "labels": ["ymir_triaged_backport"],
+            },
+        },
+    )
+    comments_json = _write_json(tmp_path / "comments.json", {"comments": []})
+    links_json = _write_json(tmp_path / "links.json", [])
+    internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fglib2"
+    project_id = collect_case_module._synthetic_internal_rhel_project_id("glib2")
+    internal_branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
+    responses = {
+        internal_project_url: HTTPError(internal_project_url, 404, "Not Found", None, None),
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(responses, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            jira_issue_json=issue_json,
+            jira_comments_json=comments_json,
+            jira_links_json=links_json,
+        )
+    )
+
+    cases_dir = tmp_path / "benchmark_cases"
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    branches = json.loads(
+        (
+            cases_dir
+            / "web_cache"
+            / "RHEL-12345"
+            / "gitlab"
+            / "internal_rhel"
+            / "glib2"
+            / "branches.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert branches[0]["name"] == "rhel-9.7.z"
+    assert (
+        manifest["recorded_files"][internal_project_url]
+        == "gitlab/internal_rhel/glib2/project.json"
+    )
+    assert (
+        manifest["recorded_files"][internal_branches_url]
+        == "gitlab/internal_rhel/glib2/branches.json"
+    )
+    assert seen_urls == result.fetched_urls == [internal_project_url]
+
+
 def test_collect_case_caches_mock_repo_source(tmp_path: Path) -> None:
     source_repo, pre_fix_ref = _create_git_repo(tmp_path)
     cases_dir = tmp_path / "benchmark_cases"
