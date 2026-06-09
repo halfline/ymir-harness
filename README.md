@@ -45,6 +45,12 @@ ymir-harness run \
   --case RHEL-12345 \
   --repeat 3 \
   --workflow ymir-triage
+ymir-harness prepare-case \
+  --cases benchmark_cases/ \
+  --case RHEL-12345 \
+  --jira-url https://redhat.atlassian.net/browse/RHEL-12345 \
+  --workflow ymir-triage \
+  --max-iterations 3
 ymir-harness compare-results \
   reports/baseline-results.json \
   reports/enhanced-results.json \
@@ -299,6 +305,12 @@ each runnable case. The runner applies the per-case no-write environment,
 writes the returned structured triage result to the reserved actual result
 path, scores it against the expected result, and records the score in the run
 entry. A deterministic score mismatch marks the run entry failed.
+Use `prepare-case` for fixture preparation loops. It optionally imports the
+case first when `--jira-url`, `--jira-base-url`, or `--gitlab-mr` is supplied,
+then runs the selected workflow, captures missing replay evidence from the run
+artifacts, and repeats until the run succeeds, no new evidence is captured, or
+`--max-iterations` is reached. Each iteration writes a normal run report under
+`benchmark_cases/reports/runs/RUN_ID-iter-N/`.
 Live workflow adapters install Ymir from the checked-out `ui-workflows`
 submodule during `uv sync`. To benchmark a different Ymir revision, check out
 that revision inside `ui-workflows`, run `uv sync`, and commit the updated
