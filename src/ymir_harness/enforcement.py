@@ -156,17 +156,20 @@ def _patch_subprocess(
             recorded_urls=recorded_urls,
             mock_git_urls=mock_git_urls,
         )
-        replayed = _replayed_shell_download(command, replay_cache, kwargs)
-        if replayed is not None:
-            return replayed
-        replay_miss = _replay_miss_subprocess(
+        replay = _subprocess_replay(
             command,
+            replay_cache,
             network_mode=network_mode,
             mock_git_urls=mock_git_urls,
-            kwargs=kwargs,
         )
-        if replay_miss is not None:
-            return replay_miss
+        if replay is not None:
+            return _completed_process(
+                command,
+                replay.returncode,
+                stdout_body=replay.stdout_body,
+                stderr_body=replay.stderr_body,
+                kwargs=kwargs,
+            )
         return originals.subprocess_run(command, *args, **kwargs)
 
     class guarded_popen(subprocess.Popen):  # type: ignore[type-arg]
@@ -414,6 +417,8 @@ def _check_command(
             return
         if network_mode == "replay_only" and external_urls:
             if _is_git_command(tokens):
+                if _can_replay_git_failure(external_urls, replay_cache):
+                    return
                 raise BenchmarkBoundaryViolation(
                     f"external subprocess URL blocked: {external_urls[0]}"
                 )
@@ -428,23 +433,6 @@ def _check_command(
             raise BenchmarkBoundaryViolation(f"fixture replay violation blocked: {violations[0]}")
 
 
-def _replayed_shell_download(
-    command: Any,
-    replay_cache: ReplayCache | None,
-    kwargs: Mapping[str, Any],
-) -> subprocess.CompletedProcess[Any] | None:
-    replay = _cached_shell_download(command, replay_cache)
-    if replay is None:
-        return None
-    return _completed_process(
-        command,
-        replay.returncode,
-        stdout_body=replay.stdout_body,
-        stderr_body=replay.stderr_body,
-        kwargs=kwargs,
-    )
-
-
 def _subprocess_replay(
     command: Any,
     replay_cache: ReplayCache | None,
@@ -454,6 +442,9 @@ def _subprocess_replay(
     cached = _cached_shell_download(command, replay_cache)
     if cached is not None:
         return cached
+    git_failure = _cached_git_failure(command, replay_cache)
+    if git_failure is not None:
+        return git_failure
     return _replay_miss_subprocess_payload(
         command,
         network_mode=network_mode,
@@ -479,26 +470,25 @@ def _cached_shell_download(
     )
 
 
-def _replay_miss_subprocess(
+def _cached_git_failure(
     command: Any,
-    *,
-    network_mode: str | None,
-    mock_git_urls: Sequence[str],
-    kwargs: Mapping[str, Any],
-) -> subprocess.CompletedProcess[Any] | None:
-    replay = _replay_miss_subprocess_payload(
-        command,
-        network_mode=network_mode,
-        mock_git_urls=mock_git_urls,
-    )
-    if replay is None:
+    replay_cache: ReplayCache | None,
+) -> _SubprocessReplay | None:
+    if replay_cache is None:
         return None
-    return _completed_process(
-        command,
-        replay.returncode,
-        stdout_body=replay.stdout_body,
-        stderr_body=replay.stderr_body,
-        kwargs=kwargs,
+
+    tokens = _command_tokens(command)
+    external_urls = _external_urls(tokens)
+    if not external_urls or not _is_git_command(tokens):
+        return None
+
+    failure = replay_cache.git_failure_for_urls(external_urls)
+    if failure is None:
+        return None
+    return _SubprocessReplay(
+        returncode=failure.returncode,
+        stdout_body=failure.stdout,
+        stderr_body=failure.stderr,
     )
 
 
@@ -586,6 +576,15 @@ def _can_replay_url(
     if url in recorded_urls:
         return True
     return replay_cache is not None and replay_cache.has_url(url)
+
+
+def _can_replay_git_failure(
+    urls: Sequence[str],
+    replay_cache: ReplayCache | None,
+) -> bool:
+    if replay_cache is None:
+        return False
+    return replay_cache.git_failure_for_urls(list(urls)) is not None
 
 
 def _patch_socket(originals: _PatchState) -> None:

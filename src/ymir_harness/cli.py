@@ -701,7 +701,8 @@ def _cmd_capture_missing(args: argparse.Namespace) -> int:
         sys.stdout.write(payload)
     else:
         sys.stdout.write(
-            f"captured {len(result.captured)} missing URL(s); "
+            f"captured {len(result.captured)} missing URL(s), "
+            f"{len(result.captured_git_failures)} git failure(s); "
             f"skipped {len(result.skipped)}; failed {len(result.failed)}\n"
         )
     return 1 if result.failed else 0
@@ -738,6 +739,7 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
                     "  capture: "
                     f"{len(capture['captured'])} URL(s), "
                     f"{len(capture['captured_jira'])} Jira request(s), "
+                    f"{len(capture['captured_git_failures'])} git failure(s), "
                     f"{len(capture['failed'])} failure(s)\n"
                 )
             if auto_allowed_hosts := iteration.get("auto_allowed_hosts"):
@@ -813,6 +815,7 @@ def _prepare_case(
             len(capture_result.captured)
             + len(capture_result.captured_jira)
             + len(capture_result.captured_source)
+            + len(capture_result.captured_git_failures)
         )
         if captured_count == 0:
             payload["status"] = "blocked"
@@ -883,12 +886,14 @@ def _merge_capture_results(
     base.captured.extend(update.captured)
     base.captured_jira.extend(update.captured_jira)
     base.captured_source.extend(update.captured_source)
+    base.captured_git_failures.extend(update.captured_git_failures)
     base.skipped.extend(update.skipped)
     base.failed.extend(update.failed)
 
     captured_urls = {capture.url for capture in base.captured}
     captured_urls.update(capture.url for capture in base.captured_jira)
     captured_urls.update(capture.url for capture in base.captured_source)
+    captured_urls.update(capture.url for capture in base.captured_git_failures)
     base.skipped = [skip for skip in base.skipped if skip.url not in captured_urls]
     return base
 

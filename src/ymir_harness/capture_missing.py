@@ -141,6 +141,20 @@ class CapturedSource:
 
 
 @dataclass(frozen=True)
+class CapturedGitFailure:
+    url: str
+    returncode: int
+    stderr: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "url": self.url,
+            "returncode": self.returncode,
+            "stderr": self.stderr,
+        }
+
+
+@dataclass(frozen=True)
 class CaptureFailure:
     url: str
     reason: str
@@ -159,6 +173,7 @@ class CaptureMissingResult:
     captured: list[CapturedResponse] = field(default_factory=list)
     captured_jira: list[CapturedJiraRequest] = field(default_factory=list)
     captured_source: list[CapturedSource] = field(default_factory=list)
+    captured_git_failures: list[CapturedGitFailure] = field(default_factory=list)
     skipped: list[CaptureFailure] = field(default_factory=list)
     failed: list[CaptureFailure] = field(default_factory=list)
 
@@ -172,6 +187,7 @@ class CaptureMissingResult:
             "captured": [capture.to_json() for capture in self.captured],
             "captured_jira": [capture.to_json() for capture in self.captured_jira],
             "captured_source": [capture.to_json() for capture in self.captured_source],
+            "captured_git_failures": [capture.to_json() for capture in self.captured_git_failures],
             "skipped": [skip.to_json() for skip in self.skipped],
             "failed": [failure.to_json() for failure in self.failed],
         }
@@ -193,7 +209,9 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
         cases_dir=cases_dir,
         run_path=run_path,
     )
-    urls = _blocked_urls_from_run_path(run_path)
+    blocked_urls = blocked_urls_from_run_path(run_path)
+    urls = list(dict.fromkeys(blocked.url for blocked in blocked_urls))
+    url_reasons = _blocked_url_reasons(blocked_urls)
     result.candidate_urls.extend(urls)
     jira_requests = _blocked_jira_requests_from_run_path(run_path)
     result.candidate_jira_requests.extend(miss.to_json() for miss in jira_requests)
@@ -203,18 +221,26 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
     required_urls = _manifest_list(manifest.get("required_urls"))
     recorded_files = _manifest_mapping(manifest.get("recorded_files"))
     response_metadata = _manifest_mapping(manifest.get("response_metadata"))
+    git_failures = _manifest_mapping(manifest.get("git_failures"))
 
     for url in urls:
-        if project_url := _git_source_project_url(url):
+        is_git_subprocess_url = "external subprocess URL blocked" in url_reasons.get(url, ())
+        if is_git_subprocess_url and (project_url := _git_source_project_url(url)):
             if not _allowed_url(project_url, request.allowed_hosts):
                 result.skipped.append(CaptureFailure(url=url, reason="host is not allowed"))
+                continue
+            if _git_failure_is_recorded(git_failures, url) and not request.overwrite:
+                result.skipped.append(
+                    CaptureFailure(url=url, reason="git failure is already recorded")
+                )
                 continue
             if request.dry_run:
                 continue
             try:
                 captured = _capture_git_source_repo(project_url, cases_dir, request)
             except CaptureMissingError as exc:
-                result.failed.append(CaptureFailure(url=url, reason=str(exc)))
+                captured_failure = _record_git_failure(git_failures, url, project_url, str(exc))
+                result.captured_git_failures.append(captured_failure)
                 continue
             if captured is None:
                 result.skipped.append(
@@ -365,10 +391,15 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             )
         )
 
-    if not request.dry_run and result.captured:
+    manifest_changed = bool(result.captured or result.captured_git_failures)
+    if not request.dry_run and manifest_changed:
         manifest["required_urls"] = required_urls
         manifest["recorded_files"] = recorded_files
         manifest["response_metadata"] = response_metadata
+        if git_failures:
+            manifest["git_failures"] = git_failures
+        else:
+            manifest.pop("git_failures", None)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -380,6 +411,13 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
 
 def _blocked_urls_from_run_path(run_path: Path) -> list[str]:
     return list(dict.fromkeys(blocked.url for blocked in blocked_urls_from_run_path(run_path)))
+
+
+def _blocked_url_reasons(blocked_urls: Sequence[BlockedUrl]) -> dict[str, tuple[str, ...]]:
+    reasons: dict[str, list[str]] = {}
+    for blocked in blocked_urls:
+        reasons.setdefault(blocked.url, []).append(blocked.reason)
+    return {url: tuple(dict.fromkeys(url_reasons)) for url, url_reasons in reasons.items()}
 
 
 def _blocked_jira_requests_from_run_path(run_path: Path) -> list[JiraReplayMiss]:
@@ -923,6 +961,41 @@ def _capture_git_source_repo(
     )
 
 
+def _record_git_failure(
+    git_failures: dict[str, Any],
+    url: str,
+    project_url: str,
+    reason: str,
+) -> CapturedGitFailure:
+    stderr = reason if reason.endswith("\n") else f"{reason}\n"
+    failure = {
+        "returncode": 128,
+        "stdout": "",
+        "stderr": stderr,
+    }
+    for alias in _git_failure_aliases(url, project_url):
+        git_failures[alias] = failure
+    return CapturedGitFailure(url=url, returncode=128, stderr=stderr)
+
+
+def _git_failure_is_recorded(git_failures: Mapping[str, Any], url: str) -> bool:
+    return any(alias in git_failures for alias in _git_failure_aliases(url, url))
+
+
+def _git_failure_aliases(url: str, project_url: str) -> tuple[str, ...]:
+    aliases: list[str] = []
+    for value in (url, project_url, _git_clone_url(project_url)):
+        canonical = canonicalize_replay_url(value)
+        if not canonical:
+            continue
+        aliases.append(canonical)
+        if canonical.endswith(".git"):
+            aliases.append(canonical.removesuffix(".git"))
+        else:
+            aliases.append(f"{canonical}.git")
+    return tuple(dict.fromkeys(aliases))
+
+
 def _git_source_project_url(url: str) -> str | None:
     parsed = urlparse(canonicalize_replay_url(url))
     if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
@@ -935,7 +1008,9 @@ def _git_source_project_url(url: str) -> str | None:
     parts = [part for part in path.split("/") if part]
     if hostname == "github.com" and len(parts) == 2:
         return f"{parsed.scheme}://{parsed.netloc}/{'/'.join(parts)}"
-    if hostname in {"gitlab.com", "gitlab.gnome.org"}:
+    if hostname in {"gitlab.com", "gitlab.gnome.org"} or (
+        hostname.startswith("gitlab.") and url.endswith(".git")
+    ):
         if len(parts) < 2 or parts[0] == "api" or "/-/" in f"/{path}/":
             return None
         return f"{parsed.scheme}://{parsed.netloc}/{'/'.join(parts)}"

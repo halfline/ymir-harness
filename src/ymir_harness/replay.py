@@ -69,6 +69,13 @@ class _SourcePatchResponse:
     headers: Mapping[str, str]
 
 
+@dataclass(frozen=True)
+class GitFailureReplay:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
 TRAILING_ESCAPED_URL_GARBAGE_RE = re.compile(r"(?:\\+[nrt]|\\+)+$", re.IGNORECASE)
 
 
@@ -96,6 +103,7 @@ class ReplayCache:
         self.source_cache_dir = source_cache_dir
         self._recorded_files = self._load_recorded_files(manifest_path)
         self._response_metadata = self._load_response_metadata(manifest_path)
+        self._git_failures = self._load_git_failures(manifest_path)
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "ReplayCache | None":
@@ -115,6 +123,21 @@ class ReplayCache:
     def has_url(self, url: Any) -> bool:
         url = _url_text(url)
         return url in self._recorded_files or self._source_repo_for_url(url) is not None
+
+    def git_failure_for_urls(self, urls: list[str]) -> GitFailureReplay | None:
+        failures = [self._git_failure_for_url(url) for url in urls]
+        if not failures or any(failure is None for failure in failures):
+            return None
+
+        replay_failures = [failure for failure in failures if failure is not None]
+        return GitFailureReplay(
+            returncode=next(
+                (failure.returncode for failure in replay_failures if failure.returncode != 0),
+                replay_failures[0].returncode,
+            ),
+            stdout=b"".join(failure.stdout for failure in replay_failures),
+            stderr=b"".join(failure.stderr for failure in replay_failures),
+        )
 
     def read_bytes(self, url: Any) -> bytes:
         url = _url_text(url)
@@ -228,8 +251,31 @@ class ReplayCache:
         return {
             canonicalize_replay_url(url): metadata
             for url, metadata in response_metadata.items()
-            if isinstance(url, str) and canonicalize_replay_url(url) and isinstance(metadata, Mapping)
+            if isinstance(url, str)
+            and canonicalize_replay_url(url)
+            and isinstance(metadata, Mapping)
         }
+
+    def _load_git_failures(self, manifest_path: Path) -> dict[str, GitFailureReplay]:
+        manifest = self._load_manifest(manifest_path)
+        git_failures = manifest.get("git_failures")
+        if not isinstance(git_failures, Mapping):
+            return {}
+
+        output: dict[str, GitFailureReplay] = {}
+        for url, payload in git_failures.items():
+            canonical_url = canonicalize_replay_url(url) if isinstance(url, str) else ""
+            if not canonical_url or not isinstance(payload, Mapping):
+                continue
+            returncode = payload.get("returncode")
+            stdout = payload.get("stdout")
+            stderr = payload.get("stderr")
+            output[canonical_url] = GitFailureReplay(
+                returncode=returncode if isinstance(returncode, int) else 128,
+                stdout=stdout.encode("utf-8") if isinstance(stdout, str) else b"",
+                stderr=stderr.encode("utf-8") if isinstance(stderr, str) else b"",
+            )
+        return output
 
     def _load_manifest(self, manifest_path: Path) -> Mapping[str, Any]:
         try:
@@ -239,6 +285,13 @@ class ReplayCache:
         if not isinstance(manifest, Mapping):
             raise ReplayCacheError(f"replay manifest must contain an object: {manifest_path}")
         return manifest
+
+    def _git_failure_for_url(self, url: str) -> GitFailureReplay | None:
+        for alias in _git_url_aliases(url):
+            failure = self._git_failures.get(alias)
+            if failure is not None:
+                return failure
+        return None
 
     def _source_response(self, url: str) -> _SourcePatchResponse | None:
         patch_response = self._source_patch_response(url)
@@ -522,6 +575,16 @@ def _normalized_git_path(path: str) -> str:
     if value.endswith(".git"):
         value = value.removesuffix(".git")
     return value.strip("/").lower()
+
+
+def _git_url_aliases(url: str) -> tuple[str, ...]:
+    url = canonicalize_replay_url(url)
+    aliases = [url]
+    if url.endswith(".git"):
+        aliases.append(url.removesuffix(".git"))
+    else:
+        aliases.append(f"{url}.git")
+    return tuple(dict.fromkeys(alias for alias in aliases if alias))
 
 
 def request_url(value: Any, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> str | None:
