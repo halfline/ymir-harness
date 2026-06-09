@@ -4,6 +4,10 @@ import asyncio
 import importlib
 import inspect
 import os
+import socket
+import subprocess
+import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
@@ -18,6 +22,7 @@ from ymir_harness.scoring import load_json_file
 AsyncWorkflow = Callable[..., Awaitable[Any]]
 AgentFactory = Callable[..., Any]
 MCP_GATEWAY_URL_ENV = "MCP_GATEWAY_URL"
+GATEWAY_START_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -122,19 +127,11 @@ async def _run_ymir_triage(
     workflow: AsyncWorkflow | None,
     agent_factory: AgentFactory | None,
 ) -> RunCaseExecution:
-    missing_dependency = _live_workflow_dependency_failure(
-        request,
-        workflow=workflow,
-        workflow_name="triage",
-    )
-    if missing_dependency is not None:
-        return missing_dependency
-
     workflow_runner, default_agent_factory = _triage_dependencies(workflow, agent_factory)
 
-    with _request_environment(request):
+    with _workflow_environment(request, workflow=workflow) as effective_request:
         state = await workflow_runner(
-            request.case_id,
+            effective_request.case_id,
             True,
             default_agent_factory,
             auto_chain=False,
@@ -164,17 +161,9 @@ async def _run_ymir_backport(
     if isinstance(inputs, RunCaseExecution):
         return inputs
 
-    missing_dependency = _live_workflow_dependency_failure(
-        request,
-        workflow=workflow,
-        workflow_name="backport",
-    )
-    if missing_dependency is not None:
-        return missing_dependency
-
     workflow_runner, default_agent_factory = _backport_dependencies(workflow, agent_factory)
 
-    with _request_environment(request):
+    with _workflow_environment(request, workflow=workflow):
         state = await workflow_runner(
             package=inputs.package,
             dist_git_branch=inputs.dist_git_branch,
@@ -209,17 +198,9 @@ async def _run_ymir_rebase(
     if isinstance(inputs, RunCaseExecution):
         return inputs
 
-    missing_dependency = _live_workflow_dependency_failure(
-        request,
-        workflow=workflow,
-        workflow_name="rebase",
-    )
-    if missing_dependency is not None:
-        return missing_dependency
-
     workflow_runner = _rebase_dependencies(workflow)
 
-    with _request_environment(request):
+    with _workflow_environment(request, workflow=workflow):
         state = await workflow_runner(
             package=inputs.package,
             dist_git_branch=inputs.dist_git_branch,
@@ -251,17 +232,9 @@ async def _run_ymir_rebuild(
     if isinstance(inputs, RunCaseExecution):
         return inputs
 
-    missing_dependency = _live_workflow_dependency_failure(
-        request,
-        workflow=workflow,
-        workflow_name="rebuild",
-    )
-    if missing_dependency is not None:
-        return missing_dependency
-
     workflow_runner = _rebuild_dependencies(workflow)
 
-    with _request_environment(request):
+    with _workflow_environment(request, workflow=workflow):
         state = await workflow_runner(
             package=inputs.package,
             dist_git_branch=inputs.dist_git_branch,
@@ -285,21 +258,128 @@ async def _run_ymir_rebuild(
     )
 
 
-def _live_workflow_dependency_failure(
+@contextmanager
+def _workflow_environment(
     request: RunCaseRequest,
     *,
     workflow: AsyncWorkflow | None,
-    workflow_name: str,
-) -> RunCaseExecution | None:
+) -> Any:
     if workflow is not None or _string_or_none(request.environment.get(MCP_GATEWAY_URL_ENV)):
-        return None
+        with _request_environment(request):
+            yield request
+        return
 
-    return RunCaseExecution(
-        status="failed",
-        reason=(
-            f"ymir {workflow_name} workflow missing {MCP_GATEWAY_URL_ENV}; "
-            "start the MCP gateway and pass its SSE URL in the run environment"
-        ),
+    with _managed_mcp_gateway(request) as gateway_url:
+        effective_request = _request_with_environment(
+            request,
+            {
+                **request.environment,
+                MCP_GATEWAY_URL_ENV: gateway_url,
+            },
+        )
+        with _request_environment(effective_request):
+            yield effective_request
+
+
+@contextmanager
+def _managed_mcp_gateway(request: RunCaseRequest) -> Any:
+    port = _available_local_port()
+    gateway_dir = request.results_dir / f"repeat-{request.repetition}" / "mcp-gateway"
+    gateway_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = gateway_dir / f"{request.case_id}.stdout.log"
+    stderr_path = gateway_dir / f"{request.case_id}.stderr.log"
+    gateway_url = f"http://127.0.0.1:{port}/sse"
+
+    env = {
+        **request.environment,
+        "MCP_TRANSPORT": "sse",
+        "SSE_PORT": str(port),
+        "PYTHONUNBUFFERED": "1",
+        "JIRA_URL": request.environment.get("JIRA_URL", "https://redhat.atlassian.net"),
+        "DEBUG_FILE": str(gateway_dir / f"{request.case_id}.debug.log"),
+    }
+
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "ymir_harness.ymir_gateway"],
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+        )
+        try:
+            _wait_for_gateway(process, port, stderr_path)
+            yield gateway_url
+        finally:
+            _terminate_gateway(process)
+
+
+def _available_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        return int(server.getsockname()[1])
+
+
+def _wait_for_gateway(
+    process: subprocess.Popen[bytes],
+    port: int,
+    stderr_path: Path,
+) -> None:
+    deadline = time.monotonic() + GATEWAY_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                "managed MCP gateway exited before accepting connections"
+                + _gateway_log_excerpt(stderr_path)
+            )
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.1)
+
+    raise RuntimeError(
+        f"managed MCP gateway did not accept connections within "
+        f"{GATEWAY_START_TIMEOUT_SECONDS:g}s" + _gateway_log_excerpt(stderr_path)
+    )
+
+
+def _terminate_gateway(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _gateway_log_excerpt(stderr_path: Path) -> str:
+    try:
+        text = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    lines = text.splitlines()[-8:]
+    return ": " + " | ".join(lines)
+
+
+def _request_with_environment(
+    request: RunCaseRequest,
+    environment: Mapping[str, str],
+) -> RunCaseRequest:
+    return RunCaseRequest(
+        case_id=request.case_id,
+        case_type=request.case_type,
+        repetition=request.repetition,
+        cases_dir=request.cases_dir,
+        results_dir=request.results_dir,
+        expected_path=request.expected_path,
+        actual_path=request.actual_path,
+        environment=environment,
+        variant=request.variant,
+        features=request.features,
     )
 
 
