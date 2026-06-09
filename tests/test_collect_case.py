@@ -312,6 +312,12 @@ def test_collect_case_imports_completed_jira_without_repeated_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    rules_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frules%2Fdnsmasq"
+        "/repository/files/AGENTS.md/raw?ref=main"
+    )
+    internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fdnsmasq"
+    internal_branches_url = "https://gitlab.com/api/v4/projects/42/repository/branches"
     responses = {
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
             "key": "RHEL-12345",
@@ -359,6 +365,9 @@ def test_collect_case_imports_completed_jira_without_repeated_metadata(
         "https://gitlab.example/group/pkg/-/merge_requests/7.patch": (
             "diff --git a/source.c b/source.c\n"
         ),
+        rules_url: "Follow dnsmasq maintainer rules.\n",
+        internal_project_url: {"id": 42, "path_with_namespace": "redhat/rhel/rpms/dnsmasq"},
+        internal_branches_url: [{"name": "rhel-8.10.z"}],
     }
     seen_urls: list[str] = []
     monkeypatch.setattr(
@@ -405,6 +414,16 @@ def test_collect_case_imports_completed_jira_without_repeated_metadata(
     reference_patch = cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch"
     assert reference_patch.read_text(encoding="utf-8") == "diff --git a/source.c b/source.c\n"
 
+    assert (
+        cases_dir
+        / "web_cache"
+        / "RHEL-12345"
+        / "gitlab"
+        / "internal_rhel"
+        / "dnsmasq"
+        / "branches.json"
+    ).is_file()
+
     jira_dir = cases_dir / "jiras" / "RHEL-12345"
     full_issue = json.loads((jira_dir / "issue.json").read_text(encoding="utf-8"))
     starting = json.loads((jira_dir / "starting-issue.json").read_text(encoding="utf-8"))
@@ -432,6 +451,12 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
     upstream_patch_url = "https://gitlab.gnome.example/GNOME/glib/-/commit/abc123.patch"
     bad_patch_url = "https://gitlab.gnome.example/GNOME/glib/-/commit/not-a-patch.patch"
     mr_url = "https://gitlab.example/redhat/rpms/glib2/-/merge_requests/64"
+    rules_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frules%2Fglib2"
+        "/repository/files/AGENTS.md/raw?ref=main"
+    )
+    internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fglib2"
+    internal_branches_url = "https://gitlab.com/api/v4/projects/43/repository/branches"
     responses = {
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
             "key": "RHEL-12345",
@@ -490,6 +515,9 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
         f"{mr_url}.patch": "diff --git a/source.c b/source.c\n",
         upstream_patch_url: "diff --git a/upstream.c b/upstream.c\n",
         bad_patch_url: "<!DOCTYPE html><html><body>not a patch</body></html>",
+        rules_url: "Follow glib2 maintainer rules.\n",
+        internal_project_url: {"id": 43, "path_with_namespace": "redhat/rhel/rpms/glib2"},
+        internal_branches_url: [{"name": "rhel-9.7.z"}],
     }
     seen_urls: list[str] = []
     monkeypatch.setattr(
@@ -538,6 +566,15 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
     assert manifest["recorded_files"][upstream_patch_url] == "jira/patches/001.patch"
     assert bad_patch_url not in manifest["recorded_files"]
     assert manifest["recorded_files"][f"{mr_url}.patch"] == "gitlab/merge_request.patch"
+
+    assert (
+        manifest["recorded_files"][internal_project_url]
+        == "gitlab/internal_rhel/glib2/project.json"
+    )
+    assert (
+        manifest["recorded_files"][internal_branches_url]
+        == "gitlab/internal_rhel/glib2/branches.json"
+    )
 
     report = validate_case_directory(cases_dir)
     assert not report.has_blocking_errors
