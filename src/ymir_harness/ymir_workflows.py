@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import json
 import os
 import socket
 import subprocess
@@ -25,6 +26,7 @@ AgentFactory = Callable[..., Any]
 MCP_GATEWAY_URL_ENV = "MCP_GATEWAY_URL"
 CHAT_MODEL_ENV = "CHAT_MODEL"
 GATEWAY_START_TIMEOUT_SECONDS = 10.0
+WORKFLOW_PROGRESS_INTERVAL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -140,12 +142,16 @@ async def _run_ymir_triage(
     workflow_runner, default_agent_factory = _triage_dependencies(workflow, agent_factory)
 
     with _workflow_environment(request, workflow=workflow) as effective_request:
-        state = await workflow_runner(
-            effective_request.case_id,
-            True,
-            default_agent_factory,
-            auto_chain=False,
-            silent_run=True,
+        state = await _await_workflow(
+            effective_request,
+            "triage",
+            workflow_runner(
+                effective_request.case_id,
+                True,
+                default_agent_factory,
+                auto_chain=False,
+                silent_run=True,
+            ),
         )
 
     triage_result = getattr(state, "triage_result", None)
@@ -182,16 +188,20 @@ async def _run_ymir_backport(
     workflow_runner, default_agent_factory = _backport_dependencies(workflow, agent_factory)
 
     with _workflow_environment(request, workflow=workflow):
-        state = await workflow_runner(
-            package=inputs.package,
-            dist_git_branch=inputs.dist_git_branch,
-            upstream_patches=list(inputs.upstream_patches),
-            jira_issue=inputs.jira_issue,
-            cve_id=inputs.cve_id,
-            justification=inputs.justification,
-            fix_version=inputs.fix_version,
-            dry_run=True,
-            backport_agent_factory=default_agent_factory,
+        state = await _await_workflow(
+            request,
+            "backport",
+            workflow_runner(
+                package=inputs.package,
+                dist_git_branch=inputs.dist_git_branch,
+                upstream_patches=list(inputs.upstream_patches),
+                jira_issue=inputs.jira_issue,
+                cve_id=inputs.cve_id,
+                justification=inputs.justification,
+                fix_version=inputs.fix_version,
+                dry_run=True,
+                backport_agent_factory=default_agent_factory,
+            ),
         )
 
     backport_result = getattr(state, "backport_result", None)
@@ -227,13 +237,17 @@ async def _run_ymir_rebase(
     workflow_runner = _rebase_dependencies(workflow)
 
     with _workflow_environment(request, workflow=workflow):
-        state = await workflow_runner(
-            package=inputs.package,
-            dist_git_branch=inputs.dist_git_branch,
-            version=inputs.version,
-            jira_issue=inputs.jira_issue,
-            justification=inputs.justification,
-            redis_conn=None,
+        state = await _await_workflow(
+            request,
+            "rebase",
+            workflow_runner(
+                package=inputs.package,
+                dist_git_branch=inputs.dist_git_branch,
+                version=inputs.version,
+                jira_issue=inputs.jira_issue,
+                justification=inputs.justification,
+                redis_conn=None,
+            ),
         )
 
     rebase_result = getattr(state, "rebase_result", None)
@@ -269,15 +283,19 @@ async def _run_ymir_rebuild(
     workflow_runner = _rebuild_dependencies(workflow)
 
     with _workflow_environment(request, workflow=workflow):
-        state = await workflow_runner(
-            package=inputs.package,
-            dist_git_branch=inputs.dist_git_branch,
-            jira_issue=inputs.jira_issue,
-            justification=inputs.justification,
-            dependency_issue=inputs.dependency_issue,
-            dependency_component=inputs.dependency_component,
-            consolidated_issues=list(inputs.consolidated_issues),
-            consolidation_summary=inputs.consolidation_summary,
+        state = await _await_workflow(
+            request,
+            "rebuild",
+            workflow_runner(
+                package=inputs.package,
+                dist_git_branch=inputs.dist_git_branch,
+                jira_issue=inputs.jira_issue,
+                justification=inputs.justification,
+                dependency_issue=inputs.dependency_issue,
+                dependency_component=inputs.dependency_component,
+                consolidated_issues=list(inputs.consolidated_issues),
+                consolidation_summary=inputs.consolidation_summary,
+            ),
         )
 
     if not hasattr(state, "rebuild_success"):
@@ -317,6 +335,7 @@ def _workflow_environment(
     workflow: AsyncWorkflow | None,
 ) -> Any:
     if workflow is not None or _string_or_none(request.environment.get(MCP_GATEWAY_URL_ENV)):
+        _workflow_debug(request, "workflow_environment", mode="external_gateway_or_injected")
         with _request_environment(request):
             yield request
         return
@@ -330,6 +349,12 @@ def _workflow_environment(
             },
         )
         with _request_environment(effective_request):
+            _workflow_debug(
+                effective_request,
+                "workflow_environment",
+                mode="managed_gateway",
+                gateway_url=gateway_url,
+            )
             yield effective_request
 
 
@@ -352,6 +377,13 @@ def _managed_mcp_gateway(request: RunCaseRequest) -> Any:
     }
 
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        _workflow_debug(
+            request,
+            "gateway_starting",
+            stderr_path=str(stderr_path),
+            stdout_path=str(stdout_path),
+            port=port,
+        )
         process = subprocess.Popen(
             [sys.executable, "-m", "ymir_harness.ymir_gateway"],
             stdout=stdout,
@@ -360,9 +392,85 @@ def _managed_mcp_gateway(request: RunCaseRequest) -> Any:
         )
         try:
             _wait_for_gateway(process, port, stderr_path)
+            _workflow_debug(request, "gateway_ready", gateway_url=gateway_url, pid=process.pid)
             yield gateway_url
         finally:
+            _workflow_debug(request, "gateway_stopping", pid=process.pid)
             _terminate_gateway(process)
+            _workflow_debug(request, "gateway_stopped", returncode=process.returncode)
+
+
+async def _await_workflow(
+    request: RunCaseRequest,
+    workflow_name: str,
+    awaitable: Awaitable[Any],
+) -> Any:
+    started_at = time.monotonic()
+    _workflow_debug(request, "workflow_started", workflow=workflow_name)
+    task = asyncio.create_task(awaitable)
+    interval = _workflow_progress_interval(request)
+
+    try:
+        if interval <= 0:
+            result = await task
+        else:
+            while not task.done():
+                done, _pending = await asyncio.wait({task}, timeout=interval)
+                if done:
+                    break
+                _workflow_debug(
+                    request,
+                    "workflow_waiting",
+                    workflow=workflow_name,
+                    elapsed_seconds=round(time.monotonic() - started_at, 3),
+                )
+            result = await task
+    except BaseException as exc:
+        _workflow_debug(
+            request,
+            "workflow_errored",
+            workflow=workflow_name,
+            elapsed_seconds=round(time.monotonic() - started_at, 3),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise
+
+    _workflow_debug(
+        request,
+        "workflow_finished",
+        workflow=workflow_name,
+        elapsed_seconds=round(time.monotonic() - started_at, 3),
+        state_type=type(result).__name__,
+    )
+    return result
+
+
+def _workflow_progress_interval(request: RunCaseRequest) -> float:
+    raw_value = request.environment.get("YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL")
+    if raw_value is None:
+        return WORKFLOW_PROGRESS_INTERVAL_SECONDS
+    try:
+        return float(raw_value)
+    except ValueError:
+        return WORKFLOW_PROGRESS_INTERVAL_SECONDS
+
+
+def _workflow_debug(
+    request: RunCaseRequest,
+    event: str,
+    **fields: Any,
+) -> None:
+    payload: dict[str, Any] = {
+        "event": event,
+        "case_id": request.case_id,
+        "repetition": request.repetition,
+        **fields,
+    }
+    sys.stderr.write("ymir-harness workflow: ")
+    sys.stderr.write(json.dumps(payload, sort_keys=True))
+    sys.stderr.write("\n")
+    sys.stderr.flush()
 
 
 def _available_local_port() -> int:
