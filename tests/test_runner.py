@@ -198,11 +198,14 @@ def test_build_run_report_calls_executor_for_runnable_cases(
         ],
     )
     requests = []
+    executor_cwds = []
+    original_cwd = Path.cwd()
     clock_values = iter([10.0, 12.5, 20.0, 21.25])
     monkeypatch.setattr(runner_module.time, "monotonic", lambda: next(clock_values))
 
     def executor(request):
         requests.append(request)
+        executor_cwds.append(Path.cwd())
         return RunCaseExecution(status="passed", reason="workflow completed")
 
     report = build_run_report(
@@ -222,6 +225,11 @@ def test_build_run_report_calls_executor_for_runnable_cases(
 
     assert len(requests) == 2
     assert [request.repetition for request in requests] == [1, 2]
+    assert executor_cwds == [
+        results_dir.resolve() / "repeat-1" / "workdir",
+        results_dir.resolve() / "repeat-2" / "workdir",
+    ]
+    assert Path.cwd() == original_cwd
     assert {request.case_id for request in requests} == {"RHEL-12345"}
     assert requests[0].cases_dir == cases_dir.resolve()
     assert requests[0].results_dir == results_dir.resolve()
