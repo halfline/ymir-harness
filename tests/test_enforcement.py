@@ -30,11 +30,24 @@ def test_enforcement_serves_recorded_urllib_response(tmp_path: Path) -> None:
     assert response.read() == b"cached advisory\n"
 
 
-def test_enforcement_blocks_unrecorded_urllib_response(tmp_path: Path) -> None:
+def test_enforcement_returns_replay_miss_for_unrecorded_urllib_response(
+    tmp_path: Path,
+) -> None:
     manifest_path = _write_replay_manifest(tmp_path, {})
 
     with enforce_benchmark_boundaries(_environment(manifest_path)):
-        with pytest.raises(BenchmarkBoundaryViolation, match="unrecorded replay URL"):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen("https://example.invalid/missing")
+
+    assert exc_info.value.code == 404
+    assert exc_info.value.read() == (
+        b"replay miss: URL is not recorded in replay cache: https://example.invalid/missing\n"
+    )
+
+
+def test_enforcement_blocks_network_denied_urllib_response() -> None:
+    with enforce_benchmark_boundaries({"YMIR_BENCHMARK_NETWORK_MODE": "network_denied"}):
+        with pytest.raises(BenchmarkBoundaryViolation, match="external network access blocked"):
             urllib.request.urlopen("https://example.invalid/missing")
 
 
@@ -53,6 +66,29 @@ def test_enforcement_serves_recorded_requests_json_response(tmp_path: Path) -> N
 
     assert response.headers["Content-Type"] == "application/json"
     assert response.json() == {"id": 42, "path_with_namespace": "group/pkg"}
+
+
+def test_enforcement_returns_replay_miss_for_unrecorded_requests_response(
+    tmp_path: Path,
+) -> None:
+    requests = pytest.importorskip("requests")
+    url = "https://gitlab.example/api/v4/projects/group%2Fmissing"
+    manifest_path = _write_replay_manifest(tmp_path, {})
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        response = requests.get(url)
+
+    assert response.status_code == 404
+    assert response.text == f"replay miss: URL is not recorded in replay cache: {url}\n"
+
+
+def test_enforcement_blocks_unsafe_requests_write(tmp_path: Path) -> None:
+    requests = pytest.importorskip("requests")
+    manifest_path = _write_replay_manifest(tmp_path, {})
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        with pytest.raises(BenchmarkBoundaryViolation, match="unsafe operation blocked"):
+            requests.post("https://redhat.atlassian.net/rest/api/3/issue", json={})
 
 
 def test_replay_cache_accepts_url_objects(tmp_path: Path) -> None:
@@ -142,6 +178,24 @@ def test_enforcement_replays_recorded_shell_download(tmp_path: Path) -> None:
         )
 
     assert completed.stdout == "cached patch\n"
+
+
+def test_enforcement_returns_replay_miss_for_unrecorded_shell_download(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    url = "https://example.invalid/missing.patch"
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        completed = subprocess.run(
+            ["curl", url],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+
+    assert completed.returncode == 0
+    assert completed.stdout == f"replay miss: URL is not recorded in replay cache: {url}\n"
 
 
 def test_enforcement_replays_gitlab_commit_patch_from_source_cache(tmp_path: Path) -> None:
@@ -271,15 +325,21 @@ def test_enforcement_replays_fedora_raw_url_from_source_cache(tmp_path: Path) ->
     assert exc_info.value.code == 404
 
 
-def test_enforcement_blocks_external_subprocess_url(tmp_path: Path) -> None:
+def test_enforcement_returns_replay_miss_for_external_subprocess_url(tmp_path: Path) -> None:
     manifest_path = _write_replay_manifest(tmp_path, {})
+    url = "https://example.invalid/repo.git"
 
     with enforce_benchmark_boundaries(_environment(manifest_path)):
-        with pytest.raises(BenchmarkBoundaryViolation, match="external subprocess URL"):
-            subprocess.run(
-                ["git", "clone", "https://example.invalid/repo.git"],
-                check=False,
-            )
+        completed = subprocess.run(
+            ["git", "clone", url],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    assert completed.returncode == 128
+    assert completed.stderr == f"replay miss: URL is not recorded in replay cache: {url}\n"
 
 
 def test_enforcement_allows_mock_rewritten_git_subprocess_url(

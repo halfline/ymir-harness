@@ -54,6 +54,39 @@ def test_capture_missing_records_allowed_blocked_url(
     assert recorded_path.read_bytes() == b"diff --git a/source.c b/source.c\n"
 
 
+def test_capture_missing_records_replay_miss_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.json"
+    url = "https://gitlab.example/group/pkg/-/commit/abc123.patch"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        f'{{"reason": "replay miss: URL is not recorded in replay cache: {url}"}}\n',
+    )
+
+    def fake_urlopen(request, timeout: float):
+        assert request.full_url == url
+        assert timeout == 30.0
+        return _Response(b"diff --git a/source.c b/source.c\n", "text/x-patch")
+
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            allowed_hosts=("gitlab.example",),
+        )
+    )
+
+    assert result.candidate_urls == [url]
+    assert [capture.url for capture in result.captured] == [url]
+
+
 def test_capture_missing_skips_disallowed_hosts(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     run_file = tmp_path / "run.json"

@@ -542,9 +542,7 @@ def test_build_run_report_enforces_event_safety_and_replay(tmp_path: Path) -> No
     assert failed["unsafe_operations"].actual == [
         "{'category': 'git_push', 'detail': 'git push: git push origin HEAD', 'source': 'shell'}"
     ]
-    assert failed["replay_violations"].actual == [
-        "unrecorded URL: https://example.invalid/unrecorded"
-    ]
+    assert "replay_violations" not in failed
     actual = json.loads(entry.actual_path.read_text(encoding="utf-8"))
     assert actual["unsafe_operations"] == [
         {
@@ -553,7 +551,8 @@ def test_build_run_report_enforces_event_safety_and_replay(tmp_path: Path) -> No
             "source": "shell",
         }
     ]
-    assert actual["replay_violations"] == ["unrecorded URL: https://example.invalid/unrecorded"]
+    assert actual["replay_misses"] == ["unrecorded URL: https://example.invalid/unrecorded"]
+    assert "replay_violations" not in actual
 
 
 def test_build_run_report_captures_workflow_output_replay_violations(
@@ -620,6 +619,66 @@ def test_build_run_report_captures_workflow_output_replay_violations(
         "RHEL-12345",
         1,
     ).read_text(encoding="utf-8")
+
+
+def test_build_run_report_records_workflow_output_replay_misses_without_failing(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "network_mode": "replay_only",
+        },
+    )
+    _write_web_manifest(cases_dir, "RHEL-12345", [])
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        print(
+            "replay miss: URL is not recorded in replay cache: "
+            "https://example.invalid/missing.patch"
+        )
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    entry = report.entries[0]
+    assert entry.status == "passed"
+    assert entry.reason is None
+    actual = json.loads(entry.actual_path.read_text(encoding="utf-8"))
+    assert actual["replay_misses"] == ["replay miss: https://example.invalid/missing.patch"]
+    assert "replay_violations" not in actual
 
 
 def test_build_run_report_summarizes_artifact_replay_violations_on_executor_failure(
