@@ -836,6 +836,84 @@ def test_build_run_report_clones_mock_repo_source_url(tmp_path: Path) -> None:
     ]
 
 
+def test_build_run_report_rewrites_source_cache_git_remotes(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    source_repo, _pre_fix_ref = _create_git_repo(tmp_path)
+    cached_repo = cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "glib2.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    original_url = "https://gitlab.com/redhat/centos-stream/rpms/glib2.git"
+    fedora_url = "https://src.fedoraproject.org/rpms/glib2.git"
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            original_url,
+        ],
+        check=True,
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "glib2",
+            "network_mode": "network_denied",
+        },
+    )
+    requests = []
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(request):
+        requests.append(request)
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "glib2",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    env = requests[0].environment
+    gitconfig_text = Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
+    blocked_urls = env["MOCK_BLOCKED_URLS"].splitlines()
+    assert report.entries[0].status == "passed"
+    assert original_url in gitconfig_text
+    assert original_url.removesuffix(".git") in gitconfig_text
+    assert fedora_url in gitconfig_text
+    assert fedora_url.removesuffix(".git") in gitconfig_text
+    assert original_url in blocked_urls
+    assert fedora_url in blocked_urls
+
+
 def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
