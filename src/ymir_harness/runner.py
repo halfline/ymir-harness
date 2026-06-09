@@ -40,6 +40,8 @@ NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
     "MOCK_JIRA": "true",
     "JIRA_DRY_RUN": "true",
+    "JIRA_EMAIL": "ymir-harness@example.invalid",
+    "JIRA_TOKEN": "ymir-harness-token",
     "AUTO_CHAIN": "false",
     "SILENT_RUN": "true",
     "GIT_TERMINAL_PROMPT": "0",
