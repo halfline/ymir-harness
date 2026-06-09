@@ -1,13 +1,45 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import re
+import sys
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
-from ymir_harness.ymir_gateway import _patch_ymir_jira_mock_remote_links
+from ymir_harness.ymir_gateway import (
+    _install_optional_gateway_shims,
+    _patch_ymir_jira_mock_remote_links,
+)
+
+
+def test_install_optional_gateway_shims_adds_requests_gssapi_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def import_without_requests_gssapi(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> object:
+        if name == "requests_gssapi" and name not in sys.modules:
+            raise ImportError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.delitem(sys.modules, "requests_gssapi", raising=False)
+    monkeypatch.setattr(builtins, "__import__", import_without_requests_gssapi)
+
+    _install_optional_gateway_shims()
+
+    from requests_gssapi import HTTPSPNEGOAuth
+
+    with pytest.raises(RuntimeError, match="Errata tools are unavailable"):
+        HTTPSPNEGOAuth(opportunistic_auth=True)
 
 
 def test_patch_ymir_jira_mock_remote_links_returns_link_list(
