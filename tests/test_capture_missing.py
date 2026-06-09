@@ -92,6 +92,47 @@ def test_capture_missing_records_replay_miss_url(
     assert [capture.url for capture in result.captured] == [url]
 
 
+def test_capture_missing_records_tool_http_404_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    url = "https://github.com/example/project/commit/fix.patch"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        f"ToolError('Failed to fetch patch from {url}: HTTP 404')\n",
+    )
+
+    def fake_urlopen(_request, timeout: float):
+        assert timeout == 30.0
+        raise HTTPError(
+            url,
+            404,
+            "Not Found",
+            {"Content-Type": "text/plain"},
+            io.BytesIO(b"not found\n"),
+        )
+
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+        )
+    )
+
+    assert result.candidate_urls == [url]
+    assert result.captured[0].status == 404
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["response_metadata"][url]["status"] == 404
+
+
 def test_capture_missing_canonicalizes_escaped_newline_urls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
