@@ -217,6 +217,8 @@ HTTP clients (`urllib`, `requests`, and `aiohttp`) when the URL is declared in
 the replay manifest. Recorded shell `curl`/`wget` downloads made through
 `subprocess.run(..., stdout=PIPE)` are satisfied from cache; unsupported shell
 download forms are blocked instead of falling through to live network.
+Configured model-provider HTTPS calls are allowed so live agents can run while
+fixture and service data still comes from replay inputs.
 
 Expected results may declare `required_artifacts`. Scoring compares that list
 with `generated_artifacts` in the actual result and fails the case when any
