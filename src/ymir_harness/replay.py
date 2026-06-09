@@ -84,10 +84,12 @@ class ReplayCache:
     def recorded_urls(self) -> tuple[str, ...]:
         return tuple(self._recorded_files)
 
-    def has_url(self, url: str) -> bool:
+    def has_url(self, url: Any) -> bool:
+        url = _url_text(url)
         return url in self._recorded_files or self._source_patch_repo_for(url) is not None
 
-    def read_bytes(self, url: str) -> bytes:
+    def read_bytes(self, url: Any) -> bytes:
+        url = _url_text(url)
         if url not in self._recorded_files:
             source_patch = self._source_patch_response(url)
             if source_patch is not None:
@@ -99,7 +101,8 @@ class ReplayCache:
         except OSError as exc:
             raise ReplayCacheError(f"recorded file cannot be read for URL {url}: {path}") from exc
 
-    def open_urllib_response(self, url: str) -> addinfourl:
+    def open_urllib_response(self, url: Any) -> addinfourl:
+        url = _url_text(url)
         body = self.read_bytes(url)
         status = self.status_code(url)
         headers = self.response_headers(url, body)
@@ -114,7 +117,8 @@ class ReplayCache:
         response.msg = "Recorded response"
         return response
 
-    def open_aiohttp_response(self, url: str) -> ReplayResponse:
+    def open_aiohttp_response(self, url: Any) -> ReplayResponse:
+        url = _url_text(url)
         body = self.read_bytes(url)
         return ReplayResponse(
             url,
@@ -123,7 +127,8 @@ class ReplayCache:
             status=self.status_code(url),
         )
 
-    def response_headers(self, url: str, body: bytes | None = None) -> dict[str, str]:
+    def response_headers(self, url: Any, body: bytes | None = None) -> dict[str, str]:
+        url = _url_text(url)
         if url not in self._recorded_files:
             source_patch = self._source_patch_response(url)
             if source_patch is not None:
@@ -141,7 +146,8 @@ class ReplayCache:
         output.setdefault("Content-Type", _content_type_for(path, body))
         return output
 
-    def status_code(self, url: str) -> int:
+    def status_code(self, url: Any) -> int:
+        url = _url_text(url)
         if url not in self._recorded_files:
             source_patch = self._source_patch_response(url)
             if source_patch is not None:
@@ -153,7 +159,8 @@ class ReplayCache:
             return status
         return 200
 
-    def path_for_url(self, url: str) -> Path:
+    def path_for_url(self, url: Any) -> Path:
+        url = _url_text(url)
         recorded = self._recorded_files.get(url)
         if recorded is None:
             raise ReplayCacheError(f"URL is not recorded in replay cache: {url}")
@@ -258,7 +265,12 @@ def _content_type_for(path: Path, body: bytes) -> str:
     return "application/octet-stream"
 
 
+def _url_text(url: Any) -> str:
+    return url if isinstance(url, str) else str(url)
+
+
 def _source_patch_request(url: str) -> _SourcePatchRequest | None:
+    url = _url_text(url)
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
         return None
