@@ -4,6 +4,7 @@ import base64
 import json
 import subprocess
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -691,6 +692,80 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     assert result.fetched_urls == seen_urls == list(responses)
 
 
+def test_collect_case_synthesizes_hidden_internal_branch_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rules_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frules%2Fglib2"
+        "/repository/files/AGENTS.md/raw?ref=main"
+    )
+    internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fglib2"
+    project_id = collect_case_module._synthetic_internal_rhel_project_id("glib2")
+    internal_branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
+    responses = {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+            "key": "RHEL-12345",
+            "fields": {
+                "summary": "CVE-2026-0001 in glib2",
+                "components": [{"name": "glib2"}],
+                "fixVersions": [{"name": "rhel-9.7.z"}],
+                "labels": ["ymir_triaged_backport"],
+            },
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/comment": {"comments": []},
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [],
+        rules_url: "Follow glib2 maintainer rules.\n",
+        internal_project_url: HTTPError(internal_project_url, 404, "Not Found", None, None),
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(responses, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            jira_url="https://issues.example.invalid/browse/RHEL-12345",
+            mock_repo=MockRepoInput(
+                remote_url="https://gitlab.example/glib2.git",
+                pre_fix_ref="abc123",
+                branch="c9s",
+            ),
+        )
+    )
+
+    cases_dir = tmp_path / "benchmark_cases"
+    branches = json.loads(
+        (
+            cases_dir
+            / "web_cache"
+            / "RHEL-12345"
+            / "gitlab"
+            / "internal_rhel"
+            / "glib2"
+            / "branches.json"
+        ).read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert result.warnings == []
+    assert branches[0]["name"] == "rhel-9.7.z"
+    assert (
+        manifest["recorded_files"][internal_project_url]
+        == "gitlab/internal_rhel/glib2/project.json"
+    )
+    assert (
+        manifest["recorded_files"][internal_branches_url]
+        == "gitlab/internal_rhel/glib2/branches.json"
+    )
+
+
 def test_collect_case_caches_mock_repo_source(tmp_path: Path) -> None:
     source_repo, pre_fix_ref = _create_git_repo(tmp_path)
     cases_dir = tmp_path / "benchmark_cases"
@@ -769,6 +844,8 @@ def _fake_urlopen(
         if url not in responses:
             raise OSError(f"unexpected URL: {url}")
         body = responses[url]
+        if isinstance(body, BaseException):
+            raise body
         if not isinstance(body, str):
             body = json.dumps(body)
         return _FakeHttpResponse(body.encode("utf-8"))
