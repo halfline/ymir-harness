@@ -828,8 +828,12 @@ def test_build_run_report_clones_mock_repo_source_url(tmp_path: Path) -> None:
     assert (local_path / "source.c").read_text(encoding="utf-8") == "pre-fix\n"
     assert repos[0]["original_url"] == original_url
     assert original_url in gitconfig_text
+    assert original_url.removesuffix(".git") in gitconfig_text
     assert str(source_repo) not in gitconfig_text
-    assert env["MOCK_BLOCKED_URLS"] == original_url
+    assert env["MOCK_BLOCKED_URLS"].splitlines() == [
+        original_url,
+        original_url.removesuffix(".git"),
+    ]
 
 
 def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> None:

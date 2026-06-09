@@ -91,6 +91,26 @@ def test_enforcement_blocks_unsafe_subprocess_command() -> None:
             subprocess.run(["git", "push", "origin", "HEAD"], check=False)
 
 
+def test_enforcement_blocks_env_wrapped_unsafe_subprocess_command() -> None:
+    environment = {
+        "YMIR_BENCHMARK_NETWORK_MODE": "network_denied",
+        "MOCK_BLOCKED_URLS": "https://example.invalid/repo.git",
+    }
+    with enforce_benchmark_boundaries(environment):
+        with pytest.raises(BenchmarkBoundaryViolation, match="unsafe operation blocked"):
+            subprocess.run(
+                [
+                    "env",
+                    "GIT_TERMINAL_PROMPT=0",
+                    "git",
+                    "push",
+                    "https://example.invalid/repo",
+                    "HEAD",
+                ],
+                check=False,
+            )
+
+
 def test_enforcement_replays_recorded_shell_download(tmp_path: Path) -> None:
     manifest_path = _write_replay_manifest(
         tmp_path,
@@ -122,6 +142,42 @@ def test_enforcement_blocks_external_subprocess_url(tmp_path: Path) -> None:
                 ["git", "clone", "https://example.invalid/repo.git"],
                 check=False,
             )
+
+
+def test_enforcement_allows_mock_rewritten_git_subprocess_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    repo_path = tmp_path / "repo.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(repo_path)], check=True)
+    gitconfig_path = tmp_path / "gitconfig"
+    gitconfig_path.write_text(
+        "\n".join(
+            [
+                f'[url "{repo_path.resolve().as_uri()}"]',
+                "\tinsteadOf = https://example.invalid/repo",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig_path))
+
+    environment = {
+        **_environment(manifest_path),
+        "MOCK_BLOCKED_URLS": "https://example.invalid/repo.git",
+    }
+    with enforce_benchmark_boundaries(environment):
+        completed = subprocess.run(
+            ["git", "ls-remote", "https://example.invalid/repo"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    assert completed.returncode == 0
 
 
 def _environment(manifest_path: Path) -> dict[str, str]:
