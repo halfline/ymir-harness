@@ -313,6 +313,119 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--json", action="store_true", help="print capture result JSON")
     capture.set_defaults(func=_cmd_capture_missing)
 
+    prepare = subparsers.add_parser(
+        "prepare-case",
+        help="collect and iteratively capture replay evidence for one case",
+    )
+    prepare.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
+    prepare.add_argument(
+        "--case",
+        "--case-id",
+        dest="case_id",
+        required=True,
+        help="case id to prepare",
+    )
+    prepare.add_argument(
+        "--workflow",
+        choices=tuple(choice for choice in WORKFLOW_CHOICES if choice != "none"),
+        default="ymir-triage",
+        help="workflow executor to run while preparing the case",
+    )
+    prepare.add_argument("--variant", default="prepare", help="benchmark variant name")
+    prepare.add_argument("--run-id", help="base benchmark run identifier")
+    prepare.add_argument("--ymir-sha", help="record the benchmarked Ymir git SHA")
+    prepare.add_argument(
+        "--repeat",
+        type=_positive_int,
+        default=1,
+        help="number of repetitions to record for each iteration",
+    )
+    prepare.add_argument(
+        "--max-iterations",
+        type=_positive_int,
+        default=3,
+        help="maximum run/capture iterations before stopping",
+    )
+    prepare.add_argument(
+        "--feature",
+        dest="features",
+        action="append",
+        default=[],
+        help="record an enabled feature flag; may be provided more than once",
+    )
+    prepare.add_argument(
+        "--results-dir",
+        type=Path,
+        help="base directory for iteration run artifacts",
+    )
+    prepare.add_argument(
+        "--jira-url",
+        help="Jira issue browse or REST API URL to import before the first run",
+    )
+    prepare.add_argument(
+        "--jira-base-url",
+        help="Jira instance base URL used to import CASE before the first run",
+    )
+    prepare.add_argument(
+        "--gitlab-mr",
+        dest="gitlab_mr_url",
+        help="GitLab merge request URL to import before the first run",
+    )
+    prepare.add_argument(
+        "--mock-repo-cache",
+        type=Path,
+        help="clone or refresh mock repos into this local cache during collection",
+    )
+    prepare.add_argument(
+        "--allow-host",
+        dest="allowed_hosts",
+        action="append",
+        default=[],
+        help=(
+            "extra host allowed for read-only capture; defaults include "
+            f"{', '.join(DEFAULT_ALLOWED_HOSTS)}"
+        ),
+    )
+    prepare.add_argument(
+        "--jira-token-env",
+        default="JIRA_TOKEN",
+        help="environment variable containing a Jira token",
+    )
+    prepare.add_argument("--jira-token-file", type=Path, help="file containing a Jira token")
+    prepare.add_argument("--jira-email", help="Atlassian account email for Jira Basic auth")
+    prepare.add_argument(
+        "--gitlab-token-env",
+        default="GITLAB_TOKEN",
+        help="environment variable containing a GitLab private token",
+    )
+    prepare.add_argument(
+        "--as-of",
+        help=(
+            "historical Jira timestamp to reconstruct search results against; "
+            "defaults to the first existing Ymir/Jotnar result comment when available"
+        ),
+    )
+    prepare.add_argument(
+        "--http-timeout",
+        type=float,
+        default=30.0,
+        help="timeout in seconds for read-only collection and capture",
+    )
+    prepare.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace existing collected or captured fixture files",
+    )
+    prepare.add_argument("--json", action="store_true", help="print preparation result JSON")
+    prepare.add_argument(
+        "--provenance",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="record additional run provenance; may be provided more than once",
+    )
+    prepare.set_defaults(func=_cmd_prepare_case)
+
     score = subparsers.add_parser(
         "score-result",
         help="compare one expected JSON file with one actual result JSON file",
@@ -586,6 +699,240 @@ def _cmd_capture_missing(args: argparse.Namespace) -> int:
             f"skipped {len(result.skipped)}; failed {len(result.failed)}\n"
         )
     return 1 if result.failed else 0
+
+
+def _cmd_prepare_case(args: argparse.Namespace) -> int:
+    provenance = _parse_provenance_or_exit(args.provenance)
+    try:
+        payload, exit_code = _prepare_case(args, provenance)
+    except (CaptureMissingError, CollectCaseError, ValueError) as exc:
+        sys.stderr.write(f"prepare-case failed: {exc}\n")
+        return 2
+
+    encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if args.json:
+        sys.stdout.write(encoded)
+    else:
+        sys.stdout.write(
+            "prepare case: "
+            f"{payload['status']}, "
+            f"{len(payload['iterations'])} iteration(s)\n"
+        )
+        if payload.get("collected"):
+            sys.stdout.write(
+                f"collected {payload['case_id']}: "
+                f"{len(payload['collected'].get('written_paths', []))} files written\n"
+            )
+        for iteration in payload["iterations"]:
+            run = iteration["run"]
+            sys.stdout.write(
+                f"iteration {iteration['iteration']}: "
+                f"run {run['run_id']} -> {run['summary']}\n"
+            )
+            capture = iteration.get("capture")
+            if capture:
+                sys.stdout.write(
+                    "  capture: "
+                    f"{len(capture['captured'])} URL(s), "
+                    f"{len(capture['captured_jira'])} Jira request(s), "
+                    f"{len(capture['failed'])} failure(s)\n"
+                )
+    return exit_code
+
+
+def _prepare_case(
+    args: argparse.Namespace,
+    provenance: dict[str, str],
+) -> tuple[dict[str, object], int]:
+    collected = None
+    if _prepare_should_collect(args):
+        collected = collect_case(_prepare_collect_request(args)).to_json()
+
+    payload: dict[str, object] = {
+        "case_id": args.case_id,
+        "cases_dir": str(args.cases),
+        "workflow": args.workflow,
+        "variant": args.variant,
+        "status": "max_iterations",
+        "collected": collected,
+        "iterations": [],
+    }
+    iterations: list[dict[str, object]] = []
+    payload["iterations"] = iterations
+    exit_code = 1
+
+    for iteration in range(1, args.max_iterations + 1):
+        run_id = _prepare_iteration_run_id(args, iteration)
+        results_dir = _prepare_iteration_results_dir(args, run_id, iteration)
+        run_payload, report, run_exit_code = _prepare_run_iteration(
+            args,
+            run_id=run_id,
+            results_dir=results_dir,
+            provenance=provenance,
+        )
+        iteration_payload: dict[str, object] = {
+            "iteration": iteration,
+            "run": run_payload,
+        }
+        iterations.append(iteration_payload)
+
+        if report is None:
+            payload["status"] = "validation_blocked"
+            exit_code = run_exit_code
+            break
+
+        if not report.has_failures:
+            payload["status"] = "succeeded"
+            exit_code = 0
+            break
+
+        capture_result = capture_missing(_prepare_capture_request(args, results_dir))
+        capture_payload = capture_result.to_json()
+        iteration_payload["capture"] = capture_payload
+        if capture_result.failed:
+            payload["status"] = "capture_failed"
+            exit_code = 2
+            break
+
+        captured_count = len(capture_result.captured) + len(capture_result.captured_jira)
+        if captured_count == 0:
+            payload["status"] = "blocked"
+            exit_code = run_exit_code
+            break
+    else:
+        payload["status"] = "max_iterations"
+        exit_code = 1
+
+    return payload, exit_code
+
+
+def _prepare_should_collect(args: argparse.Namespace) -> bool:
+    return any((args.jira_url, args.jira_base_url, args.gitlab_mr_url))
+
+
+def _prepare_collect_request(args: argparse.Namespace) -> CollectCaseRequest:
+    return CollectCaseRequest(
+        cases_dir=args.cases,
+        case_id=args.case_id,
+        case_status_reason="fixture scaffold prepared for replay experiments",
+        mock_agent=_workflow_mock_agent(args.workflow),
+        mock_repo_cache=args.mock_repo_cache,
+        jira_url=args.jira_url,
+        jira_base_url=args.jira_base_url,
+        jira_token_env=args.jira_token_env,
+        jira_token_file=args.jira_token_file,
+        jira_email=args.jira_email,
+        gitlab_mr_url=args.gitlab_mr_url,
+        gitlab_token_env=args.gitlab_token_env,
+        http_timeout=args.http_timeout,
+        overwrite=args.overwrite,
+    )
+
+
+def _prepare_capture_request(
+    args: argparse.Namespace,
+    results_dir: Path,
+) -> CaptureMissingRequest:
+    allowed_hosts = tuple(dict.fromkeys((*DEFAULT_ALLOWED_HOSTS, *args.allowed_hosts)))
+    return CaptureMissingRequest(
+        cases_dir=args.cases,
+        run_path=results_dir,
+        case_id=args.case_id,
+        allowed_hosts=allowed_hosts,
+        gitlab_token_env=args.gitlab_token_env,
+        jira_token_env=args.jira_token_env,
+        jira_token_file=args.jira_token_file,
+        jira_email=args.jira_email,
+        as_of=args.as_of,
+        http_timeout=args.http_timeout,
+        overwrite=args.overwrite,
+    )
+
+
+def _prepare_run_iteration(
+    args: argparse.Namespace,
+    *,
+    run_id: str,
+    results_dir: Path,
+    provenance: dict[str, str],
+):
+    validation_report = validate_case_directory(
+        args.cases,
+        workflow=_validation_workflow(args.workflow),
+    )
+    manifest_case_ids, manifest_issues = load_case_manifest(args.cases)
+    validation_report = append_global_issues(validation_report, manifest_issues)
+    validation_report = select_validation_cases(
+        validation_report,
+        [args.case_id] or manifest_case_ids,
+    )
+    validation_reports_dir = args.cases / "reports"
+    write_validation_reports(validation_report, validation_reports_dir)
+
+    output_path = results_dir / "run.json"
+    if validation_report.has_blocking_errors:
+        summary = validation_report.summary()
+        return (
+            {
+                "run_id": run_id,
+                "results_dir": str(results_dir),
+                "run_json": None,
+                "summary": summary,
+                "blocked": True,
+            },
+            None,
+            1,
+        )
+
+    report = build_run_report(
+        args.cases,
+        results_dir,
+        validation_report=validation_report,
+        run_id=run_id,
+        variant=args.variant,
+        ymir_sha=args.ymir_sha,
+        features=args.features,
+        repeat=args.repeat,
+        executor=_run_executor(args.workflow),
+        provenance=provenance,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return (
+        {
+            "run_id": run_id,
+            "results_dir": str(results_dir),
+            "run_json": str(output_path),
+            "summary": report.summary(),
+            "blocked": False,
+        },
+        report,
+        1 if report.has_failures else 0,
+    )
+
+
+def _prepare_iteration_run_id(args: argparse.Namespace, iteration: int) -> str:
+    base_run_id = args.run_id or f"{args.variant}-{args.case_id}"
+    return f"{base_run_id}-iter-{iteration}"
+
+
+def _prepare_iteration_results_dir(
+    args: argparse.Namespace,
+    run_id: str,
+    iteration: int,
+) -> Path:
+    if args.results_dir is not None:
+        return args.results_dir / f"iteration-{iteration}"
+    return default_results_dir(args.cases, run_id)
+
+
+def _workflow_mock_agent(workflow: str) -> str:
+    if workflow.startswith("ymir-"):
+        return workflow.removeprefix("ymir-")
+    return "triage"
 
 
 def _cmd_score_result(args: argparse.Namespace) -> int:
