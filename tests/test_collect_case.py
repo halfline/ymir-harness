@@ -716,6 +716,124 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     assert result.fetched_urls == seen_urls == list(responses)
 
 
+def test_collect_case_records_commit_patches_from_jira_merge_request_patch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = "glib2"
+    downstream_mr_url = "https://gitlab.example/redhat/rpms/glib2/-/merge_requests/7"
+    mr_patch_url = "https://gitlab.gnome.example/GNOME/glib/-/merge_requests/4470.patch"
+    commit_one = "c" * 40
+    commit_two = "d" * 40
+    commit_one_patch_url = f"https://gitlab.gnome.example/GNOME/glib/-/commit/{commit_one}.patch"
+    commit_one_format_url = (
+        f"https://gitlab.gnome.example/GNOME/glib/-/commit/{commit_one}?format=.patch"
+    )
+    commit_two_patch_url = f"https://gitlab.gnome.example/GNOME/glib/-/commit/{commit_two}.patch"
+    commit_two_format_url = (
+        f"https://gitlab.gnome.example/GNOME/glib/-/commit/{commit_two}?format=.patch"
+    )
+    rules_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frules%2Fglib2"
+        "/repository/files/AGENTS.md/raw?ref=main"
+    )
+    internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fglib2"
+    project_id = collect_case_module._synthetic_internal_rhel_project_id(package)
+    internal_branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
+    responses = {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+            "key": "RHEL-12345",
+            "fields": {
+                "summary": "GDBusConnection serial overflow",
+                "components": [{"name": package}],
+                "fixVersions": [{"name": "rhel-9.7.z"}],
+                "labels": ["ymir_triaged_backport"],
+            },
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/comment": {
+            "comments": [
+                {
+                    "body": f"*Resolution*: backport\n*Patch URL*: {mr_patch_url}\n",
+                    "author": {"displayName": "Jotnar Project"},
+                }
+            ],
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [
+            {"object": {"url": downstream_mr_url}}
+        ],
+        "https://gitlab.example/api/v4/projects/redhat%2Frpms%2Fglib2/merge_requests/7": {
+            "iid": 7,
+            "target_branch": "c9s",
+            "web_url": downstream_mr_url,
+            "diff_refs": {
+                "base_sha": "base123",
+                "head_sha": "head123",
+                "start_sha": "start123",
+            },
+        },
+        "https://gitlab.example/api/v4/projects/redhat%2Frpms%2Fglib2/merge_requests/7/commits": [
+            {"id": "abc123", "title": "Fix overflow"}
+        ],
+        "https://gitlab.example/api/v4/projects/redhat%2Frpms%2Fglib2/merge_requests/7/changes": {
+            "changes": [{"old_path": "source.c", "new_path": "source.c"}]
+        },
+        f"{downstream_mr_url}.patch": "diff --git a/downstream.c b/downstream.c\n",
+        mr_patch_url: (
+            f"From {commit_one} Mon Sep 17 00:00:00 2001\n"
+            "Subject: [PATCH 1/2] Fix overflow\n"
+            "\n"
+            "diff --git a/source.c b/source.c\n"
+            f"From {commit_two} Mon Sep 17 00:00:00 2001\n"
+            "Subject: [PATCH 2/2] Validate serial\n"
+            "\n"
+            "diff --git a/test.c b/test.c\n"
+        ),
+        commit_one_patch_url: "diff --git a/source.c b/source.c\n",
+        commit_two_patch_url: "diff --git a/test.c b/test.c\n",
+        rules_url: "Follow glib2 maintainer rules.\n",
+        internal_project_url: HTTPError(internal_project_url, 404, "Not Found", None, None),
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(responses, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            jira_url="https://issues.example.invalid/browse/RHEL-12345",
+        )
+    )
+
+    cases_dir = tmp_path / "benchmark_cases"
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert result.warnings == []
+    assert manifest["recorded_files"][mr_patch_url] == "jira/patches/001.patch"
+    assert manifest["recorded_files"][commit_one_patch_url] == (
+        f"gitlab/commit_patches/{commit_one}.patch"
+    )
+    assert manifest["recorded_files"][commit_one_format_url] == (
+        f"gitlab/commit_patches/{commit_one}-format.patch"
+    )
+    assert manifest["recorded_files"][commit_two_patch_url] == (
+        f"gitlab/commit_patches/{commit_two}.patch"
+    )
+    assert manifest["recorded_files"][commit_two_format_url] == (
+        f"gitlab/commit_patches/{commit_two}-format.patch"
+    )
+    assert (
+        manifest["recorded_files"][internal_branches_url]
+        == "gitlab/internal_rhel/glib2/branches.json"
+    )
+    assert result.fetched_urls == seen_urls == list(responses)
+
+
 def test_collect_case_synthesizes_hidden_internal_branch_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
