@@ -9,6 +9,7 @@ import subprocess
 from contextvars import ContextVar
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -36,6 +37,13 @@ MODEL_PROVIDER_HOSTS = {
         "oauth2.googleapis.com",
     ),
 }
+
+
+@dataclass(frozen=True)
+class _SubprocessReplay:
+    returncode: int
+    stdout_body: bytes
+    stderr_body: bytes
 
 
 @contextmanager
@@ -145,6 +153,7 @@ def _patch_subprocess(
 
     class guarded_popen(subprocess.Popen):  # type: ignore[type-arg]
         def __init__(self, command: Any, *args: Any, **kwargs: Any) -> None:
+            self._is_replay_process = False
             _check_command(
                 command,
                 network_mode=network_mode,
@@ -152,17 +161,81 @@ def _patch_subprocess(
                 recorded_urls=recorded_urls,
                 mock_git_urls=mock_git_urls,
             )
-            if _is_shell_download(command):
-                raise BenchmarkBoundaryViolation(
-                    "shell replay through subprocess.Popen is not supported; "
-                    "use Python URL adapters or subprocess.run"
-                )
-            replay_miss_url = _subprocess_replay_miss_url(command, network_mode, mock_git_urls)
-            if replay_miss_url is not None:
-                raise BenchmarkBoundaryViolation(
-                    f"external subprocess Popen replay miss blocked: {replay_miss_url}"
-                )
+            replay = _subprocess_replay(command, replay_cache, network_mode, mock_git_urls)
+            if replay is not None:
+                self._is_replay_process = True
+                self._init_replay(command, replay, kwargs)
+                return
             super().__init__(command, *args, **kwargs)
+
+        def _init_replay(
+            self,
+            command: Any,
+            replay: _SubprocessReplay,
+            kwargs: Mapping[str, Any],
+        ) -> None:
+            stdout_target = kwargs.get("stdout")
+            stderr_target = kwargs.get("stderr")
+            stdout = _stream_value(stdout_target, replay.stdout_body, kwargs)
+            stderr = _stream_value(stderr_target, replay.stderr_body, kwargs)
+            if stderr_target == subprocess.STDOUT and stdout is not None:
+                addition = _output_value(replay.stderr_body, kwargs)
+                stdout = stdout + addition if addition is not None else stdout
+                stderr = None
+
+            self.args = command
+            self.pid = 0
+            self.returncode = replay.returncode
+            self.stdin = (
+                _pipe_reader(b"", kwargs) if kwargs.get("stdin") == subprocess.PIPE else None
+            )
+            self.stdout = _pipe_reader(stdout, kwargs) if stdout_target == subprocess.PIPE else None
+            self.stderr = _pipe_reader(stderr, kwargs) if stderr_target == subprocess.PIPE else None
+            self._replay_stdout = stdout
+            self._replay_stderr = stderr
+            self._child_created = False
+
+        def communicate(self, input: Any = None, timeout: float | None = None) -> tuple[Any, Any]:
+            if not self._is_replay_process:
+                return super().communicate(input=input, timeout=timeout)
+            return self._replay_stdout, self._replay_stderr
+
+        def wait(self, timeout: float | None = None) -> int:
+            if not self._is_replay_process:
+                return super().wait(timeout=timeout)
+            return int(self.returncode)
+
+        def poll(self) -> int:
+            if not self._is_replay_process:
+                return super().poll()
+            return int(self.returncode)
+
+        def kill(self) -> None:
+            if not self._is_replay_process:
+                super().kill()
+                return
+            self.returncode = -9
+
+        def terminate(self) -> None:
+            if not self._is_replay_process:
+                super().terminate()
+                return
+            self.returncode = -15
+
+        def __enter__(self) -> "guarded_popen":
+            if not self._is_replay_process:
+                return super().__enter__()
+            return self
+
+        def __exit__(self, *_exc_info: object) -> None:
+            if not self._is_replay_process:
+                super().__exit__(*_exc_info)
+                return
+            self.wait()
+
+        def __del__(self) -> None:
+            if not self._is_replay_process:
+                super().__del__()
 
     subprocess.run = guarded_run
     subprocess.Popen = guarded_popen
@@ -217,6 +290,38 @@ def _replayed_shell_download(
     replay_cache: ReplayCache | None,
     kwargs: Mapping[str, Any],
 ) -> subprocess.CompletedProcess[Any] | None:
+    replay = _cached_shell_download(command, replay_cache)
+    if replay is None:
+        return None
+    return _completed_process(
+        command,
+        replay.returncode,
+        stdout_body=replay.stdout_body,
+        stderr_body=replay.stderr_body,
+        kwargs=kwargs,
+    )
+
+
+def _subprocess_replay(
+    command: Any,
+    replay_cache: ReplayCache | None,
+    network_mode: str | None,
+    mock_git_urls: Sequence[str],
+) -> _SubprocessReplay | None:
+    cached = _cached_shell_download(command, replay_cache)
+    if cached is not None:
+        return cached
+    return _replay_miss_subprocess_payload(
+        command,
+        network_mode=network_mode,
+        mock_git_urls=mock_git_urls,
+    )
+
+
+def _cached_shell_download(
+    command: Any,
+    replay_cache: ReplayCache | None,
+) -> _SubprocessReplay | None:
     if replay_cache is None or not _is_shell_download(command):
         return None
 
@@ -224,8 +329,11 @@ def _replayed_shell_download(
     if len(urls) != 1 or not replay_cache.has_url(urls[0]):
         return None
 
-    body = replay_cache.read_bytes(urls[0])
-    return _completed_process(command, 0, stdout_body=body, stderr_body=b"", kwargs=kwargs)
+    return _SubprocessReplay(
+        returncode=0,
+        stdout_body=replay_cache.read_bytes(urls[0]),
+        stderr_body=b"",
+    )
 
 
 def _replay_miss_subprocess(
@@ -235,6 +343,28 @@ def _replay_miss_subprocess(
     mock_git_urls: Sequence[str],
     kwargs: Mapping[str, Any],
 ) -> subprocess.CompletedProcess[Any] | None:
+    replay = _replay_miss_subprocess_payload(
+        command,
+        network_mode=network_mode,
+        mock_git_urls=mock_git_urls,
+    )
+    if replay is None:
+        return None
+    return _completed_process(
+        command,
+        replay.returncode,
+        stdout_body=replay.stdout_body,
+        stderr_body=replay.stderr_body,
+        kwargs=kwargs,
+    )
+
+
+def _replay_miss_subprocess_payload(
+    command: Any,
+    *,
+    network_mode: str | None,
+    mock_git_urls: Sequence[str],
+) -> _SubprocessReplay | None:
     if network_mode != "replay_only":
         return None
 
@@ -245,27 +375,11 @@ def _replay_miss_subprocess(
 
     body = b"".join(_replay_miss_body(url) for url in external_urls)
     if _is_shell_download(command):
-        return _completed_process(command, 0, stdout_body=body, stderr_body=b"", kwargs=kwargs)
+        return _SubprocessReplay(returncode=0, stdout_body=body, stderr_body=b"")
 
     stderr = b"".join(_replay_miss_body(url) for url in external_urls)
     returncode = 128 if _is_git_command(tokens) else 1
-    return _completed_process(
-        command, returncode, stdout_body=b"", stderr_body=stderr, kwargs=kwargs
-    )
-
-
-def _subprocess_replay_miss_url(
-    command: Any,
-    network_mode: str | None,
-    mock_git_urls: Sequence[str],
-) -> str | None:
-    if network_mode != "replay_only":
-        return None
-    tokens = _command_tokens(command)
-    external_urls = _external_urls(tokens)
-    if not external_urls or _is_mock_git_command(tokens, external_urls, mock_git_urls):
-        return None
-    return external_urls[0]
+    return _SubprocessReplay(returncode=returncode, stdout_body=b"", stderr_body=stderr)
 
 
 def _completed_process(
@@ -297,8 +411,19 @@ def _stream_value(target: Any, body: bytes, kwargs: Mapping[str, Any]) -> Any:
     if target == subprocess.PIPE:
         return value
     if hasattr(target, "write") and value is not None:
-        target.write(value)
+        try:
+            target.write(value)
+        except TypeError:
+            target.write(body)
     return None
+
+
+def _pipe_reader(value: Any, kwargs: Mapping[str, Any]) -> Any:
+    if value is None:
+        value = _output_value(b"", kwargs)
+    if isinstance(value, str):
+        return io.StringIO(value)
+    return io.BytesIO(value)
 
 
 def _output_value(body: bytes, kwargs: Mapping[str, Any]) -> Any:
