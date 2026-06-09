@@ -830,11 +830,34 @@ def _is_mock_git_command(
 ) -> bool:
     if not external_urls or not mock_git_urls:
         return False
-    command_tokens = _tokens_after_env(tokens)
-    if not command_tokens or PathName(command_tokens[0]).name != "git":
-        return False
     mock_url_set = set(mock_git_urls)
-    return all(url in mock_url_set for url in external_urls)
+    matched_urls = []
+    for segment in _shell_command_segments(tokens):
+        segment_urls = _external_urls(segment)
+        if not segment_urls:
+            continue
+        command_tokens = _tokens_after_env(segment)
+        if not command_tokens or PathName(command_tokens[0]).name != "git":
+            return False
+        if any(url not in mock_url_set for url in segment_urls):
+            return False
+        matched_urls.extend(segment_urls)
+    return set(matched_urls) == set(external_urls)
+
+
+def _shell_command_segments(tokens: Sequence[str]) -> list[list[str]]:
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in {"&&", "||", ";", "|"}:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
 
 
 def _is_git_command(tokens: Sequence[str]) -> bool:
