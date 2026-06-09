@@ -20,7 +20,9 @@ from ymir_harness.capture_missing import (
     DEFAULT_ALLOWED_HOSTS,
     CaptureMissingError,
     CaptureMissingRequest,
+    blocked_urls_from_run_path,
     capture_missing,
+    jira_requests_from_run_path,
 )
 from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
 from ymir_harness.models import (
@@ -778,7 +780,7 @@ def _prepare_case(
             exit_code = run_exit_code
             break
 
-        if not report.has_failures:
+        if not report.has_failures and not _prepare_has_replay_candidates(results_dir):
             payload["status"] = "succeeded"
             exit_code = 0
             break
@@ -798,13 +800,22 @@ def _prepare_case(
         )
         if captured_count == 0:
             payload["status"] = "blocked"
-            exit_code = run_exit_code
+            exit_code = run_exit_code or 1
             break
     else:
         payload["status"] = "max_iterations"
         exit_code = 1
 
     return payload, exit_code
+
+
+def _prepare_has_replay_candidates(results_dir: Path) -> bool:
+    try:
+        return bool(
+            blocked_urls_from_run_path(results_dir) or jira_requests_from_run_path(results_dir)
+        )
+    except CaptureMissingError:
+        return False
 
 
 def _prepare_should_collect(args: argparse.Namespace) -> bool:
