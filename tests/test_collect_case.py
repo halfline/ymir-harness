@@ -553,7 +553,7 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
     assert expected["package"] == "glib2"
     assert expected["fix_version"] == "rhel-9.7.z"
     assert expected["network_mode"] == "replay_only"
-    assert expected["patch_urls"] == [upstream_patch_url, f"{mr_url}.patch"]
+    assert expected["patch_urls"] == [upstream_patch_url]
     assert expected["fix_sources"] == [mr_url]
     assert any("fetched content is not a patch" in warning for warning in result.warnings)
 
@@ -809,11 +809,15 @@ def test_collect_case_records_commit_patches_from_jira_merge_request_patch(
     )
 
     cases_dir = tmp_path / "benchmark_cases"
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
     manifest = json.loads(
         (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
     )
 
     assert result.warnings == []
+    assert expected["patch_urls"] == [mr_patch_url]
     assert manifest["recorded_files"][mr_patch_url] == "jira/patches/001.patch"
     assert manifest["recorded_files"][commit_one_patch_url] == (
         f"gitlab/commit_patches/{commit_one}.patch"
