@@ -548,6 +548,10 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    rules_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frules%2Fdnsmasq"
+        "/repository/files/AGENTS.md/raw?ref=main"
+    )
     responses = {
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7": {
             "iid": 7,
@@ -568,6 +572,7 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
         "https://gitlab.example/group/pkg/-/merge_requests/7.patch": (
             "diff --git a/source.c b/source.c\n"
         ),
+        rules_url: "Follow dnsmasq maintainer rules.\n",
     }
     seen_urls: list[str] = []
     monkeypatch.setattr(
@@ -622,6 +627,7 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7",
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/commits",
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7/changes",
+        rules_url,
     ]
     assert manifest["recorded_files"] == {
         "https://gitlab.example/api/v4/projects/group%2Fpkg/merge_requests/7": (
@@ -634,6 +640,7 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
             "gitlab/changes.json"
         ),
         "https://gitlab.example/group/pkg/-/merge_requests/7.patch": ("gitlab/merge_request.patch"),
+        rules_url: "gitlab/maintainer_rules/dnsmasq/AGENTS.md",
     }
     assert result.fetched_urls == seen_urls == list(responses)
 
