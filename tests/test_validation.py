@@ -73,6 +73,35 @@ def test_validate_case_directory_reports_blocking_errors(tmp_path: Path) -> None
     assert "network_policy_invalid" in categories
 
 
+def test_validate_case_directory_reports_invalid_backport_source(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "redis",
+            "target_branch": "rhel-9.6.z",
+            "expected_basis": "merged_mr",
+            "ground_truth_confidence": "high",
+            "answer_leakage": "none",
+            "case_status": "quarantined",
+            "network_mode": "replay_only",
+            "backport_source": "downstream",
+        },
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    assert any(
+        issue.category == "schema_mismatch" and "backport_source must be one of" in issue.message
+        for issue in report.cases[0].issues
+    )
+
+
 def test_validate_case_directory_reports_invalid_ymir_jira_mock(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     _write_json(
@@ -407,6 +436,33 @@ def test_strict_validation_reports_missing_source_cache_lookaside(tmp_path: Path
         issue.category == "source_cache_incomplete" and "lookaside" in issue.message
         for issue in issues
     )
+
+
+def test_strict_validation_accepts_distgit_backport_without_lookaside(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        requires_source_cache=True,
+    )
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    expected["backport_source"] = "distgit"
+    _write_json(expected_path, expected)
+    upstream_dir = cases_dir / "source_cache" / "RHEL-12345" / "upstream"
+    upstream_dir.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--bare", str(repo_path), str(upstream_dir / "distgit.git")],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert not report.has_blocking_errors
 
 
 def test_strict_validation_reports_empty_source_cache_lookaside(tmp_path: Path) -> None:

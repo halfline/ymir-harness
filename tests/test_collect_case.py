@@ -90,6 +90,7 @@ def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
     assert expected["resolution"] == "backport"
     assert expected["cve_ids"] == ["CVE-2026-0001"]
     assert expected["patch_urls"] == ["https://example.invalid/fix.patch"]
+    assert expected["backport_source"] == "upstream"
     assert expected["reference_patch_mode"] == "scope_only"
     assert (cases_dir / "cases.yaml").read_text(encoding="utf-8") == "cases:\n  - RHEL-12345\n"
 
@@ -119,6 +120,146 @@ def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
 
     report = validate_case_directory(cases_dir)
     assert not report.has_blocking_errors
+
+
+def test_collect_case_infers_distgit_backport_source(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            patch_urls=(
+                "https://gitlab.com/redhat/rhel/rpms/redis/-/commit/"
+                "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1.patch",
+            ),
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["backport_source"] == "distgit"
+
+
+def test_collect_case_infers_mixed_backport_source(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="kea",
+            target_branch="rhel-10.0.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            patch_urls=(
+                "https://github.com/isc-projects/kea/commit/"
+                "1111111111111111111111111111111111111111.patch",
+                "https://gitlab.com/redhat/centos-stream/rpms/kea/-/commit/"
+                "2222222222222222222222222222222222222222.patch",
+            ),
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["backport_source"] == "mixed"
+
+
+def test_collect_case_warns_when_auto_discovered_gitlab_mr_is_private(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    mr_url = "https://gitlab.com/redhat/rhel/rpms/redis/-/merge_requests/6"
+    patch_url = f"{mr_url}.patch"
+    issue_json = _write_json(
+        tmp_path / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": {"summary": "Backport CVE fix"},
+        },
+    )
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": (
+                        "Output from Ymir Backport Agent\n"
+                        f"*Resolution*: backport\n*Patch URL*: {patch_url}\n"
+                    )
+                }
+            ]
+        },
+    )
+    responses: dict[str, object] = {}
+    seen_urls: list[str] = []
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: None)
+    monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            jira_issue_json=issue_json,
+            jira_comments_json=comments_json,
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["patch_urls"] == [patch_url]
+    assert expected["backport_source"] == "distgit"
+    assert any("skipped auto-discovered GitLab MR" in warning for warning in result.warnings)
+    assert any("skipped Jira patch URL" in warning for warning in result.warnings)
+    assert seen_urls == []
+
+
+def test_collect_case_fails_when_explicit_gitlab_mr_is_private(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mr_url = "https://gitlab.com/redhat/rhel/rpms/redis/-/merge_requests/6"
+    api_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis/merge_requests/6"
+    responses = {api_url: HTTPError(api_url, 404, "Not Found", None, None)}
+    seen_urls: list[str] = []
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: None)
+    monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
+
+    with pytest.raises(CollectCaseError, match="failed to fetch"):
+        collect_case(
+            CollectCaseRequest(
+                cases_dir=tmp_path / "benchmark_cases",
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                resolution="backport",
+                package="redis",
+                target_branch="rhel-9.6.z",
+                expected_basis="merged_mr",
+                network_mode="replay_only",
+                gitlab_mr_url=mr_url,
+            )
+        )
+
+    assert seen_urls == [api_url]
 
 
 def test_collect_case_refuses_to_overwrite_existing_files(tmp_path: Path) -> None:
@@ -210,12 +351,6 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
         },
         "https://issues.example.invalid/rest/api/2/issue/RHEL-23456/comment": {"comments": []},
         "https://issues.example.invalid/rest/api/2/issue/RHEL-23456/remotelink": [],
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-34567": {
-            "key": "RHEL-34567",
-            "fields": {"summary": "Ancestor issue"},
-        },
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-34567/comment": {"comments": []},
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-34567/remotelink": [],
     }
     seen_urls: list[str] = []
     monkeypatch.setattr(
@@ -245,9 +380,6 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     linked = json.loads(
         (jira_dir / "linked" / "RHEL-23456" / "starting-issue.json").read_text(encoding="utf-8")
     )
-    linked_ancestor = json.loads(
-        (jira_dir / "linked" / "RHEL-34567" / "starting-issue.json").read_text(encoding="utf-8")
-    )
     assert issue["key"] == "RHEL-12345"
     assert comments["comments"][0]["body"] == "Please backport this fix."
     assert links["links"][0]["object"]["url"] == (
@@ -257,8 +389,7 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     assert starting["remote_links"] == []
     assert linked["key"] == "RHEL-23456"
     assert linked["fields"]["summary"] == "Original issue"
-    assert linked_ancestor["key"] == "RHEL-34567"
-    assert linked_ancestor["fields"]["summary"] == "Ancestor issue"
+    assert not (jira_dir / "linked" / "RHEL-34567").exists()
     assert result.fetched_urls == seen_urls == list(responses)
 
 

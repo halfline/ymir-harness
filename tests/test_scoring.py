@@ -34,6 +34,70 @@ def test_score_case_accepts_nested_triage_result() -> None:
     assert report.summary()["fail"] == 0
 
 
+def test_score_case_infers_distgit_backport_source_from_patch_urls() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "redis",
+        "target_branch": "rhel-9.6.z",
+        "patch_urls": [
+            "https://gitlab.com/redhat/rhel/rpms/redis/-/commit/"
+            "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1.patch"
+        ],
+        "backport_source": "distgit",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "redis",
+        "target_branch": "rhel-9.6.z",
+        "patch_urls": [
+            "https://gitlab.com/redhat/rhel/rpms/redis/-/commit/"
+            "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1.patch"
+        ],
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+    assert {metric.name: metric for metric in report.metrics}["backport_source"].actual == "distgit"
+
+
+def test_score_case_reports_backport_source_mismatch() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "kea",
+        "target_branch": "rhel-10.0.z",
+        "patch_urls": [
+            "https://gitlab.com/redhat/centos-stream/rpms/kea/-/commit/"
+            "2222222222222222222222222222222222222222.patch"
+        ],
+        "backport_source": "distgit",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "kea",
+        "target_branch": "rhel-10.0.z",
+        "patch_urls": [
+            "https://github.com/isc-projects/kea/commit/"
+            "1111111111111111111111111111111111111111.patch"
+        ],
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["backport_source"].expected == "distgit"
+    assert failed["backport_source"].actual == "upstream"
+
+
 def test_score_case_extracts_cve_ids_from_modern_triage_text() -> None:
     expected = {
         "schema_version": 1,
