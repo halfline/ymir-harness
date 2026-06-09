@@ -233,12 +233,12 @@ def test_enforcement_replays_gitlab_commit_patch_from_source_cache(tmp_path: Pat
             f"--git-dir={cached_repo}",
             "config",
             "remote.origin.url",
-            "https://gitlab.example/group/pkg.git",
+            "https://gitlab.gnome.org/group/pkg.git",
         ],
         check=True,
     )
 
-    url = f"https://gitlab.example/group/pkg/-/commit/{commit_sha}.patch"
+    url = f"https://gitlab.gnome.org/group/pkg/-/commit/{commit_sha}.patch"
     environment = {
         **_environment(manifest_path),
         "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
@@ -247,7 +247,7 @@ def test_enforcement_replays_gitlab_commit_patch_from_source_cache(tmp_path: Pat
     with enforce_benchmark_boundaries(environment):
         response = urllib.request.urlopen(url)
         diff_response = urllib.request.urlopen(
-            f"https://gitlab.example/group/pkg/-/commit/{commit_sha}.diff"
+            f"https://gitlab.gnome.org/group/pkg/-/commit/{commit_sha}.diff"
         )
         github_response = urllib.request.urlopen(
             f"https://github.com/group/pkg/commit/{commit_sha}.patch"
@@ -281,7 +281,7 @@ def test_enforcement_returns_404_for_missing_source_cache_commit(tmp_path: Path)
             f"--git-dir={cached_repo}",
             "config",
             "remote.origin.url",
-            "https://gitlab.example/group/pkg.git",
+            "https://gitlab.gnome.org/group/pkg.git",
         ],
         check=True,
     )
@@ -294,9 +294,13 @@ def test_enforcement_returns_404_for_missing_source_cache_commit(tmp_path: Path)
 
     with enforce_benchmark_boundaries(environment):
         with pytest.raises(urllib.error.HTTPError) as exc_info:
-            urllib.request.urlopen(f"https://gitlab.example/group/pkg/-/commit/{missing_sha}.patch")
+            urllib.request.urlopen(
+                f"https://gitlab.gnome.org/group/pkg/-/commit/{missing_sha}.patch"
+            )
         with pytest.raises(urllib.error.HTTPError) as diff_exc_info:
-            urllib.request.urlopen(f"https://gitlab.example/group/pkg/-/commit/{missing_sha}.diff")
+            urllib.request.urlopen(
+                f"https://gitlab.gnome.org/group/pkg/-/commit/{missing_sha}.diff"
+            )
         with pytest.raises(urllib.error.HTTPError) as github_exc_info:
             urllib.request.urlopen(f"https://github.com/group/pkg/commit/{missing_sha}.patch")
 
@@ -306,6 +310,47 @@ def test_enforcement_returns_404_for_missing_source_cache_commit(tmp_path: Path)
     )
     assert diff_exc_info.value.code == 404
     assert github_exc_info.value.code == 404
+
+
+def test_enforcement_does_not_replay_unaliased_same_path_source_cache_url(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    source_repo, commit_sha = _create_git_repo(tmp_path)
+    cached_repo = tmp_path / "source_cache" / "RHEL-12345" / "upstream" / "kea.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            "https://github.com/isc-projects/kea.git",
+        ],
+        check=True,
+    )
+
+    url = f"https://gitlab.isc.org/isc-projects/kea/-/commit/{commit_sha}.patch"
+    environment = {
+        **_environment(manifest_path),
+        "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
+    }
+
+    cache = ReplayCache(manifest_path, source_cache_dir=cached_repo.parent.parent)
+    assert not cache.has_url(url)
+
+    with enforce_benchmark_boundaries(environment):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(url)
+
+    assert exc_info.value.code == 404
+    assert exc_info.value.read() == (
+        f"replay miss: URL is not recorded in replay cache: {url}\n".encode("utf-8")
+    )
 
 
 def test_enforcement_replays_fedora_raw_url_from_source_cache(tmp_path: Path) -> None:
