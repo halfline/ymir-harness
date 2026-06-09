@@ -126,13 +126,6 @@ Validate fixture structure before relying on a case:
 uv run ymir-harness validate-cases examples/benchmark_cases --workflow ymir-triage
 ```
 
-The `benchmark` script is an alias for the same CLI:
-
-```bash
-benchmark validate-cases benchmark_cases/
-```
-
-`benchmark compare` is also accepted as an alias for `benchmark compare-results`.
 Use `--provenance KEY=VALUE` with `run` or `score-results` to add explicit
 run metadata such as `agentic_skills_sha`, `container_image_digest`, or model
 configuration.
