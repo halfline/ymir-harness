@@ -32,14 +32,32 @@ def materialize_ymir_jira_mock(
 ) -> Path:
     target_dir = ymir_jira_mock_dir(results_dir, repetition)
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / case_id
-    payload = build_ymir_jira_mock_issue(cases_dir, case_id)
-    target_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    fixture_dirs = [(case_id, structured_jira_fixture_dir(cases_dir, case_id))]
+    linked_root = structured_jira_fixture_dir(cases_dir, case_id) / "linked"
+    if linked_root.is_dir():
+        fixture_dirs.extend(
+            (path.name, path)
+            for path in sorted(linked_root.iterdir())
+            if path.is_dir() and (path / "issue.json").is_file()
+        )
+
+    for fixture_id, fixture_dir in fixture_dirs:
+        target_path = target_dir / fixture_id
+        payload = _build_ymir_jira_mock_issue_from_dir(fixture_dir, fixture_id)
+        target_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     return target_dir
 
 
 def build_ymir_jira_mock_issue(cases_dir: Path, case_id: str) -> dict[str, Any]:
     jira_dir = structured_jira_fixture_dir(cases_dir, case_id)
+    return _build_ymir_jira_mock_issue_from_dir(jira_dir, case_id)
+
+
+def _build_ymir_jira_mock_issue_from_dir(jira_dir: Path, case_id: str) -> dict[str, Any]:
     starting_issue_path = jira_dir / "starting-issue.json"
     issue_path = starting_issue_path if starting_issue_path.is_file() else jira_dir / "issue.json"
     uses_starting_issue = issue_path == starting_issue_path
