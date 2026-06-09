@@ -154,6 +154,13 @@ def test_materialize_ymir_jira_mock_writes_flat_issue_file(tmp_path: Path) -> No
             "fields": {"summary": "Backport CVE fix"},
         },
     )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "linked" / "RHEL-23456" / "issue.json",
+        {
+            "key": "RHEL-23456",
+            "fields": {"summary": "Linked original issue"},
+        },
+    )
 
     target_dir = materialize_ymir_jira_mock(
         cases_dir,
@@ -166,6 +173,8 @@ def test_materialize_ymir_jira_mock_writes_flat_issue_file(tmp_path: Path) -> No
     payload = json.loads((target_dir / "RHEL-12345").read_text(encoding="utf-8"))
     assert payload["fields"]["comment"]["comments"] == []
     assert payload["remote_links"] == []
+    linked_payload = json.loads((target_dir / "RHEL-23456").read_text(encoding="utf-8"))
+    assert linked_payload["fields"]["summary"] == "Linked original issue"
 
 
 def _write_json(path: Path, data: object) -> None:
