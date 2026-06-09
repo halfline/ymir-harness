@@ -461,7 +461,7 @@ def _fetch_evidence(
         package is not None
         and fix_version is not None
         and request.network_mode != "network_denied"
-        and (request.jira_url or request.jira_base_url)
+        and (request.jira_url or request.jira_base_url or jira_issue_source is not None)
     ):
         try:
             gitlab_records.extend(
