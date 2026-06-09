@@ -20,6 +20,7 @@ from ymir_harness.jira_mock import (
 )
 from ymir_harness.models import (
     ALLOWED_ANSWER_LEAKAGE,
+    ALLOWED_BACKPORT_SOURCES,
     ALLOWED_CASE_STATUSES,
     ALLOWED_CASE_TYPES,
     ALLOWED_EXPECTED_BASES,
@@ -310,6 +311,15 @@ def _validate_expected_metadata(
             )
         )
 
+    _validate_allowed_value(
+        expected.get("backport_source"),
+        ALLOWED_BACKPORT_SOURCES,
+        "backport_source",
+        expected_path,
+        result,
+        required=False,
+    )
+
     reference_patch_mode_required = _implementation_case_requires_reference_patch(expected)
     _validate_allowed_value(
         expected.get("reference_patch_mode"),
@@ -589,6 +599,9 @@ def _validate_source_cache(
         )
 
     _validate_upstream_source_archives(upstream_dir, result)
+
+    if expected.get("backport_source") == "distgit":
+        return
 
     lookaside_dir = source_cache_dir / "lookaside"
     if not lookaside_dir.is_dir():

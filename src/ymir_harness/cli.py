@@ -30,6 +30,7 @@ from ymir_harness.capture_missing import (
 from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
 from ymir_harness.models import (
     ALLOWED_ANSWER_LEAKAGE,
+    ALLOWED_BACKPORT_SOURCES,
     ALLOWED_CASE_STATUSES,
     ALLOWED_CASE_TYPES,
     ALLOWED_EXPECTED_BASES,
@@ -151,6 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--cve-id", dest="cve_ids", action="append", default=[])
     collect.add_argument("--patch-url", dest="patch_urls", action="append", default=[])
     collect.add_argument("--fix-source", dest="fix_sources", action="append", default=[])
+    collect.add_argument(
+        "--backport-source",
+        choices=sorted(ALLOWED_BACKPORT_SOURCES),
+        help="backport patch source bucket; inferred from patch URLs when omitted",
+    )
     collect.add_argument("--notes")
     collect.add_argument(
         "--alternate-outcome",
@@ -619,6 +625,7 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         cve_ids=tuple(args.cve_ids),
         patch_urls=tuple(args.patch_urls),
         fix_sources=tuple(args.fix_sources),
+        backport_source=args.backport_source,
         notes=args.notes,
         alternate_acceptable_outcomes=load_alternate_outcomes(args.alternate_outcomes),
         reference_patch_mode=args.reference_patch_mode,

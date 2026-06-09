@@ -173,6 +173,10 @@ it is set. Override environment variable names with `--jira-token-env` or
 When `--network-mode` is omitted, `collect-case` keeps Jira-only cases
 `network_denied`, but switches to `replay_only` automatically for replay web
 evidence such as a GitLab MR, `--patch-url`, or `--web-record`.
+For backport cases, `collect-case` also records `backport_source` as
+`upstream`, `distgit`, or `mixed` based on the expected patch URLs. GitHub and
+other external project patches are treated as upstream source backports; Red Hat
+and CentOS Stream dist-git commit patches are treated as dist-git backports.
 
 `collect-case` still accepts pre-collected local files through
 `--jira-issue-json`, `--jira-comments-json`, `--jira-links-json`,
@@ -307,6 +311,11 @@ state, and files written to that artifact directory.
 Expected results may declare `fix_sources`. Scoring compares that list with
 `fix_sources` in the actual result to check required upstream commits,
 advisories, or other declared fix origins.
+
+Expected backport results may declare `backport_source` as `upstream`,
+`distgit`, or `mixed`. Scoring compares it with the actual result when present,
+and can infer the actual value from patch URLs when the workflow does not emit
+the field explicitly.
 
 Expected results may declare `dependency_issues`. Scoring compares that list
 with `dependency_issues` in the actual result to check required dependency

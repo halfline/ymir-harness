@@ -174,6 +174,12 @@ def _score_case_once(
             optional=True,
             skip_missing_actual=True,
         ),
+        _compare(
+            "backport_source",
+            _normalize_token(expected.get("backport_source")),
+            normalized_actual["backport_source"],
+            optional=True,
+        ),
         _patch_urls_metric(
             expected,
             normalized_actual["patch_urls"],
@@ -262,6 +268,7 @@ def normalize_actual_result(actual: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "cve_ids": _normalize_cve_ids(actual, nested),
         "patch_urls": _normalize_list(actual.get("patch_urls") or nested.get("patch_urls")),
+        "backport_source": _normalize_backport_source(actual, nested),
     }
 
 
@@ -443,6 +450,46 @@ def _actual_result_field(actual: Mapping[str, Any], name: str) -> Any:
     if actual.get(name) is not None:
         return actual.get(name)
     return nested.get(name)
+
+
+def _normalize_backport_source(
+    actual: Mapping[str, Any],
+    nested: Mapping[str, Any],
+) -> str | None:
+    explicit = _normalize_token(actual.get("backport_source") or nested.get("backport_source"))
+    if explicit is not None:
+        return explicit
+    return _infer_backport_source_from_urls(
+        _normalize_list(actual.get("patch_urls") or nested.get("patch_urls"))
+    )
+
+
+def _infer_backport_source_from_urls(urls: Iterable[str]) -> str | None:
+    sources = {_backport_source_for_url(url) for url in urls}
+    sources.discard(None)
+    if not sources:
+        return None
+    if len(sources) == 1:
+        return next(iter(sources))
+    return "mixed"
+
+
+def _backport_source_for_url(url: str) -> str | None:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    path = parsed.path
+    if hostname == "gitlab.com" and (
+        path.startswith("/redhat/rhel/rpms/")
+        or path.startswith("/redhat/centos-stream/rpms/")
+    ):
+        return "distgit"
+    if hostname == "src.fedoraproject.org" and path.startswith("/rpms/"):
+        return "distgit"
+    if parsed.scheme in {"http", "https"} and hostname:
+        return "upstream"
+    return None
 
 
 def _advisory_metrics(actual: Mapping[str, Any]) -> list[AdvisoryMetric]:

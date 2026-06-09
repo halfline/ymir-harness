@@ -11,6 +11,7 @@ import subprocess
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -24,6 +25,7 @@ from ymir_harness.models import (
     ALLOWED_ANSWER_LEAKAGE,
     ALLOWED_CASE_STATUSES,
     ALLOWED_CASE_TYPES,
+    ALLOWED_BACKPORT_SOURCES,
     ALLOWED_EXPECTED_BASES,
     ALLOWED_GROUND_TRUTH_CONFIDENCE,
     ALLOWED_NETWORK_MODES,
@@ -170,6 +172,7 @@ class CollectCaseRequest:
     cve_ids: tuple[str, ...] = ()
     patch_urls: tuple[str, ...] = ()
     fix_sources: tuple[str, ...] = ()
+    backport_source: str | None = None
     notes: str | None = None
     alternate_acceptable_outcomes: tuple[Mapping[str, Any], ...] = ()
     reference_patch_mode: str | None = None
@@ -336,6 +339,7 @@ def _fetch_evidence(
             )
         )
 
+    auto_gitlab_mr_url = False
     gitlab_mr_url = request.gitlab_mr_url
     if gitlab_mr_url is None and request.network_mode != "network_denied":
         gitlab_mr_url = _gitlab_mr_url_from_jira_evidence(
@@ -343,39 +347,35 @@ def _fetch_evidence(
             jira_issue_source,
             jira_comments_source,
         )
+        auto_gitlab_mr_url = gitlab_mr_url is not None
+
+    if (
+        gitlab_mr_url
+        and auto_gitlab_mr_url
+        and _private_gitlab_url_without_token(gitlab_mr_url, request.gitlab_token_env)
+    ):
+        result.warnings.append(
+            f"skipped auto-discovered GitLab MR {gitlab_mr_url}: "
+            f"{request.gitlab_token_env} is not configured"
+        )
+        gitlab_mr_url = None
 
     if gitlab_mr_url:
-        gitlab_urls = _gitlab_mr_urls(gitlab_mr_url)
-        gitlab_headers = _gitlab_headers(request.gitlab_token_env)
-        for name in ("merge_request", "commits", "changes"):
-            url = gitlab_urls[name]
-            body = _fetch_bytes(url, headers=gitlab_headers, request=request, result=result)
-            if name == "merge_request":
-                gitlab_mr = _json_object_from_body(body, url)
-            elif name == "commits":
-                gitlab_commits = _json_value_from_body(body, url)
-            gitlab_records.append(
-                FetchedRecord(
-                    url=url,
-                    relative_path=f"gitlab/{name}.json",
-                    body=body,
-                )
+        try:
+            fetched_gitlab_mr, fetched_gitlab_commits, fetched_patch_url, fetched_patch_body, fetched_records = (
+                _fetch_gitlab_mr_evidence(gitlab_mr_url, request, result)
             )
-
-        gitlab_patch_url = gitlab_urls["patch"]
-        gitlab_patch_body = _fetch_bytes(
-            gitlab_patch_url,
-            headers=gitlab_headers,
-            request=request,
-            result=result,
-        )
-        gitlab_records.append(
-            FetchedRecord(
-                url=gitlab_patch_url,
-                relative_path="gitlab/merge_request.patch",
-                body=gitlab_patch_body,
-            )
-        )
+        except CollectCaseError as exc:
+            if not auto_gitlab_mr_url:
+                raise
+            result.warnings.append(f"skipped auto-discovered GitLab MR {gitlab_mr_url}: {exc}")
+            gitlab_mr_url = None
+        else:
+            gitlab_mr = fetched_gitlab_mr
+            gitlab_commits = fetched_gitlab_commits
+            gitlab_patch_url = fetched_patch_url
+            gitlab_patch_body = fetched_patch_body
+            gitlab_records.extend(fetched_records)
 
     gitlab_records.extend(
         _gitlab_commit_patch_records_from_mr_patch(
@@ -393,6 +393,11 @@ def _fetch_evidence(
     valid_jira_patch_urls: list[str] = []
     for index, patch_url in enumerate(jira_patch_urls, start=1):
         if patch_url in recorded_patch_urls:
+            continue
+        if _private_gitlab_url_without_token(patch_url, request.gitlab_token_env):
+            result.warnings.append(
+                f"skipped Jira patch URL {patch_url}: {request.gitlab_token_env} is not configured"
+            )
             continue
         try:
             patch_body = _fetch_bytes(
@@ -467,6 +472,51 @@ def _fetch_evidence(
         gitlab_patch_body=gitlab_patch_body,
         web_records=tuple(gitlab_records),
     )
+
+
+def _fetch_gitlab_mr_evidence(
+    gitlab_mr_url: str,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> tuple[Mapping[str, Any], Any, str, bytes, list[FetchedRecord]]:
+    gitlab_urls = _gitlab_mr_urls(gitlab_mr_url)
+    gitlab_headers = _gitlab_headers(request.gitlab_token_env)
+    gitlab_mr: Mapping[str, Any] | None = None
+    gitlab_commits: Any = None
+    gitlab_records: list[FetchedRecord] = []
+    for name in ("merge_request", "commits", "changes"):
+        url = gitlab_urls[name]
+        body = _fetch_bytes(url, headers=gitlab_headers, request=request, result=result)
+        if name == "merge_request":
+            gitlab_mr = _json_object_from_body(body, url)
+        elif name == "commits":
+            gitlab_commits = _json_value_from_body(body, url)
+        gitlab_records.append(
+            FetchedRecord(
+                url=url,
+                relative_path=f"gitlab/{name}.json",
+                body=body,
+            )
+        )
+
+    if gitlab_mr is None:
+        raise CollectCaseError(f"failed to fetch GitLab MR metadata: {gitlab_mr_url}")
+
+    gitlab_patch_url = gitlab_urls["patch"]
+    gitlab_patch_body = _fetch_bytes(
+        gitlab_patch_url,
+        headers=gitlab_headers,
+        request=request,
+        result=result,
+    )
+    gitlab_records.append(
+        FetchedRecord(
+            url=gitlab_patch_url,
+            relative_path="gitlab/merge_request.patch",
+            body=gitlab_patch_body,
+        )
+    )
+    return gitlab_mr, gitlab_commits, gitlab_patch_url, gitlab_patch_body, gitlab_records
 
 
 def _jira_issue_source(
@@ -550,7 +600,7 @@ def _fetch_linked_jira_issues(
     *,
     root_issue: Mapping[str, Any] | None,
     root_case_id: str,
-    max_depth: int = 2,
+    max_depth: int = 1,
 ) -> list[FetchedJiraIssue]:
     linked_issues: list[FetchedJiraIssue] = []
     seen_keys = {root_case_id}
@@ -911,10 +961,44 @@ def _jira_authorization(token: str, email: str | None) -> str:
 
 def _gitlab_headers(token_env: str) -> dict[str, str]:
     headers = {"Accept": "application/json"}
-    token = os.environ.get(token_env)
+    token = _gitlab_token(token_env)
     if token:
         headers["PRIVATE-TOKEN"] = token
     return headers
+
+
+def _private_gitlab_url_without_token(url: str, token_env: str) -> bool:
+    if _gitlab_token(token_env):
+        return False
+    parsed = urlparse(url)
+    return parsed.hostname == "gitlab.com" and parsed.path.startswith("/redhat/rhel/rpms/")
+
+
+@lru_cache(maxsize=None)
+def _gitlab_token(token_env: str) -> str | None:
+    token = os.environ.get(token_env)
+    if token and token.strip():
+        return token.strip()
+
+    try:
+        completed = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=gitlab.com\n\n",
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+
+    for line in completed.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key == "password" and value:
+            return value
+    return None
 
 
 def _fetch_json(
@@ -1273,6 +1357,7 @@ def _derive_network_mode(request: CollectCaseRequest, fetched: FetchedEvidence) 
         request.gitlab_mr_url
         or fetched.gitlab_patch_url
         or fetched.jira_patch_urls
+        or _historical_result_patch_urls(_evidence_comments(request, fetched))
         or fetched.web_records
         or request.patch_urls
         or request.web_records
@@ -1463,6 +1548,8 @@ def _validate_request(request: CollectCaseRequest, *, require_metadata: bool) ->
             ALLOWED_REFERENCE_PATCH_MODES,
             "reference_patch_mode",
         )
+    if request.backport_source is not None:
+        _validate_allowed(request.backport_source, ALLOWED_BACKPORT_SOURCES, "backport_source")
     if require_metadata and request.resolution in {"backport", "rebase", "rebuild"}:
         if request.target_branch is None and request.fix_version is None:
             msg = "implementation cases should include target_branch or fix_version"
@@ -1559,9 +1646,17 @@ def _write_expected(
     ):
         if value is not None:
             expected[name] = value
+    expected_patch_urls = _expected_patch_urls(request, fetched)
+    backport_source = request.backport_source or _infer_backport_source(
+        request.resolution,
+        expected_patch_urls,
+    )
+    if backport_source is not None:
+        expected["backport_source"] = backport_source
+
     for name, values in (
         ("cve_ids", request.cve_ids),
-        ("patch_urls", _expected_patch_urls(request, fetched)),
+        ("patch_urls", expected_patch_urls),
         ("fix_sources", _effective_fix_sources(request, fetched)),
     ):
         if values:
@@ -2199,6 +2294,35 @@ def _expected_patch_urls(
         return tuple(historical_urls)
 
     return _effective_patch_urls(request, fetched)
+
+
+def _infer_backport_source(resolution: str | None, patch_urls: Sequence[str]) -> str | None:
+    if resolution != "backport" or not patch_urls:
+        return None
+
+    sources = {_backport_source_for_url(url) for url in patch_urls}
+    sources.discard(None)
+    if not sources:
+        return None
+    if len(sources) == 1:
+        return next(iter(sources))
+    return "mixed"
+
+
+def _backport_source_for_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    path = parsed.path
+    if hostname == "gitlab.com" and (
+        path.startswith("/redhat/rhel/rpms/")
+        or path.startswith("/redhat/centos-stream/rpms/")
+    ):
+        return "distgit"
+    if hostname == "src.fedoraproject.org" and path.startswith("/rpms/"):
+        return "distgit"
+    if parsed.scheme in {"http", "https"} and hostname:
+        return "upstream"
+    return None
 
 
 def _historical_result_patch_urls(comments: Any) -> list[str]:
