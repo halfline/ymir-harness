@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from urllib.parse import urlparse
 
 from ymir_harness import __version__
 from ymir_harness.collect_case import (
@@ -20,6 +22,7 @@ from ymir_harness.capture_missing import (
     DEFAULT_ALLOWED_HOSTS,
     CaptureMissingError,
     CaptureMissingRequest,
+    CaptureMissingResult,
     blocked_urls_from_run_path,
     capture_missing,
     jira_requests_from_run_path,
@@ -55,6 +58,7 @@ from ymir_harness.ymir_workflows import (
 
 
 WORKFLOW_CHOICES = ("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild")
+MAX_PREPARE_AUTO_ALLOWED_HOSTS = 16
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -736,6 +740,10 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
                     f"{len(capture['captured_jira'])} Jira request(s), "
                     f"{len(capture['failed'])} failure(s)\n"
                 )
+            if auto_allowed_hosts := iteration.get("auto_allowed_hosts"):
+                sys.stdout.write(
+                    f"  auto-allowed hosts: {', '.join(str(host) for host in auto_allowed_hosts)}\n"
+                )
     return exit_code
 
 
@@ -747,6 +755,7 @@ def _prepare_case(
     if _prepare_should_collect(args):
         collected = collect_case(_prepare_collect_request(args)).to_json()
 
+    auto_allowed_hosts: list[str] = []
     payload: dict[str, object] = {
         "case_id": args.case_id,
         "cases_dir": str(args.cases),
@@ -754,6 +763,7 @@ def _prepare_case(
         "variant": args.variant,
         "status": "max_iterations",
         "collected": collected,
+        "auto_allowed_hosts": auto_allowed_hosts,
         "iterations": [],
     }
     iterations: list[dict[str, object]] = []
@@ -785,7 +795,13 @@ def _prepare_case(
             exit_code = 0
             break
 
-        capture_result = capture_missing(_prepare_capture_request(args, results_dir))
+        capture_result, iteration_auto_allowed_hosts = _prepare_capture_missing(
+            args,
+            results_dir,
+            auto_allowed_hosts,
+        )
+        if iteration_auto_allowed_hosts:
+            iteration_payload["auto_allowed_hosts"] = iteration_auto_allowed_hosts
         capture_payload = capture_result.to_json()
         iteration_payload["capture"] = capture_payload
         if capture_result.failed:
@@ -818,6 +834,118 @@ def _prepare_has_replay_candidates(results_dir: Path) -> bool:
         return False
 
 
+def _prepare_capture_missing(
+    args: argparse.Namespace,
+    results_dir: Path,
+    auto_allowed_hosts: list[str],
+) -> tuple[CaptureMissingResult, list[str]]:
+    aggregate_result: CaptureMissingResult | None = None
+    iteration_auto_allowed_hosts: list[str] = []
+
+    while True:
+        capture_result = capture_missing(
+            _prepare_capture_request(
+                args,
+                results_dir,
+                auto_allowed_hosts=auto_allowed_hosts,
+            )
+        )
+        aggregate_result = _merge_capture_results(aggregate_result, capture_result)
+        if capture_result.failed:
+            break
+
+        added_hosts = _prepare_auto_allowed_hosts(
+            capture_result,
+            user_allowed_hosts=args.allowed_hosts,
+            auto_allowed_hosts=auto_allowed_hosts,
+        )
+        if not added_hosts:
+            break
+        auto_allowed_hosts.extend(added_hosts)
+        iteration_auto_allowed_hosts.extend(added_hosts)
+
+    if aggregate_result is None:
+        raise CaptureMissingError(f"capture did not run for {results_dir}")
+    return aggregate_result, iteration_auto_allowed_hosts
+
+
+def _merge_capture_results(
+    base: CaptureMissingResult | None,
+    update: CaptureMissingResult,
+) -> CaptureMissingResult:
+    if base is None:
+        return update
+
+    base.candidate_urls = _dedupe_sequence([*base.candidate_urls, *update.candidate_urls])
+    base.candidate_jira_requests = _dedupe_json_objects(
+        [*base.candidate_jira_requests, *update.candidate_jira_requests]
+    )
+    base.captured.extend(update.captured)
+    base.captured_jira.extend(update.captured_jira)
+    base.captured_source.extend(update.captured_source)
+    base.skipped.extend(update.skipped)
+    base.failed.extend(update.failed)
+
+    captured_urls = {capture.url for capture in base.captured}
+    captured_urls.update(capture.url for capture in base.captured_jira)
+    captured_urls.update(capture.url for capture in base.captured_source)
+    base.skipped = [skip for skip in base.skipped if skip.url not in captured_urls]
+    return base
+
+
+def _prepare_auto_allowed_hosts(
+    capture_result: CaptureMissingResult,
+    *,
+    user_allowed_hosts: Sequence[str],
+    auto_allowed_hosts: Sequence[str],
+) -> list[str]:
+    known_hosts = {host.lower() for host in (*DEFAULT_ALLOWED_HOSTS, *user_allowed_hosts)}
+    known_hosts.update(host.lower() for host in auto_allowed_hosts)
+    remaining_slots = MAX_PREPARE_AUTO_ALLOWED_HOSTS - len(auto_allowed_hosts)
+    if remaining_slots <= 0:
+        return []
+
+    added_hosts: list[str] = []
+    for skipped in capture_result.skipped:
+        if skipped.reason != "host is not allowed":
+            continue
+        host = _prepare_safe_auto_allowed_host(skipped.url)
+        if host is None or host in known_hosts:
+            continue
+        known_hosts.add(host)
+        added_hosts.append(host)
+        if len(added_hosts) >= remaining_slots:
+            break
+    return added_hosts
+
+
+def _prepare_safe_auto_allowed_host(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return None
+
+    host = parsed.hostname.rstrip(".").lower()
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return None
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+
+    if not address.is_global:
+        return None
+    return host
+
+
+def _dedupe_sequence(values: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _dedupe_json_objects(values):
+    return list({json.dumps(value, sort_keys=True): value for value in values}.values())
+
+
 def _prepare_should_collect(args: argparse.Namespace) -> bool:
     return any((args.jira_url, args.jira_base_url, args.gitlab_mr_url))
 
@@ -844,8 +972,12 @@ def _prepare_collect_request(args: argparse.Namespace) -> CollectCaseRequest:
 def _prepare_capture_request(
     args: argparse.Namespace,
     results_dir: Path,
+    *,
+    auto_allowed_hosts: Sequence[str] = (),
 ) -> CaptureMissingRequest:
-    allowed_hosts = tuple(dict.fromkeys((*DEFAULT_ALLOWED_HOSTS, *args.allowed_hosts)))
+    allowed_hosts = tuple(
+        dict.fromkeys((*DEFAULT_ALLOWED_HOSTS, *args.allowed_hosts, *auto_allowed_hosts))
+    )
     return CaptureMissingRequest(
         cases_dir=args.cases,
         run_path=results_dir,
