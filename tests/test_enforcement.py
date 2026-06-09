@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import urllib.error
@@ -376,6 +377,55 @@ def test_enforcement_returns_replay_miss_for_external_popen_url(tmp_path: Path) 
     assert process.returncode == 128
     assert stdout == ""
     assert stderr == f"replay miss: URL is not recorded in replay cache: {url}\n"
+
+
+def test_enforcement_returns_replay_miss_for_async_external_subprocess_url(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    url = "https://example.invalid/repo.git"
+
+    async def run_process() -> tuple[int | None, bytes | None, bytes | None]:
+        with enforce_benchmark_boundaries(_environment(manifest_path)):
+            process = await asyncio.create_subprocess_exec(
+                "git",
+                "clone",
+                url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            return process.returncode, stdout, stderr
+
+    returncode, stdout, stderr = asyncio.run(run_process())
+
+    assert returncode == 128
+    assert stdout == b""
+    assert stderr == f"replay miss: URL is not recorded in replay cache: {url}\n".encode()
+
+
+def test_enforcement_returns_replay_miss_for_async_popen_pipe_read(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    url = "https://example.invalid/missing.patch"
+
+    async def run_process() -> tuple[int, bytes]:
+        with enforce_benchmark_boundaries(_environment(manifest_path)):
+            process = await asyncio.create_subprocess_exec(
+                "curl",
+                url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            assert process.stdout is not None
+            stdout = await process.stdout.read()
+            return await process.wait(), stdout
+
+    returncode, stdout = asyncio.run(run_process())
+
+    assert returncode == 0
+    assert stdout == f"replay miss: URL is not recorded in replay cache: {url}\n".encode()
 
 
 def test_enforcement_allows_mock_rewritten_git_subprocess_url(
