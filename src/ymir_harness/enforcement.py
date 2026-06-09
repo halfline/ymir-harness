@@ -254,10 +254,12 @@ def _patch_requests(
         if network_mode == "replay_only" and replay_cache is not None and replay_cache.has_url(url):
             import requests  # type: ignore[import-not-found]
 
+            body = replay_cache.read_bytes(url)
             response = requests.Response()
             response.status_code = 200
             response.url = url
-            response._content = replay_cache.read_bytes(url)
+            response._content = body
+            response.headers.update(replay_cache.response_headers(url, body))
             response.request = requests.Request(method=method, url=url).prepare()
             return response
         if _is_model_provider_url(url, model_hosts):

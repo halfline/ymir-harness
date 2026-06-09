@@ -13,11 +13,18 @@ class ReplayCacheError(RuntimeError):
 
 
 class ReplayResponse:
-    def __init__(self, url: str, body: bytes, *, status: int = 200):
+    def __init__(
+        self,
+        url: str,
+        body: bytes,
+        *,
+        headers: Mapping[str, str] | None = None,
+        status: int = 200,
+    ):
         self.url = url
         self.status = status
         self.status_code = status
-        self.headers: dict[str, str] = {}
+        self.headers = dict(headers or {})
         self._body = body
 
     async def __aenter__(self) -> "ReplayResponse":
@@ -65,12 +72,23 @@ class ReplayCache:
 
     def open_urllib_response(self, url: str) -> addinfourl:
         body = self.read_bytes(url)
-        response = addinfourl(io.BytesIO(body), headers={}, url=url, code=200)
+        response = addinfourl(
+            io.BytesIO(body),
+            headers=self.response_headers(url, body),
+            url=url,
+            code=200,
+        )
         response.msg = "OK"
         return response
 
     def open_aiohttp_response(self, url: str) -> ReplayResponse:
-        return ReplayResponse(url, self.read_bytes(url))
+        body = self.read_bytes(url)
+        return ReplayResponse(url, body, headers=self.response_headers(url, body))
+
+    def response_headers(self, url: str, body: bytes | None = None) -> dict[str, str]:
+        body = self.read_bytes(url) if body is None else body
+        path = self.path_for_url(url)
+        return {"Content-Type": _content_type_for(path, body)}
 
     def path_for_url(self, url: str) -> Path:
         recorded = self._recorded_files.get(url)
@@ -105,6 +123,15 @@ class ReplayCache:
             if isinstance(url, str) and url and isinstance(recorded, str) and recorded
         }
         return output
+
+
+def _content_type_for(path: Path, body: bytes) -> str:
+    stripped = body.lstrip()
+    if stripped.startswith((b"{", b"[")):
+        return "application/json"
+    if path.suffix.lower() in {".diff", ".md", ".patch", ".txt"}:
+        return "text/plain; charset=utf-8"
+    return "application/octet-stream"
 
 
 def request_url(value: Any, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> str | None:
