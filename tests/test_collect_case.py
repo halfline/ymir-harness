@@ -293,6 +293,21 @@ def test_collect_case_wraps_local_jira_link_arrays(tmp_path: Path) -> None:
     assert not report.has_blocking_errors
 
 
+def test_collect_case_normalizes_gitlab_links_as_patch_urls() -> None:
+    issue = {
+        "fields": {
+            "description": (
+                "Review https://gitlab.example/group/pkg/-/merge_requests/7 and "
+                "https://gitlab.example/group/pkg/-/commit/abc123."
+            ),
+        },
+    }
+
+    assert collect_case_module._patch_urls_from_jira_evidence(issue) == [
+        "https://gitlab.example/group/pkg/-/merge_requests/7.patch",
+        "https://gitlab.example/group/pkg/-/commit/abc123.patch",
+    ]
+
 def test_collect_case_imports_completed_jira_without_repeated_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
