@@ -49,6 +49,7 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["SILENT_RUN"] == "true"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert env["CHAT_MODEL"] == DEFAULT_CHAT_MODEL
+    assert env["GOOGLE_VERTEX_LOCATION"] == "global"
     assert env["BENCHMARK_MAX_ITERATIONS_OVERRIDE"] == "50"
     assert env["BEEAI_MAX_ITERATIONS"] == "50"
     assert "GITLAB_TOKEN" not in env
@@ -60,6 +61,27 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["MOCK_REPOS_DIR"] == str((cases_dir / "mock_data").resolve())
     assert env["YMIR_BENCHMARK_CASES_DIR"] == str(cases_dir.resolve())
     assert env["YMIR_BENCHMARK_RESULTS_DIR"] == str(results_dir.resolve())
+
+
+def test_build_no_write_environment_normalizes_vertex_claude_env(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "reports"
+
+    env = build_no_write_environment(
+        cases_dir,
+        results_dir,
+        base_env={
+            "CHAT_MODEL": "vertexai:claude-sonnet-4-6",
+            "ANTHROPIC_VERTEX_PROJECT_ID": "itpc-gcp-core-pe-eng-claude",
+            "CLOUD_ML_REGION": "global",
+        },
+    )
+
+    assert env["ANTHROPIC_VERTEX_PROJECT_ID"] == "itpc-gcp-core-pe-eng-claude"
+    assert env["GOOGLE_VERTEX_PROJECT"] == "itpc-gcp-core-pe-eng-claude"
+    assert env["CLOUD_ML_REGION"] == "global"
+    assert env["GOOGLE_VERTEX_LOCATION"] == "global"
+    assert "GOOGLE_CLOUD_PROJECT" not in env
 
 
 def test_build_no_write_environment_records_case_id(tmp_path: Path) -> None:

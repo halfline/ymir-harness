@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import ymir_harness.ymir_workflows as workflow_module
-from ymir_harness.runner import RunCaseRequest
+from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseRequest
 from ymir_harness.ymir_workflows import (
     make_ymir_backport_executor,
     make_ymir_rebuild_executor,
@@ -177,7 +177,7 @@ def test_ymir_triage_executor_logs_workflow_progress(
             "cve_backport",
             None,
             "ymir triage workflow missing CHAT_MODEL; "
-            "set CHAT_MODEL in the run environment, e.g. gemini:gemini-2.5-pro",
+            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
         ),
         (
             make_ymir_backport_executor,
@@ -192,7 +192,7 @@ def test_ymir_triage_executor_logs_workflow_progress(
                 "patch_urls": ["https://example.invalid/fix.patch"],
             },
             "ymir backport workflow missing CHAT_MODEL; "
-            "set CHAT_MODEL in the run environment, e.g. gemini:gemini-2.5-pro",
+            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
         ),
         (
             make_ymir_rebase_executor,
@@ -207,7 +207,7 @@ def test_ymir_triage_executor_logs_workflow_progress(
                 "version": "2.91",
             },
             "ymir rebase workflow missing CHAT_MODEL; "
-            "set CHAT_MODEL in the run environment, e.g. gemini:gemini-2.5-pro",
+            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
         ),
         (
             make_ymir_rebuild_executor,
@@ -221,7 +221,7 @@ def test_ymir_triage_executor_logs_workflow_progress(
                 "target_branch": "rhel-8.10.z",
             },
             "ymir rebuild workflow missing CHAT_MODEL; "
-            "set CHAT_MODEL in the run environment, e.g. gemini:gemini-2.5-pro",
+            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
         ),
     ],
 )
