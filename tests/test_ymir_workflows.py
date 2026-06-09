@@ -4,10 +4,12 @@ import json
 import os
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+import ymir_harness.ymir_workflows as workflow_module
 from ymir_harness.runner import RunCaseRequest
 from ymir_harness.ymir_workflows import (
     make_ymir_backport_executor,
@@ -127,78 +129,68 @@ def test_ymir_triage_executor_reports_missing_triage_result(tmp_path: Path) -> N
     assert execution.reason == "ymir triage workflow returned no triage result"
 
 
-@pytest.mark.parametrize(
-    ("executor_factory", "case_type", "expected", "reason"),
-    [
-        (
-            make_ymir_triage_executor,
-            "cve_backport",
-            None,
-            "ymir triage workflow missing MCP_GATEWAY_URL; "
-            "start the MCP gateway and pass its SSE URL in the run environment",
-        ),
-        (
-            make_ymir_backport_executor,
-            "cve_backport",
-            {
-                "schema_version": 1,
-                "case_id": "RHEL-12345",
-                "case_type": "cve_backport",
-                "resolution": "backport",
-                "package": "dnsmasq",
-                "target_branch": "rhel-8.10.z",
-                "patch_urls": ["https://example.invalid/fix.patch"],
-            },
-            "ymir backport workflow missing MCP_GATEWAY_URL; "
-            "start the MCP gateway and pass its SSE URL in the run environment",
-        ),
-        (
-            make_ymir_rebase_executor,
-            "rebase",
-            {
-                "schema_version": 1,
-                "case_id": "RHEL-12345",
-                "case_type": "rebase",
-                "resolution": "rebase",
-                "package": "dnsmasq",
-                "target_branch": "rhel-8.10.z",
-                "version": "2.91",
-            },
-            "ymir rebase workflow missing MCP_GATEWAY_URL; "
-            "start the MCP gateway and pass its SSE URL in the run environment",
-        ),
-        (
-            make_ymir_rebuild_executor,
-            "dependency_rebuild",
-            {
-                "schema_version": 1,
-                "case_id": "RHEL-12345",
-                "case_type": "dependency_rebuild",
-                "resolution": "rebuild",
-                "package": "dnsmasq",
-                "target_branch": "rhel-8.10.z",
-            },
-            "ymir rebuild workflow missing MCP_GATEWAY_URL; "
-            "start the MCP gateway and pass its SSE URL in the run environment",
-        ),
-    ],
-)
-def test_live_ymir_executors_report_missing_mcp_gateway_url(
+def test_ymir_triage_executor_starts_managed_gateway_by_default(
     tmp_path: Path,
-    executor_factory,
-    case_type: str,
-    expected: dict[str, object] | None,
-    reason: str,
+    monkeypatch,
 ) -> None:
-    request = _request(tmp_path, case_type=case_type)
-    if expected is not None:
-        _write_expected(request, expected)
+    gateway_requests = []
+    calls = []
 
-    execution = executor_factory()(request)
+    @contextmanager
+    def managed_gateway(request):
+        gateway_requests.append(request)
+        yield "http://127.0.0.1:18080/sse"
 
-    assert execution.status == "failed"
-    assert execution.actual_result is None
-    assert execution.reason == reason
+    async def workflow(jira_issue, dry_run, agent_factory, **kwargs):
+        calls.append(
+            {
+                "jira_issue": jira_issue,
+                "dry_run": dry_run,
+                "agent_factory": agent_factory,
+                "kwargs": kwargs,
+                "gateway_url": os.environ["MCP_GATEWAY_URL"],
+            }
+        )
+        return _State(
+            triage_result=_TriageResult(
+                {
+                    "resolution": "not_affected",
+                    "data": {
+                        "jira_issue": "RHEL-12345",
+                        "package": "dnsmasq",
+                    },
+                }
+            )
+        )
+
+    def agent_factory(_gateway_tools, _local_tool_options):
+        return object()
+
+    monkeypatch.setattr(workflow_module, "_managed_mcp_gateway", managed_gateway)
+    monkeypatch.setattr(
+        workflow_module,
+        "_triage_dependencies",
+        lambda _workflow, _agent_factory: (workflow, agent_factory),
+    )
+
+    executor = make_ymir_triage_executor()
+    execution = executor(_request(tmp_path, environment={"DRY_RUN": "true"}))
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    assert execution.actual_result["resolution"] == "not_affected"
+    assert len(gateway_requests) == 1
+    assert gateway_requests[0].environment["DRY_RUN"] == "true"
+    assert "MCP_GATEWAY_URL" not in gateway_requests[0].environment
+    assert calls == [
+        {
+            "jira_issue": "RHEL-12345",
+            "dry_run": True,
+            "agent_factory": agent_factory,
+            "kwargs": {"auto_chain": False, "silent_run": True},
+            "gateway_url": "http://127.0.0.1:18080/sse",
+        }
+    ]
 
 
 def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
