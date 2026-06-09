@@ -11,7 +11,11 @@ import pytest
 import ymir_harness.capture_missing as capture_missing_module
 from ymir_harness.capture_missing import CaptureMissingRequest, capture_missing
 from ymir_harness.enforcement import enforce_benchmark_boundaries
-from ymir_harness.jira_replay import jira_search_fixture_path, jira_search_replay_miss
+from ymir_harness.jira_replay import (
+    jira_issue_replay_miss,
+    jira_search_fixture_path,
+    jira_search_replay_miss,
+)
 
 
 def test_capture_missing_records_allowed_blocked_url(
@@ -282,8 +286,7 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
                 "application/json",
             )
         if request.full_url == (
-            "https://redhat.atlassian.net/rest/api/3/issue/"
-            "RHEL-999999?fields=created,updated"
+            "https://redhat.atlassian.net/rest/api/3/issue/RHEL-999999?fields=created,updated"
         ):
             assert request.get_method() == "GET"
             return _Response(
@@ -357,6 +360,80 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
         {"url": "https://gitlab.example/group/glib/-/commit/abc123"}
     ]
 
+
+def test_capture_missing_records_jira_issue_miss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    issue_url = "https://redhat.atlassian.net/rest/api/3/issue/RHEL-23456"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(run_file, jira_issue_replay_miss(issue_url, "RHEL-23456") + "\n")
+
+    def fake_urlopen(request, timeout: float):
+        assert timeout == 30.0
+        if request.full_url == "https://redhat.atlassian.net/rest/api/2/issue/RHEL-23456":
+            return _Response(
+                json.dumps(
+                    {
+                        "key": "RHEL-23456",
+                        "fields": {
+                            "summary": "Linked issue",
+                            "status": {"name": "Closed"},
+                        },
+                    }
+                ).encode("utf-8"),
+                "application/json",
+            )
+        if request.full_url == "https://redhat.atlassian.net/rest/api/2/issue/RHEL-23456/comment":
+            return _Response(
+                json.dumps(
+                    {
+                        "comments": [
+                            {
+                                "body": "Contemporary linked issue comment.",
+                                "created": "2025-09-02T00:00:00.000+0000",
+                            },
+                            {
+                                "body": "Future linked issue comment.",
+                                "created": "2025-10-02T00:00:00.000+0000",
+                            },
+                        ]
+                    }
+                ).encode("utf-8"),
+                "application/json",
+            )
+        if (
+            request.full_url
+            == "https://redhat.atlassian.net/rest/api/2/issue/RHEL-23456/remotelink"
+        ):
+            return _Response(b"[]", "application/json")
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            as_of="2025-09-12T09:46:42Z",
+        )
+    )
+
+    assert [capture.kind for capture in result.captured_jira] == ["jira_issue"]
+    assert result.captured_jira[0].relative_path == "linked/RHEL-23456/issue.json"
+    linked_dir = cases_dir / "jiras" / "RHEL-12345" / "linked" / "RHEL-23456"
+    linked_comments = json.loads((linked_dir / "comments.json").read_text(encoding="utf-8"))
+    linked_starting = json.loads((linked_dir / "starting-issue.json").read_text(encoding="utf-8"))
+    assert linked_comments["comments"] == [
+        {
+            "body": "Contemporary linked issue comment.",
+            "created": "2025-09-02T00:00:00.000+0000",
+        }
+    ]
+    assert linked_starting["fields"]["status"] == {"name": "New"}
 
 class _Response:
     def __init__(self, body: bytes, content_type: str):
