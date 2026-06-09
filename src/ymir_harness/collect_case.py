@@ -435,6 +435,15 @@ def _fetch_evidence(
                 body=patch_body,
             )
         )
+        gitlab_records.extend(
+            _gitlab_commit_patch_records_from_mr_patch(
+                patch_url,
+                patch_body,
+                request=request,
+                result=result,
+                skipped_urls=jira_patch_urls,
+            )
+        )
     jira_patch_urls = tuple(valid_jira_patch_urls)
 
     package = request.package or _derive_package(jira_issue_source)
