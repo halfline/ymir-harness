@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from ymir_harness import __version__
+from ymir_harness.capture_missing import CaptureMissingResult
 import ymir_harness.cli as cli_module
 from ymir_harness.cli import main
 from ymir_harness.collect_case import CollectCaseResult
@@ -106,6 +107,47 @@ def test_cli_scores_result_directory(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert output["run_id"] == "baseline-1"
     assert output["ymir_sha"] == "6e22912f83d57ddae1031e6207d4716171a99be0"
     assert output["variant"] == "baseline"
+
+
+def test_cli_capture_missing_invokes_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    requests = []
+
+    def fake_capture_missing(request):
+        requests.append(request)
+        return CaptureMissingResult(
+            case_id=request.case_id,
+            cases_dir=request.cases_dir,
+            run_path=request.run_path,
+        )
+
+    monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
+
+    assert (
+        main(
+            [
+                "capture-missing",
+                "--cases",
+                str(tmp_path / "benchmark_cases"),
+                "--from-run",
+                str(tmp_path / "reports" / "runs" / "triage"),
+                "--case",
+                "RHEL-12345",
+                "--allow-host",
+                "gitlab.example",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["case_id"] == "RHEL-12345"
+    assert requests[0].case_id == "RHEL-12345"
+    assert "gitlab.example" in requests[0].allowed_hosts
 
 
 def test_cli_collect_case_writes_fixture_tree(
