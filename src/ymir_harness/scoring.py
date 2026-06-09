@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ ADVISORY_RESULT_FIELDS = (
     "total_cost_usd",
 )
 PATCH_COMMIT_RE = re.compile(r"(?m)^From ([0-9a-fA-F]{40}) ")
+CVE_ID_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
@@ -605,7 +606,34 @@ def _normalize_cve_ids(actual: Mapping[str, Any], nested: Mapping[str, Any]) -> 
         values = actual.get("cve_id")
     if values is None:
         values = nested.get("cve_id")
-    return _normalize_list(values)
+    normalized = _normalize_list(values)
+    if normalized:
+        return normalized
+
+    cve_ids = []
+    for text in _actual_result_text_values(actual, nested):
+        cve_ids.extend(match.group(0).upper() for match in CVE_ID_RE.finditer(text))
+    return list(dict.fromkeys(cve_ids))
+
+
+def _actual_result_text_values(
+    actual: Mapping[str, Any],
+    nested: Mapping[str, Any],
+) -> list[str]:
+    return list(_walk_actual_result_text((actual, nested)))
+
+
+def _walk_actual_result_text(value: Any) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, Mapping):
+        for item in value.values():
+            yield from _walk_actual_result_text(item)
+        return
+    if isinstance(value, list | tuple | set):
+        for item in value:
+            yield from _walk_actual_result_text(item)
 
 
 def _normalize_list(value: Any) -> list[str]:
