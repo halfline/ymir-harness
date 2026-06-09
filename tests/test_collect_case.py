@@ -196,10 +196,26 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
         ],
         "https://issues.example.invalid/rest/api/2/issue/RHEL-23456": {
             "key": "RHEL-23456",
-            "fields": {"summary": "Original issue"},
+            "fields": {
+                "summary": "Original issue",
+                "issuelinks": [
+                    {
+                        "outwardIssue": {
+                            "key": "RHEL-34567",
+                            "fields": {"summary": "Ancestor issue"},
+                        }
+                    }
+                ],
+            },
         },
         "https://issues.example.invalid/rest/api/2/issue/RHEL-23456/comment": {"comments": []},
         "https://issues.example.invalid/rest/api/2/issue/RHEL-23456/remotelink": [],
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-34567": {
+            "key": "RHEL-34567",
+            "fields": {"summary": "Ancestor issue"},
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-34567/comment": {"comments": []},
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-34567/remotelink": [],
     }
     seen_urls: list[str] = []
     monkeypatch.setattr(
@@ -229,6 +245,9 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     linked = json.loads(
         (jira_dir / "linked" / "RHEL-23456" / "starting-issue.json").read_text(encoding="utf-8")
     )
+    linked_ancestor = json.loads(
+        (jira_dir / "linked" / "RHEL-34567" / "starting-issue.json").read_text(encoding="utf-8")
+    )
     assert issue["key"] == "RHEL-12345"
     assert comments["comments"][0]["body"] == "Please backport this fix."
     assert links["links"][0]["object"]["url"] == (
@@ -238,6 +257,8 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     assert starting["remote_links"] == []
     assert linked["key"] == "RHEL-23456"
     assert linked["fields"]["summary"] == "Original issue"
+    assert linked_ancestor["key"] == "RHEL-34567"
+    assert linked_ancestor["fields"]["summary"] == "Ancestor issue"
     assert result.fetched_urls == seen_urls == list(responses)
 
 
