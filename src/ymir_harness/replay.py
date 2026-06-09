@@ -52,6 +52,14 @@ class ReplayResponse:
 class _SourcePatchRequest:
     project_url: str
     commit: str
+    output: str
+
+
+@dataclass(frozen=True)
+class _SourceFileRequest:
+    project_url: str
+    ref: str
+    file_path: str
 
 
 @dataclass(frozen=True)
@@ -86,14 +94,14 @@ class ReplayCache:
 
     def has_url(self, url: Any) -> bool:
         url = _url_text(url)
-        return url in self._recorded_files or self._source_patch_repo_for(url) is not None
+        return url in self._recorded_files or self._source_repo_for_url(url) is not None
 
     def read_bytes(self, url: Any) -> bytes:
         url = _url_text(url)
         if url not in self._recorded_files:
-            source_patch = self._source_patch_response(url)
-            if source_patch is not None:
-                return source_patch.body
+            source_response = self._source_response(url)
+            if source_response is not None:
+                return source_response.body
 
         path = self.path_for_url(url)
         try:
@@ -130,9 +138,9 @@ class ReplayCache:
     def response_headers(self, url: Any, body: bytes | None = None) -> dict[str, str]:
         url = _url_text(url)
         if url not in self._recorded_files:
-            source_patch = self._source_patch_response(url)
-            if source_patch is not None:
-                return dict(source_patch.headers)
+            source_response = self._source_response(url)
+            if source_response is not None:
+                return dict(source_response.headers)
 
         body = self.read_bytes(url) if body is None else body
         path = self.path_for_url(url)
@@ -149,9 +157,9 @@ class ReplayCache:
     def status_code(self, url: Any) -> int:
         url = _url_text(url)
         if url not in self._recorded_files:
-            source_patch = self._source_patch_response(url)
-            if source_patch is not None:
-                return source_patch.status
+            source_response = self._source_response(url)
+            if source_response is not None:
+                return source_response.status
 
         metadata = self._response_metadata.get(url, {})
         status = metadata.get("status") if isinstance(metadata, Mapping) else None
@@ -209,13 +217,19 @@ class ReplayCache:
             raise ReplayCacheError(f"replay manifest must contain an object: {manifest_path}")
         return manifest
 
-    def _source_patch_response(self, url: str) -> _SourcePatchResponse | None:
-        repo_path = self._source_patch_repo_for(url)
-        if repo_path is None:
-            return None
+    def _source_response(self, url: str) -> _SourcePatchResponse | None:
+        patch_response = self._source_patch_response(url)
+        if patch_response is not None:
+            return patch_response
+        return self._source_file_response(url)
 
+    def _source_patch_response(self, url: str) -> _SourcePatchResponse | None:
         request = _source_patch_request(url)
         if request is None:
+            return None
+
+        repo_path = self._source_repo_for_project(request.project_url, commit=request.commit)
+        if repo_path is None:
             return None
 
         if not _git_commit_exists(repo_path, request.commit):
@@ -225,18 +239,58 @@ class ReplayCache:
                 headers={"Content-Type": "text/plain; charset=utf-8"},
             )
 
-        body = _git_format_patch(repo_path, request.commit)
+        body = (
+            _git_format_patch(repo_path, request.commit)
+            if request.output == "patch"
+            else _git_format_diff(repo_path, request.commit)
+        )
         return _SourcePatchResponse(
             body=body,
             status=200,
             headers={"Content-Type": "text/plain; charset=utf-8"},
         )
 
-    def _source_patch_repo_for(self, url: str) -> Path | None:
-        request = _source_patch_request(url)
-        if request is None or self.source_cache_dir is None:
+    def _source_file_response(self, url: str) -> _SourcePatchResponse | None:
+        request = _source_file_request(url)
+        if request is None:
             return None
 
+        repo_path = self._source_repo_for_project(request.project_url)
+        if repo_path is None:
+            return None
+
+        body = _git_show_file(repo_path, request.ref, request.file_path)
+        if body is None:
+            return _SourcePatchResponse(
+                body=(
+                    f"{request.ref}:{request.file_path} is not available in source cache\n"
+                ).encode("utf-8"),
+                status=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+            )
+        return _SourcePatchResponse(
+            body=body,
+            status=200,
+            headers={"Content-Type": _content_type_for(Path(request.file_path), body)},
+        )
+
+    def _source_repo_for_url(self, url: str) -> Path | None:
+        patch_request = _source_patch_request(url)
+        if patch_request is not None:
+            return self._source_repo_for_project(
+                patch_request.project_url,
+                commit=patch_request.commit,
+            )
+        file_request = _source_file_request(url)
+        if file_request is not None:
+            return self._source_repo_for_project(file_request.project_url)
+        return None
+
+    def _source_repo_for_project(
+        self, project_url: str, *, commit: str | None = None
+    ) -> Path | None:
+        if self.source_cache_dir is None:
+            return None
         upstream_dir = self.source_cache_dir / "upstream"
         if not upstream_dir.is_dir():
             return None
@@ -245,13 +299,23 @@ class ReplayCache:
         matching = [
             repository
             for repository in repositories
-            if _same_git_project(_git_remote_url(repository), request.project_url)
+            if _same_git_project(_git_remote_url(repository), project_url)
         ]
         if matching:
             return matching[0]
 
+        related = [
+            repository
+            for repository in repositories
+            if _related_git_project(_git_remote_url(repository), project_url)
+        ]
+        if related:
+            return related[0]
+
+        if commit is None:
+            return None
         for repository in repositories:
-            if _git_commit_exists(repository, request.commit):
+            if _git_commit_exists(repository, commit):
                 return repository
         return None
 
@@ -269,27 +333,51 @@ def _url_text(url: Any) -> str:
     return url if isinstance(url, str) else str(url)
 
 
-def _source_patch_request(url: str) -> _SourcePatchRequest | None:
+def _source_patch_request(url: Any) -> _SourcePatchRequest | None:
     url = _url_text(url)
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
         return None
 
-    marker = "/-/commit/"
-    if marker not in parsed.path:
+    markers = ("/-/commit/", "/commit/")
+    marker = next((candidate for candidate in markers if candidate in parsed.path), None)
+    if marker is None:
         return None
 
     project_path, commit_part = parsed.path.split(marker, 1)
-    commit = commit_part.strip("/").split("/", 1)[0].removesuffix(".patch")
+    commit = commit_part.strip("/").split("/", 1)[0].removesuffix(".patch").removesuffix(".diff")
     if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
         return None
 
+    suffix = Path(parsed.path).suffix.lower()
     query = parse_qs(parsed.query)
-    if not parsed.path.endswith(".patch") and query.get("format") != [".patch"]:
+    if suffix == ".patch" or query.get("format") == [".patch"]:
+        output = "patch"
+    elif suffix == ".diff" or query.get("format") == [".diff"]:
+        output = "diff"
+    else:
         return None
 
     project_url = f"{parsed.scheme}://{parsed.netloc}{project_path.rstrip('/')}"
-    return _SourcePatchRequest(project_url=project_url, commit=commit)
+    return _SourcePatchRequest(project_url=project_url, commit=commit, output=output)
+
+
+def _source_file_request(url: Any) -> _SourceFileRequest | None:
+    url = _url_text(url)
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return None
+    if parsed.hostname.lower() != "src.fedoraproject.org":
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 6 or parts[0] != "rpms" or parts[2] != "raw" or parts[4] != "f":
+        return None
+
+    ref = parts[3]
+    file_path = "/".join(parts[5:])
+    project_url = f"{parsed.scheme}://{parsed.netloc}/{'/'.join(parts[:2])}"
+    return _SourceFileRequest(project_url=project_url, ref=ref, file_path=file_path)
 
 
 def _source_git_repositories(upstream_dir: Path) -> tuple[Path, ...]:
@@ -348,6 +436,32 @@ def _git_format_patch(repo_path: Path, commit: str) -> bytes:
     return completed.stdout
 
 
+def _git_format_diff(repo_path: Path, commit: str) -> bytes:
+    completed = subprocess.run(
+        _git_command(repo_path, ["show", "--format=", "--patch", commit]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="ignore").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise ReplayCacheError(f"source cache cannot format diff for {commit}{detail}")
+    return completed.stdout
+
+
+def _git_show_file(repo_path: Path, ref: str, file_path: str) -> bytes | None:
+    completed = subprocess.run(
+        _git_command(repo_path, ["show", f"{ref}:{file_path}"]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
 def _git_command(repo_path: Path, args: list[str]) -> list[str]:
     if _is_bare_git_repository(repo_path):
         return ["git", f"--git-dir={repo_path}", *args]
@@ -360,12 +474,24 @@ def _same_git_project(first: str | None, second: str) -> bool:
     return _normalized_git_project(first) == _normalized_git_project(second)
 
 
+def _related_git_project(first: str | None, second: str) -> bool:
+    if first is None:
+        return False
+    first_path = _normalized_git_path(_git_project_path(first))
+    second_path = _normalized_git_path(_git_project_path(second))
+    return first_path == second_path or first_path.endswith(f"/{second_path}")
+
+
 def _normalized_git_project(url: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme and parsed.netloc:
-        path = parsed.path
-        return f"{parsed.netloc.lower()}/{_normalized_git_path(path)}"
+        return f"{parsed.netloc.lower()}/{_normalized_git_path(parsed.path)}"
     return _normalized_git_path(url)
+
+
+def _git_project_path(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed.path if parsed.scheme and parsed.netloc else url
 
 
 def _normalized_git_path(path: str) -> str:
