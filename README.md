@@ -299,6 +299,11 @@ each runnable case. The runner applies the per-case no-write environment,
 writes the returned structured triage result to the reserved actual result
 path, scores it against the expected result, and records the score in the run
 entry. A deterministic score mismatch marks the run entry failed.
+Live workflow adapters prefer the checked-out `ui-workflows` submodule when
+importing Ymir. Initialize it with
+`git submodule update --init ui-workflows`. To benchmark a different Ymir
+revision, check out that revision inside `ui-workflows` and commit the updated
+submodule pointer.
 Use `--workflow ymir-backport` to call Ymir's backport `run_workflow()` for
 implementation cases. The executor reads expected-result fields for the
 package, target branch, patch sources, CVE, justification, and fix version,
@@ -367,6 +372,7 @@ candidate-minus-baseline deltas.
 ## Development
 
 ```bash
+git submodule update --init ui-workflows
 uv sync
 uv run pytest
 uv run ymir-harness --version
