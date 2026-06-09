@@ -26,6 +26,8 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
             "PATH": "/usr/bin",
             "DRY_RUN": "false",
             "MOCK_JIRA": "false",
+            "JIRA_EMAIL": "prod@example.com",
+            "JIRA_TOKEN": "prod-token",
             "GITLAB_TOKEN": "prod-token",
             "JIRA_PASSWORD": "prod-password",
             "KEYTAB_FILE": "/etc/ymir/prod.keytab",
@@ -40,6 +42,8 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["DRY_RUN"] == "true"
     assert env["MOCK_JIRA"] == "true"
     assert env["JIRA_DRY_RUN"] == "true"
+    assert env["JIRA_EMAIL"] == "ymir-harness@example.invalid"
+    assert env["JIRA_TOKEN"] == "ymir-harness-token"
     assert env["AUTO_CHAIN"] == "false"
     assert env["SILENT_RUN"] == "true"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
@@ -236,7 +240,7 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     assert requests[0].environment["PATH"] == "/usr/bin"
     assert requests[0].environment["DRY_RUN"] == "true"
     assert requests[0].environment["YMIR_BENCHMARK_CASE_ID"] == "RHEL-12345"
-    assert "JIRA_TOKEN" not in requests[0].environment
+    assert requests[0].environment["JIRA_TOKEN"] == "ymir-harness-token"
     assert requests[0].environment["JIRA_MOCK_FILES"] == str(
         results_dir.resolve() / "repeat-1" / "jira-mock"
     )
