@@ -108,12 +108,12 @@ def test_validate_case_directory_reports_invalid_ymir_jira_mock(tmp_path: Path) 
     )
 
 
-def test_phase2_reports_target_branch_missing_from_mock_fixture(tmp_path: Path) -> None:
+def test_strict_validation_reports_target_branch_missing_from_mock_fixture(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
-    _write_replay_case(cases_dir, repo_path, pre_fix_ref)
+    _write_replay_case(cases_dir, repo_path, pre_fix_ref, zstream_override={})
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -123,7 +123,7 @@ def test_phase2_reports_target_branch_missing_from_mock_fixture(tmp_path: Path) 
     )
 
 
-def test_phase2_accepts_zstream_override_target_branch(tmp_path: Path) -> None:
+def test_strict_validation_accepts_zstream_override_target_branch(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -134,12 +134,12 @@ def test_phase2_accepts_zstream_override_target_branch(tmp_path: Path) -> None:
         reference_patch_mode="applies",
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert not report.has_blocking_errors
 
 
-def test_phase2_reports_web_cache_missing_expected_patch_url(tmp_path: Path) -> None:
+def test_strict_validation_reports_web_cache_missing_expected_patch_url(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -153,7 +153,7 @@ def test_phase2_reports_web_cache_missing_expected_patch_url(tmp_path: Path) -> 
     manifest["required_urls"] = []
     _write_json(manifest_path, manifest)
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -163,7 +163,7 @@ def test_phase2_reports_web_cache_missing_expected_patch_url(tmp_path: Path) -> 
     )
 
 
-def test_phase2_reports_web_cache_recorded_file_escape(tmp_path: Path) -> None:
+def test_strict_validation_reports_web_cache_recorded_file_escape(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -183,7 +183,7 @@ def test_phase2_reports_web_cache_recorded_file_escape(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -194,7 +194,7 @@ def test_phase2_reports_web_cache_recorded_file_escape(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_network_denied_patch_urls(tmp_path: Path) -> None:
+def test_strict_validation_reports_network_denied_patch_urls(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -205,7 +205,7 @@ def test_phase2_reports_network_denied_patch_urls(tmp_path: Path) -> None:
         network_mode="network_denied",
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -216,7 +216,7 @@ def test_phase2_reports_network_denied_patch_urls(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_network_denied_web_cache_manifest(tmp_path: Path) -> None:
+def test_strict_validation_reports_network_denied_web_cache_manifest(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -228,7 +228,7 @@ def test_phase2_reports_network_denied_web_cache_manifest(tmp_path: Path) -> Non
         patch_urls=[],
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -239,7 +239,7 @@ def test_phase2_reports_network_denied_web_cache_manifest(tmp_path: Path) -> Non
     )
 
 
-def test_phase2_reports_missing_source_cache(tmp_path: Path) -> None:
+def test_strict_validation_reports_missing_source_cache(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -250,14 +250,14 @@ def test_phase2_reports_missing_source_cache(tmp_path: Path) -> None:
         requires_source_cache=True,
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
     assert any(issue.category == "source_cache_incomplete" for issue in issues)
 
 
-def test_phase2_skips_source_cache_for_triage_workflow(tmp_path: Path) -> None:
+def test_strict_validation_skips_source_cache_for_triage_workflow(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -268,14 +268,14 @@ def test_phase2_skips_source_cache_for_triage_workflow(tmp_path: Path) -> None:
         requires_source_cache=True,
     )
 
-    report = validate_case_directory(cases_dir, phase=2, workflow="ymir-triage")
+    report = validate_case_directory(cases_dir, workflow="ymir-triage")
 
     assert not report.has_blocking_errors
     issues = report.cases[0].issues
     assert not any(issue.category == "source_cache_incomplete" for issue in issues)
 
 
-def test_phase2_reports_missing_source_cache_upstream(tmp_path: Path) -> None:
+def test_strict_validation_reports_missing_source_cache_upstream(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -289,7 +289,7 @@ def test_phase2_reports_missing_source_cache_upstream(tmp_path: Path) -> None:
     lookaside_dir.mkdir(parents=True)
     (lookaside_dir / ".keep").write_text("placeholder\n", encoding="utf-8")
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -299,7 +299,7 @@ def test_phase2_reports_missing_source_cache_upstream(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_empty_source_cache_upstream(tmp_path: Path) -> None:
+def test_strict_validation_reports_empty_source_cache_upstream(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -312,7 +312,7 @@ def test_phase2_reports_empty_source_cache_upstream(tmp_path: Path) -> None:
     upstream_dir = cases_dir / "source_cache" / "RHEL-12345" / "upstream"
     upstream_dir.mkdir(parents=True)
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -323,7 +323,7 @@ def test_phase2_reports_empty_source_cache_upstream(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_source_cache_upstream_without_clone_or_archive(
+def test_strict_validation_reports_source_cache_upstream_without_clone_or_archive(
     tmp_path: Path,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
@@ -342,7 +342,7 @@ def test_phase2_reports_source_cache_upstream_without_clone_or_archive(
     lookaside_dir.mkdir()
     (lookaside_dir / "source.tar.gz").write_text("cached source\n", encoding="utf-8")
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -353,7 +353,7 @@ def test_phase2_reports_source_cache_upstream_without_clone_or_archive(
     )
 
 
-def test_phase2_reports_unreadable_source_cache_upstream_archive(
+def test_strict_validation_reports_unreadable_source_cache_upstream_archive(
     tmp_path: Path,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
@@ -374,7 +374,7 @@ def test_phase2_reports_unreadable_source_cache_upstream_archive(
     lookaside_dir.mkdir()
     (lookaside_dir / "source.tar.gz").write_text("cached source\n", encoding="utf-8")
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -385,7 +385,7 @@ def test_phase2_reports_unreadable_source_cache_upstream_archive(
     )
 
 
-def test_phase2_reports_missing_source_cache_lookaside(tmp_path: Path) -> None:
+def test_strict_validation_reports_missing_source_cache_lookaside(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -399,7 +399,7 @@ def test_phase2_reports_missing_source_cache_lookaside(tmp_path: Path) -> None:
     upstream_dir.mkdir(parents=True)
     (upstream_dir / "source.tar.gz").write_text("cached source\n", encoding="utf-8")
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -409,7 +409,7 @@ def test_phase2_reports_missing_source_cache_lookaside(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_empty_source_cache_lookaside(tmp_path: Path) -> None:
+def test_strict_validation_reports_empty_source_cache_lookaside(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -425,7 +425,7 @@ def test_phase2_reports_empty_source_cache_lookaside(tmp_path: Path) -> None:
     lookaside_dir = cases_dir / "source_cache" / "RHEL-12345" / "lookaside"
     lookaside_dir.mkdir()
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -436,7 +436,7 @@ def test_phase2_reports_empty_source_cache_lookaside(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_source_cache_lookaside_without_artifact_files(
+def test_strict_validation_reports_source_cache_lookaside_without_artifact_files(
     tmp_path: Path,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
@@ -454,7 +454,7 @@ def test_phase2_reports_source_cache_lookaside_without_artifact_files(
     lookaside_dir = cases_dir / "source_cache" / "RHEL-12345" / "lookaside"
     (lookaside_dir / "nested").mkdir(parents=True)
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -465,7 +465,7 @@ def test_phase2_reports_source_cache_lookaside_without_artifact_files(
     )
 
 
-def test_phase2_reports_unreadable_source_cache_lookaside_artifact(
+def test_strict_validation_reports_unreadable_source_cache_lookaside_artifact(
     tmp_path: Path,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
@@ -486,7 +486,7 @@ def test_phase2_reports_unreadable_source_cache_lookaside_artifact(
     artifact_path.write_text("cached source\n", encoding="utf-8")
     artifact_path.chmod(0)
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -497,7 +497,7 @@ def test_phase2_reports_unreadable_source_cache_lookaside_artifact(
     )
 
 
-def test_phase2_reports_missing_required_source_cache_file(tmp_path: Path) -> None:
+def test_strict_validation_reports_missing_required_source_cache_file(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -521,7 +521,7 @@ def test_phase2_reports_missing_required_source_cache_file(tmp_path: Path) -> No
     ]
     _write_json(expected_path, expected)
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -533,7 +533,7 @@ def test_phase2_reports_missing_required_source_cache_file(tmp_path: Path) -> No
     )
 
 
-def test_phase2_reports_source_cache_checksum_mismatch(tmp_path: Path) -> None:
+def test_strict_validation_reports_source_cache_checksum_mismatch(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -557,7 +557,7 @@ def test_phase2_reports_source_cache_checksum_mismatch(tmp_path: Path) -> None:
     }
     _write_json(expected_path, expected)
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -569,7 +569,7 @@ def test_phase2_reports_source_cache_checksum_mismatch(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_missing_reference_patch(tmp_path: Path) -> None:
+def test_strict_validation_reports_missing_reference_patch(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -580,7 +580,7 @@ def test_phase2_reports_missing_reference_patch(tmp_path: Path) -> None:
         reference_patch_exists=False,
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -590,7 +590,7 @@ def test_phase2_reports_missing_reference_patch(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_malformed_reference_patch(tmp_path: Path) -> None:
+def test_strict_validation_reports_malformed_reference_patch(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -601,7 +601,7 @@ def test_phase2_reports_malformed_reference_patch(tmp_path: Path) -> None:
         reference_patch_text="not a patch\n",
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -610,7 +610,7 @@ def test_phase2_reports_malformed_reference_patch(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_reference_patch_without_touched_files(
+def test_strict_validation_reports_reference_patch_without_touched_files(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -631,7 +631,7 @@ def test_phase2_reports_reference_patch_without_touched_files(
 
     monkeypatch.setattr(validation_module.subprocess, "run", fake_run)
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -641,7 +641,7 @@ def test_phase2_reports_reference_patch_without_touched_files(
     )
 
 
-def test_phase2_reports_reference_patch_apply_failure(tmp_path: Path) -> None:
+def test_strict_validation_reports_reference_patch_apply_failure(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -661,7 +661,7 @@ def test_phase2_reports_reference_patch_apply_failure(tmp_path: Path) -> None:
         ),
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -670,7 +670,7 @@ def test_phase2_reports_reference_patch_apply_failure(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_reference_patch_already_present(tmp_path: Path) -> None:
+def test_strict_validation_reports_reference_patch_already_present(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, _pre_fix_ref = _create_git_repo(tmp_path)
     (repo_path / "source.c").write_text("int main(void) { return 1; }\n", encoding="utf-8")
@@ -690,14 +690,14 @@ def test_phase2_reports_reference_patch_already_present(tmp_path: Path) -> None:
         reference_patch_mode="applies",
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
     assert any(issue.category == "fix_already_present" for issue in issues)
 
 
-def test_phase2_reports_invalid_reference_patch_mode(tmp_path: Path) -> None:
+def test_strict_validation_reports_invalid_reference_patch_mode(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -708,7 +708,7 @@ def test_phase2_reports_invalid_reference_patch_mode(tmp_path: Path) -> None:
         reference_patch_mode="source_tree",
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -718,7 +718,7 @@ def test_phase2_reports_invalid_reference_patch_mode(tmp_path: Path) -> None:
     )
 
 
-def test_phase2_reports_missing_reference_patch_mode(tmp_path: Path) -> None:
+def test_strict_validation_reports_missing_reference_patch_mode(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
     _write_replay_case(
@@ -729,7 +729,7 @@ def test_phase2_reports_missing_reference_patch_mode(tmp_path: Path) -> None:
         reference_patch_mode=None,
     )
 
-    report = validate_case_directory(cases_dir, phase=2)
+    report = validate_case_directory(cases_dir)
 
     assert report.has_blocking_errors
     issues = report.cases[0].issues
@@ -783,6 +783,8 @@ def _write_replay_case(
     case_type = "cve_backport"
     if patch_urls is None:
         patch_urls = ["https://example.invalid/fix.patch"]
+    if zstream_override is None:
+        zstream_override = {"8": "rhel-8.10.z"}
     _write_json(
         cases_dir / "expected" / f"{case_id}.expected.json",
         {
@@ -819,8 +821,7 @@ def _write_replay_case(
     }
     if source_url is not None:
         mock_data["repos"][0]["source_url"] = source_url
-    if zstream_override is not None:
-        mock_data["zstream_override"] = zstream_override
+    mock_data["zstream_override"] = zstream_override
     _write_json(cases_dir / "mock_data" / "triage" / f"{case_id}.json", mock_data)
     if reference_patch_exists:
         reference_patch_path = (

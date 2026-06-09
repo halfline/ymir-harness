@@ -64,11 +64,12 @@ def test_cli_scores_result_directory(tmp_path: Path, capsys: pytest.CaptureFixtu
             "case_type": "cve_backport",
             "resolution": "backport",
             "package": "dnsmasq",
-            "expected_basis": "merged_mr",
+            "expected_basis": "historical_jira_state",
             "ground_truth_confidence": "high",
             "answer_leakage": "none",
             "case_status": "active",
             "network_mode": "replay_only",
+            "requires_source_cache": False,
         },
     )
     _write_json(
@@ -291,6 +292,7 @@ def test_cli_run_writes_placeholder_report(
             "answer_leakage": "none",
             "case_status": "active",
             "network_mode": "network_denied",
+            "requires_source_cache": False,
         },
     )
     _write_json(
@@ -306,6 +308,7 @@ def test_cli_run_writes_placeholder_report(
             "answer_leakage": "none",
             "case_status": "active",
             "network_mode": "network_denied",
+            "requires_source_cache": False,
         },
     )
 
@@ -479,7 +482,7 @@ def test_cli_run_can_use_ymir_triage_workflow(
     assert Path(output["cases"][0]["actual_path"]).is_file()
 
 
-def test_cli_run_validates_phase2_for_selected_triage_workflow(
+def test_cli_run_uses_strict_validation_for_selected_triage_workflow(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -533,8 +536,6 @@ def test_cli_run_validates_phase2_for_selected_triage_workflow(
                 "baseline",
                 "--workflow",
                 "ymir-triage",
-                "--phase",
-                "2",
                 "--output",
                 str(output_path),
                 "--json",
@@ -574,11 +575,12 @@ def test_cli_run_can_use_ymir_backport_workflow(
             "package": "dnsmasq",
             "target_branch": "rhel-8.10.z",
             "patch_urls": ["https://example.invalid/fix.patch"],
-            "expected_basis": "merged_mr",
+            "expected_basis": "historical_jira_state",
             "ground_truth_confidence": "high",
             "answer_leakage": "none",
             "case_status": "active",
             "network_mode": "replay_only",
+            "requires_source_cache": False,
         },
     )
     _write_json(
@@ -668,6 +670,7 @@ def test_cli_run_can_use_ymir_rebase_workflow(
             "answer_leakage": "none",
             "case_status": "active",
             "network_mode": "network_denied",
+            "requires_source_cache": False,
         },
     )
     requests = []
@@ -741,6 +744,7 @@ def test_cli_run_can_use_ymir_rebuild_workflow(
             "answer_leakage": "none",
             "case_status": "active",
             "network_mode": "network_denied",
+            "requires_source_cache": False,
         },
     )
     requests = []

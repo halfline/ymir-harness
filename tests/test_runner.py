@@ -106,7 +106,6 @@ def test_load_case_manifest_reports_schema_errors(tmp_path: Path) -> None:
 def test_select_validation_cases_filters_in_request_order(tmp_path: Path) -> None:
     validation_report = ValidationReport(
         cases_dir=tmp_path / "benchmark_cases",
-        phase=1,
         cases=[
             CaseValidationResult(case_id="RHEL-12345", case_type="cve_backport"),
             CaseValidationResult(case_id="RHEL-23456", case_type="rebase"),
@@ -122,7 +121,6 @@ def test_select_validation_cases_filters_in_request_order(tmp_path: Path) -> Non
 def test_select_validation_cases_reports_missing_cases(tmp_path: Path) -> None:
     validation_report = ValidationReport(
         cases_dir=tmp_path / "benchmark_cases",
-        phase=1,
         cases=[CaseValidationResult(case_id="RHEL-12345", case_type="cve_backport")],
     )
 
@@ -141,7 +139,6 @@ def test_build_run_report_assigns_actual_paths(tmp_path: Path) -> None:
     _write_expected(cases_dir, "RHEL-23456")
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -187,7 +184,6 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     _write_structured_jira(cases_dir, "RHEL-12345")
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -283,7 +279,6 @@ def test_build_run_report_fails_invalid_structured_jira(tmp_path: Path) -> None:
     )
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -335,7 +330,6 @@ def test_build_run_report_passes_replay_policy_environment(tmp_path: Path) -> No
     )
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -388,7 +382,6 @@ def test_build_run_report_writes_executor_actual_result(tmp_path: Path) -> None:
     )
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -444,7 +437,6 @@ def test_build_run_report_scores_executor_actual_result(tmp_path: Path) -> None:
     )
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -503,7 +495,6 @@ def test_build_run_report_enforces_event_safety_and_replay(tmp_path: Path) -> No
     )
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -600,7 +591,6 @@ def test_build_run_report_materializes_local_mock_repos(tmp_path: Path) -> None:
     requests = []
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -682,7 +672,6 @@ def test_build_run_report_clones_mock_repo_source_url(tmp_path: Path) -> None:
     requests = []
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -740,7 +729,6 @@ def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> Non
     )
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -798,7 +786,6 @@ def test_build_run_report_warns_on_cost_alert_threshold(tmp_path: Path) -> None:
     )
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -848,7 +835,6 @@ def test_build_run_report_records_provenance(tmp_path: Path) -> None:
     _write_expected(cases_dir, "RHEL-12345")
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -897,7 +883,6 @@ def test_build_run_report_fails_executor_score_mismatches(tmp_path: Path) -> Non
     )
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -942,7 +927,6 @@ def test_build_run_report_records_actual_result_write_failures(tmp_path: Path) -
     _write_expected(cases_dir, "RHEL-12345")
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -985,7 +969,6 @@ def test_build_run_report_records_executor_failures(tmp_path: Path) -> None:
     _write_expected(cases_dir, "RHEL-12345")
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
@@ -1023,7 +1006,6 @@ def test_build_run_report_records_executor_exception_group_details(tmp_path: Pat
     _write_expected(cases_dir, "RHEL-12345")
     validation_report = ValidationReport(
         cases_dir=cases_dir,
-        phase=1,
         cases=[
             CaseValidationResult(
                 case_id="RHEL-12345",
