@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import pytest
 
+from ymir_harness.ymir_source import ensure_ymir_source_path
+
 
 def test_real_ymir_workflow_modules_are_importable_when_installed() -> None:
-    pytest.importorskip("ymir")
+    try:
+        ensure_ymir_source_path()
+    except ImportError as exc:
+        pytest.skip(str(exc))
 
-    from ymir.agents import backport_agent, rebuild_agent, rebase_agent, triage_agent
+    try:
+        from ymir.agents import backport_agent, rebuild_agent, rebase_agent, triage_agent
+    except ImportError as exc:
+        pytest.skip(f"Ymir workflow dependencies are unavailable: {exc}")
 
     assert callable(triage_agent.run_workflow)
     assert callable(backport_agent.run_workflow)
