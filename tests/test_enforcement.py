@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from ymir_harness.enforcement import BenchmarkBoundaryViolation, enforce_benchmark_boundaries
+from ymir_harness.replay import ReplayCache
 
 
 def test_enforcement_serves_recorded_urllib_response(tmp_path: Path) -> None:
@@ -52,6 +53,15 @@ def test_enforcement_serves_recorded_requests_json_response(tmp_path: Path) -> N
 
     assert response.headers["Content-Type"] == "application/json"
     assert response.json() == {"id": 42, "path_with_namespace": "group/pkg"}
+
+
+def test_replay_cache_accepts_url_objects(tmp_path: Path) -> None:
+    yarl = pytest.importorskip("yarl")
+    manifest_path = _write_replay_manifest(tmp_path, {})
+
+    cache = ReplayCache(manifest_path)
+
+    assert not cache.has_url(yarl.URL("https://generativelanguage.googleapis.com/v1beta/models"))
 
 
 def test_enforcement_allows_configured_model_provider_url(
