@@ -22,6 +22,7 @@ from ymir_harness.scoring import load_json_file
 AsyncWorkflow = Callable[..., Awaitable[Any]]
 AgentFactory = Callable[..., Any]
 MCP_GATEWAY_URL_ENV = "MCP_GATEWAY_URL"
+CHAT_MODEL_ENV = "CHAT_MODEL"
 GATEWAY_START_TIMEOUT_SECONDS = 10.0
 
 
@@ -127,6 +128,14 @@ async def _run_ymir_triage(
     workflow: AsyncWorkflow | None,
     agent_factory: AgentFactory | None,
 ) -> RunCaseExecution:
+    missing_dependency = _live_workflow_dependency_failure(
+        request,
+        workflow=workflow,
+        workflow_name="triage",
+    )
+    if missing_dependency is not None:
+        return missing_dependency
+
     workflow_runner, default_agent_factory = _triage_dependencies(workflow, agent_factory)
 
     with _workflow_environment(request, workflow=workflow) as effective_request:
@@ -160,6 +169,14 @@ async def _run_ymir_backport(
     inputs = _backport_inputs(request)
     if isinstance(inputs, RunCaseExecution):
         return inputs
+
+    missing_dependency = _live_workflow_dependency_failure(
+        request,
+        workflow=workflow,
+        workflow_name="backport",
+    )
+    if missing_dependency is not None:
+        return missing_dependency
 
     workflow_runner, default_agent_factory = _backport_dependencies(workflow, agent_factory)
 
@@ -198,6 +215,14 @@ async def _run_ymir_rebase(
     if isinstance(inputs, RunCaseExecution):
         return inputs
 
+    missing_dependency = _live_workflow_dependency_failure(
+        request,
+        workflow=workflow,
+        workflow_name="rebase",
+    )
+    if missing_dependency is not None:
+        return missing_dependency
+
     workflow_runner = _rebase_dependencies(workflow)
 
     with _workflow_environment(request, workflow=workflow):
@@ -232,6 +257,14 @@ async def _run_ymir_rebuild(
     if isinstance(inputs, RunCaseExecution):
         return inputs
 
+    missing_dependency = _live_workflow_dependency_failure(
+        request,
+        workflow=workflow,
+        workflow_name="rebuild",
+    )
+    if missing_dependency is not None:
+        return missing_dependency
+
     workflow_runner = _rebuild_dependencies(workflow)
 
     with _workflow_environment(request, workflow=workflow):
@@ -255,6 +288,24 @@ async def _run_ymir_rebuild(
     return RunCaseExecution(
         status="passed",
         actual_result=_rebuild_actual_result(request, inputs, state),
+    )
+
+
+def _live_workflow_dependency_failure(
+    request: RunCaseRequest,
+    *,
+    workflow: AsyncWorkflow | None,
+    workflow_name: str,
+) -> RunCaseExecution | None:
+    if workflow is not None or _string_or_none(request.environment.get(CHAT_MODEL_ENV)):
+        return None
+
+    return RunCaseExecution(
+        status="failed",
+        reason=(
+            f"ymir {workflow_name} workflow missing {CHAT_MODEL_ENV}; "
+            "set CHAT_MODEL in the run environment, e.g. gemini:gemini-2.5-pro"
+        ),
     )
 
 
