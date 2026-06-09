@@ -117,6 +117,10 @@ def workflow_stderr_path(results_dir: Path, case_id: str, repetition: int) -> Pa
     return workflow_trace_dir(results_dir, repetition) / f"{case_id}.stderr.log"
 
 
+def workflow_workdir_path(results_dir: Path, repetition: int) -> Path:
+    return results_dir / f"repeat-{repetition}" / "workdir"
+
+
 def build_no_write_environment(
     cases_dir: Path,
     results_dir: Path,
@@ -397,6 +401,7 @@ def _run_case_result(
             started_at = time.monotonic()
             with (
                 _capture_workflow_output(results_dir, case_id, repetition),
+                _workflow_workdir(results_dir, repetition),
                 enforce_benchmark_boundaries(request.environment),
             ):
                 execution = executor(request)
@@ -809,6 +814,18 @@ def _capture_workflow_output(
         stack.enter_context(redirect_stdout(stdout))
         stack.enter_context(redirect_stderr(stderr))
         yield
+
+
+@contextmanager
+def _workflow_workdir(results_dir: Path, repetition: int) -> Iterator[None]:
+    workdir = workflow_workdir_path(results_dir, repetition)
+    workdir.mkdir(parents=True, exist_ok=True)
+    previous = Path.cwd()
+    try:
+        os.chdir(workdir)
+        yield
+    finally:
+        os.chdir(previous)
 
 
 def _artifact_replay_violations(
