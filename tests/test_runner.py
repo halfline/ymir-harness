@@ -556,6 +556,124 @@ def test_build_run_report_enforces_event_safety_and_replay(tmp_path: Path) -> No
     assert actual["replay_violations"] == ["unrecorded URL: https://example.invalid/unrecorded"]
 
 
+def test_build_run_report_captures_workflow_output_replay_violations(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "network_mode": "replay_only",
+        },
+    )
+    _write_web_manifest(cases_dir, "RHEL-12345", [])
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        print(
+            "BenchmarkBoundaryViolation: unrecorded replay URL blocked: "
+            "https://example.invalid/missing.patch"
+        )
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    entry = report.entries[0]
+    assert entry.status == "failed"
+    assert entry.reason == "deterministic score failed"
+    actual = json.loads(entry.actual_path.read_text(encoding="utf-8"))
+    assert actual["replay_violations"] == [
+        "unrecorded replay URL blocked: https://example.invalid/missing.patch"
+    ]
+    assert "missing.patch" in runner_module.workflow_stdout_path(
+        results_dir,
+        "RHEL-12345",
+        1,
+    ).read_text(encoding="utf-8")
+
+
+def test_build_run_report_summarizes_artifact_replay_violations_on_executor_failure(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "network_mode": "replay_only",
+        },
+    )
+    _write_web_manifest(cases_dir, "RHEL-12345", [])
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        print(
+            "BenchmarkBoundaryViolation: external subprocess URL blocked: "
+            "https://gitlab.example/group/pkg.git"
+        )
+        raise RuntimeError("agent crashed")
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    entry = report.entries[0]
+    assert entry.status == "failed"
+    assert entry.reason == (
+        "executor failed: RuntimeError: agent crashed; replay violations: "
+        "external subprocess URL blocked: https://gitlab.example/group/pkg.git"
+    )
+
+
 def test_build_run_report_materializes_local_mock_repos(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
