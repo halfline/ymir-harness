@@ -198,6 +198,24 @@ def test_enforcement_returns_replay_miss_for_unrecorded_shell_download(
     assert completed.stdout == f"replay miss: URL is not recorded in replay cache: {url}\n"
 
 
+def test_enforcement_returns_replay_miss_for_popen_shell_download(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    url = "https://example.invalid/missing.patch"
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        process = subprocess.Popen(
+            ["curl", url],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = process.communicate()
+
+    assert process.returncode == 0
+    assert stdout == f"replay miss: URL is not recorded in replay cache: {url}\n"
+    assert stderr == ""
+
+
 def test_enforcement_replays_gitlab_commit_patch_from_source_cache(tmp_path: Path) -> None:
     manifest_path = _write_replay_manifest(tmp_path, {})
     source_repo, commit_sha = _create_git_repo(tmp_path)
@@ -340,6 +358,24 @@ def test_enforcement_returns_replay_miss_for_external_subprocess_url(tmp_path: P
 
     assert completed.returncode == 128
     assert completed.stderr == f"replay miss: URL is not recorded in replay cache: {url}\n"
+
+
+def test_enforcement_returns_replay_miss_for_external_popen_url(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    url = "https://example.invalid/repo.git"
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        process = subprocess.Popen(
+            ["git", "clone", url],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = process.communicate()
+
+    assert process.returncode == 128
+    assert stdout == ""
+    assert stderr == f"replay miss: URL is not recorded in replay cache: {url}\n"
 
 
 def test_enforcement_allows_mock_rewritten_git_subprocess_url(
