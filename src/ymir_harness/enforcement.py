@@ -410,11 +410,15 @@ def _check_command(
             and not (replayable_download or mock_git_command)
         ):
             raise BenchmarkBoundaryViolation(f"external subprocess URL blocked: {external_urls[0]}")
+        if mock_git_command:
+            return
         if network_mode == "replay_only" and external_urls:
+            if _is_git_command(tokens):
+                raise BenchmarkBoundaryViolation(
+                    f"external subprocess URL blocked: {external_urls[0]}"
+                )
             return
         if replayable_download:
-            return
-        if mock_git_command:
             return
         violations = detect_replay_violations(
             [{"argv": tokens}],
