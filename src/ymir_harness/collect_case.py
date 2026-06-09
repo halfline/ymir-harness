@@ -325,7 +325,12 @@ def _fetch_evidence(
                     result=result,
                 )
             except CollectCaseError as exc:
-                result.warnings.append(f"skipped linked Jira {linked_key}: {exc}")
+                linked_stub = _linked_jira_issue_stub(jira_issue, request.case_id, linked_key)
+                if linked_stub is None:
+                    result.warnings.append(f"skipped linked Jira {linked_key}: {exc}")
+                    continue
+                result.warnings.append(f"used embedded linked Jira {linked_key}: {exc}")
+                linked_jira_issues.append(linked_stub)
                 continue
             linked_jira_issues.append(
                 FetchedJiraIssue(
@@ -339,6 +344,12 @@ def _fetch_evidence(
     jira_issue_source = _jira_issue_source(request, jira_issue)
     jira_comments_source = _jira_comments_source(request, jira_comments)
     jira_links_source = _jira_links_source(request, jira_links)
+    seen_linked_keys = {linked.key for linked in linked_jira_issues}
+    linked_jira_issues.extend(
+        linked
+        for linked in _embedded_linked_jira_issues(jira_issue_source, request.case_id)
+        if linked.key not in seen_linked_keys
+    )
     if request.network_mode != "network_denied":
         jira_patch_urls = tuple(
             _patch_urls_from_jira_evidence(
@@ -557,6 +568,54 @@ def _linked_jira_keys(
             if key is not None and key != case_id:
                 keys.append(key)
     return list(dict.fromkeys(keys))
+
+
+def _embedded_linked_jira_issues(
+    issue: Mapping[str, Any] | None,
+    case_id: str,
+) -> list[FetchedJiraIssue]:
+    return [
+        stub
+        for key in _linked_jira_keys(issue, case_id)
+        if (stub := _linked_jira_issue_stub(issue, case_id, key)) is not None
+    ]
+
+
+def _linked_jira_issue_stub(
+    issue: Mapping[str, Any] | None,
+    case_id: str,
+    linked_key: str,
+) -> FetchedJiraIssue | None:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return None
+    values = fields.get("issuelinks")
+    if not isinstance(values, list):
+        return None
+
+    for link in values:
+        if not isinstance(link, Mapping):
+            continue
+        for name in ("inwardIssue", "outwardIssue"):
+            linked = link.get(name)
+            if not isinstance(linked, Mapping):
+                continue
+            key = _nonempty_string(linked.get("key"))
+            if key != linked_key or key == case_id:
+                continue
+            payload = copy.deepcopy(dict(linked))
+            payload["key"] = key
+            linked_fields = payload.get("fields")
+            payload["fields"] = (
+                copy.deepcopy(dict(linked_fields)) if isinstance(linked_fields, Mapping) else {}
+            )
+            return FetchedJiraIssue(
+                key=key,
+                issue=payload,
+                comments={"comments": [], "maxResults": 0, "startAt": 0, "total": 0},
+                links=[],
+            )
+    return None
 
 
 def _jira_issue_api_url(url: str, case_id: str) -> str:
