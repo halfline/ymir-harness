@@ -726,6 +726,64 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
     assert seen_urls == list(responses)
 
 
+def test_collect_case_scrubs_comments_after_historical_as_of(tmp_path: Path) -> None:
+    issue_json = _write_json(
+        tmp_path / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": {
+                "summary": "Backport CVE fix",
+                "components": [{"name": "dnsmasq"}],
+                "fixVersions": [{"name": "rhel-8.10.z"}],
+            },
+        },
+    )
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": "Reporter supplied reproducer.",
+                    "created": "2025-09-10T00:00:00.000+0000",
+                },
+                {
+                    "body": "*Resolution*: backport",
+                    "created": "2025-09-12T09:46:43.672+0000",
+                },
+                {
+                    "body": "A later human comment that did not exist during triage.",
+                    "created": "2025-09-13T00:00:00.000+0000",
+                },
+            ]
+        },
+    )
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            network_mode="network_denied",
+            jira_issue_json=issue_json,
+            jira_comments_json=comments_json,
+        )
+    )
+
+    jira_dir = tmp_path / "benchmark_cases" / "jiras" / "RHEL-12345"
+    reconstruction = json.loads((jira_dir / "reconstruction.json").read_text(encoding="utf-8"))
+    starting = json.loads((jira_dir / "starting-issue.json").read_text(encoding="utf-8"))
+    assert reconstruction["as_of"] == "2025-09-12T09:46:43.671999Z"
+    assert starting["fields"]["comment"]["comments"] == [
+        {
+            "body": "Reporter supplied reproducer.",
+            "created": "2025-09-10T00:00:00.000+0000",
+        }
+    ]
+
+
 def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

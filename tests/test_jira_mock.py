@@ -177,6 +177,52 @@ def test_materialize_ymir_jira_mock_writes_flat_issue_file(tmp_path: Path) -> No
     assert linked_payload["fields"]["summary"] == "Linked original issue"
 
 
+def test_materialize_ymir_jira_mock_embeds_dev_status(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "issue.json",
+        {
+            "id": "10001",
+            "key": "RHEL-12345",
+            "fields": {"summary": "Backport CVE fix"},
+        },
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "dev-status.json",
+        {
+            "summary": {"repository": {"byInstanceType": {"GitLab": {"count": 1}}}},
+            "details": {
+                "GitLab:repository": [
+                    {
+                        "repositories": [
+                            {
+                                "url": "https://gitlab.example/group/pkg",
+                                "commits": [{"url": "https://gitlab.example/group/pkg/-/commit/1"}],
+                            }
+                        ]
+                    }
+                ]
+            },
+        },
+    )
+
+    target_dir = materialize_ymir_jira_mock(
+        cases_dir,
+        results_dir,
+        "RHEL-12345",
+        repetition=1,
+    )
+
+    payload = json.loads((target_dir / "RHEL-12345").read_text(encoding="utf-8"))
+    assert payload["dev_status"]["summary"]["repository"]["byInstanceType"]["GitLab"] == {
+        "count": 1
+    }
+    assert payload["dev_status"]["details"]["GitLab:repository"][0]["repositories"][0][
+        "commits"
+    ] == [{"url": "https://gitlab.example/group/pkg/-/commit/1"}]
+
+
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
