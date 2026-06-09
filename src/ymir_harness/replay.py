@@ -304,7 +304,7 @@ class ReplayCache:
         if request is None:
             return None
 
-        repo_path = self._source_repo_for_project(request.project_url, commit=request.commit)
+        repo_path = self._source_repo_for_project(request.project_url)
         if repo_path is None:
             return None
 
@@ -353,18 +353,13 @@ class ReplayCache:
     def _source_repo_for_url(self, url: str) -> Path | None:
         patch_request = _source_patch_request(url)
         if patch_request is not None:
-            return self._source_repo_for_project(
-                patch_request.project_url,
-                commit=patch_request.commit,
-            )
+            return self._source_repo_for_project(patch_request.project_url)
         file_request = _source_file_request(url)
         if file_request is not None:
             return self._source_repo_for_project(file_request.project_url)
         return None
 
-    def _source_repo_for_project(
-        self, project_url: str, *, commit: str | None = None
-    ) -> Path | None:
+    def _source_repo_for_project(self, project_url: str) -> Path | None:
         if self.source_cache_dir is None:
             return None
         upstream_dir = self.source_cache_dir / "upstream"
@@ -375,24 +370,10 @@ class ReplayCache:
         matching = [
             repository
             for repository in repositories
-            if _same_git_project(_git_remote_url(repository), project_url)
+            if _same_or_aliased_git_project(_git_remote_url(repository), project_url)
         ]
         if matching:
             return matching[0]
-
-        related = [
-            repository
-            for repository in repositories
-            if _related_git_project(_git_remote_url(repository), project_url)
-        ]
-        if related:
-            return related[0]
-
-        if commit is None:
-            return None
-        for repository in repositories:
-            if _git_commit_exists(repository, commit):
-                return repository
         return None
 
 
@@ -544,18 +525,25 @@ def _git_command(repo_path: Path, args: list[str]) -> list[str]:
     return ["git", "-C", str(repo_path), *args]
 
 
-def _same_git_project(first: str | None, second: str) -> bool:
+def _same_or_aliased_git_project(first: str | None, second: str) -> bool:
     if first is None:
         return False
-    return _normalized_git_project(first) == _normalized_git_project(second)
+    target = _normalized_git_project(second)
+    return target in {_normalized_git_project(alias) for alias in _source_project_aliases(first)}
 
 
-def _related_git_project(first: str | None, second: str) -> bool:
-    if first is None:
-        return False
-    first_path = _normalized_git_path(_git_project_path(first))
-    second_path = _normalized_git_path(_git_project_path(second))
-    return first_path == second_path or first_path.endswith(f"/{second_path}")
+def _source_project_aliases(remote_url: str) -> tuple[str, ...]:
+    aliases = [remote_url]
+    parsed = urlparse(remote_url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return tuple(dict.fromkeys(aliases))
+
+    parts = [part for part in parsed.path.strip("/").removesuffix(".git").split("/") if part]
+    if len(parts) >= 2 and parts[-2] == "rpms":
+        aliases.append(f"https://src.fedoraproject.org/rpms/{parts[-1]}.git")
+    if parsed.hostname.lower() == "gitlab.gnome.org" and len(parts) >= 2:
+        aliases.append(f"https://github.com/{'/'.join(parts)}.git")
+    return tuple(dict.fromkeys(aliases))
 
 
 def _normalized_git_project(url: str) -> str:
@@ -563,11 +551,6 @@ def _normalized_git_project(url: str) -> str:
     if parsed.scheme and parsed.netloc:
         return f"{parsed.netloc.lower()}/{_normalized_git_path(parsed.path)}"
     return _normalized_git_path(url)
-
-
-def _git_project_path(url: str) -> str:
-    parsed = urlparse(url)
-    return parsed.path if parsed.scheme and parsed.netloc else url
 
 
 def _normalized_git_path(path: str) -> str:
