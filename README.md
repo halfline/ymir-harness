@@ -325,6 +325,8 @@ actual result path and the exception reason.
 Workflow adapters start from a no-write environment profile that forces
 `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
 known write credentials and Kerberos keytab paths from the process environment.
+Default live Ymir workflow adapters require `CHAT_MODEL` in the run
+environment before they start model-backed agents.
 Run reports include a `provenance` object populated from explicit
 `--provenance` entries and recognized environment variables such as
 `AGENTIC_SKILLS_SHA`, `AGENTIC_SKILLS_CHECKSUM`, `CONTAINER_IMAGE_DIGEST`,
