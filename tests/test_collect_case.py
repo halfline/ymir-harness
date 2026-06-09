@@ -33,7 +33,17 @@ def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
     )
     patch_path = _write_text(
         tmp_path / "inputs" / "fix.patch",
-        "diff --git a/source.c b/source.c\n",
+        "\n".join(
+            [
+                "diff --git a/source.c b/source.c",
+                "index e69de29..2c43c3c 100644",
+                "--- a/source.c",
+                "+++ b/source.c",
+                "@@ -0,0 +1 @@",
+                "+fixed",
+                "",
+            ]
+        ),
     )
     web_record = _write_text(tmp_path / "inputs" / "fix.response", "cached patch\n")
     source_archive = _write_text(tmp_path / "inputs" / "source.tar.gz", "source\n")
@@ -449,7 +459,7 @@ def test_collect_case_imports_completed_jira_without_repeated_metadata(
     ]
     assert starting["remote_links"] == []
 
-    report = validate_case_directory(cases_dir)
+    report = validate_case_directory(cases_dir, workflow="ymir-triage")
     assert not report.has_blocking_errors
     assert result.fetched_urls == seen_urls == list(responses)
 
@@ -586,7 +596,7 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
         == "gitlab/internal_rhel/glib2/branches.json"
     )
 
-    report = validate_case_directory(cases_dir)
+    report = validate_case_directory(cases_dir, workflow="ymir-triage")
     assert not report.has_blocking_errors
     assert seen_urls == list(responses)
 
@@ -930,6 +940,7 @@ def test_collect_case_caches_mock_repo_source(tmp_path: Path) -> None:
                 source_url=str(source_repo),
                 pre_fix_ref=pre_fix_ref,
                 branch="c9s",
+                zstream_override={"8": "rhel-8.10.z"},
             ),
             mock_repo_cache=cache_dir,
         )
@@ -948,7 +959,7 @@ def test_collect_case_caches_mock_repo_source(tmp_path: Path) -> None:
         check=True,
     )
 
-    report = validate_case_directory(cases_dir)
+    report = validate_case_directory(cases_dir, workflow="ymir-triage")
     assert not report.has_blocking_errors
 
 
