@@ -1,10 +1,9 @@
 # Ymir Harness
 
 Ymir Harness validates replayable benchmark fixtures and scores deterministic
-outputs from Ymir agent runs. It is the first slice of the benchmark plan in the
-adjacent `ai-workflows/ymir-harness.md` document: validate case fixtures before
-execution, then compare an actual structured result against the expected
-outcome with field-level detail.
+outputs from Ymir agent runs. It checks case fixtures, runs configured
+workflows in a no-write replay environment, and compares actual structured
+results against expected outcomes with field-level detail.
 
 Benchmark replay is offline by default. It only checks `pre_fix_ref` resolution
 when a mock fixture points at a local repository path or `file://` URL, and it
@@ -113,7 +112,7 @@ links so triage reruns must rederive the answer.
 
 The repository includes a synthetic offline seed fixture under
 `examples/benchmark_cases/`. It is not a historical benchmark case, but it gives
-new users a checked-in fixture layout to validate before adding real pilot data:
+new users a checked-in fixture layout to validate before adding real cases:
 
 ```bash
 ymir-harness validate-cases examples/benchmark_cases/
@@ -128,17 +127,16 @@ benchmark_cases/reports/fixture-validation.md
 benchmark_cases/reports/fixture-validation-errors.md
 ```
 
-Use `--phase 2` once pilot fixtures are ready for stricter metadata checks.
-Pass `--workflow ymir-triage` when validating a triage-only run so phase 2
+Pass `--workflow ymir-triage` when validating a triage-only run so validation
 does not require implementation-only source cache or reference patch artifacts.
-Phase 2 also checks that an expected `target_branch` or `fix_version` is
-declared by a mock repo `branch` or `zstream_override` value.
+For runnable cases, validation checks that an expected `target_branch` or
+`fix_version` is declared by a mock repo `branch` or `zstream_override` value.
 Replay web cache manifests must list expected `patch_urls` in `required_urls`.
 Recorded web cache files must stay under `web_cache/CASE_ID/`.
 `network_denied` cases must not declare expected `patch_urls`.
 `network_denied` cases must not include `web_cache/CASE_ID/manifest.json`.
-Phase 2 requires implementation cases to include `source_cache/CASE_ID/` unless
-the expected result sets `requires_source_cache` to `false`.
+Implementation cases must include `source_cache/CASE_ID/` unless the expected
+result sets `requires_source_cache` to `false`.
 Implementation source caches must include `source_cache/CASE_ID/upstream/` with
 a git clone or source archive.
 Upstream source archive files must be readable.
@@ -149,15 +147,15 @@ Expected results may declare `required_source_cache_files` as a list of
 `source_cache/CASE_ID`-relative file paths.
 Expected results may declare `source_cache_checksums` as a mapping from
 `source_cache/CASE_ID`-relative paths to `sha256:<hex>` digests.
-Phase 2 checks those cached files against their declared digests.
-When expected metadata declares `reference_patch_mode`, Phase 2 accepts
+Validation checks those cached files against their declared digests.
+When expected metadata declares `reference_patch_mode`, validation accepts
 `applies`, `scope_only`, or `semantic_reference`.
 Merged MR implementation cases must declare `reference_patch_mode`.
-Phase 2 requires `merged_mr` implementation cases to include
+Merged MR implementation cases must include
 `mock_data/*/reference_patches/CASE_ID.patch`.
 Reference patch files must parse as git patches.
-Phase 2 also requires a touched-file list to be extractable from each reference
-patch.
+Validation also requires a touched-file list to be extractable from each
+reference patch.
 When `reference_patch_mode` is `applies`, the reference patch must apply to a
 local mock repo at `pre_fix_ref`.
 It must not reverse-apply to `pre_fix_ref`, which indicates the fix is already
@@ -286,7 +284,7 @@ partial expected-result overrides. If the primary expected result fails,
 scoring tries each alternate and accepts the first deterministic pass while
 recording an `alternate_acceptable_outcome` metric.
 
-Phase 3 runner reports use `run_id`, `variant`, optional `ymir_sha`,
+Runner reports use `run_id`, `variant`, optional `ymir_sha`,
 `harness_version`, `fixture_checksum`, `features`, and `repeat` metadata. Each
 case entry includes `case_id`, `case_type`, `status`, `repetition`, optional
 `expected_path`, optional `actual_path`, optional `score`, optional
