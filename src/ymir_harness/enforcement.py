@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -58,6 +59,13 @@ def enforce_benchmark_boundaries(environment: Mapping[str, str]) -> Iterator[Non
     originals = _PatchState.capture()
     try:
         _patch_subprocess(originals, network_mode, replay_cache, recorded_urls, mock_git_urls)
+        _patch_asyncio_subprocess(
+            originals,
+            network_mode,
+            replay_cache,
+            recorded_urls,
+            mock_git_urls,
+        )
         if active_network_guard:
             _patch_socket(originals)
             _patch_urllib(originals, network_mode, replay_cache, model_hosts)
@@ -74,6 +82,8 @@ class _PatchState:
         self.socket_connect_ex = socket.socket.connect_ex
         self.subprocess_run = subprocess.run
         self.subprocess_popen = subprocess.Popen
+        self.asyncio_create_subprocess_exec = asyncio.create_subprocess_exec
+        self.asyncio_create_subprocess_shell = asyncio.create_subprocess_shell
         self.urllib_urlopen = None
         self.requests_request = None
         self.aiohttp_request = None
@@ -110,6 +120,8 @@ class _PatchState:
         socket.socket.connect_ex = self.socket_connect_ex
         subprocess.run = self.subprocess_run
         subprocess.Popen = self.subprocess_popen
+        asyncio.create_subprocess_exec = self.asyncio_create_subprocess_exec
+        asyncio.create_subprocess_shell = self.asyncio_create_subprocess_shell
 
         import urllib.request
 
@@ -239,6 +251,127 @@ def _patch_subprocess(
 
     subprocess.run = guarded_run
     subprocess.Popen = guarded_popen
+
+
+def _patch_asyncio_subprocess(
+    originals: _PatchState,
+    network_mode: str | None,
+    replay_cache: ReplayCache | None,
+    recorded_urls: Sequence[str],
+    mock_git_urls: Sequence[str],
+) -> None:
+    async def guarded_create_subprocess_exec(
+        program: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        command = [program, *args]
+        _check_command(
+            command,
+            network_mode=network_mode,
+            replay_cache=replay_cache,
+            recorded_urls=recorded_urls,
+            mock_git_urls=mock_git_urls,
+        )
+        replay = _subprocess_replay(command, replay_cache, network_mode, mock_git_urls)
+        if replay is not None:
+            return _AsyncReplayProcess(command, replay, kwargs)
+        return await originals.asyncio_create_subprocess_exec(program, *args, **kwargs)
+
+    async def guarded_create_subprocess_shell(
+        cmd: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        _check_command(
+            cmd,
+            network_mode=network_mode,
+            replay_cache=replay_cache,
+            recorded_urls=recorded_urls,
+            mock_git_urls=mock_git_urls,
+        )
+        replay = _subprocess_replay(cmd, replay_cache, network_mode, mock_git_urls)
+        if replay is not None:
+            return _AsyncReplayProcess(cmd, replay, kwargs)
+        return await originals.asyncio_create_subprocess_shell(cmd, *args, **kwargs)
+
+    asyncio.create_subprocess_exec = guarded_create_subprocess_exec
+    asyncio.create_subprocess_shell = guarded_create_subprocess_shell
+
+
+class _AsyncReplayProcess:
+    def __init__(
+        self,
+        command: Any,
+        replay: _SubprocessReplay,
+        kwargs: Mapping[str, Any],
+    ) -> None:
+        stdout_target = kwargs.get("stdout")
+        stderr_target = kwargs.get("stderr")
+        stdout_body = replay.stdout_body
+        stderr_body = replay.stderr_body
+        if stderr_target == subprocess.STDOUT:
+            stdout_body += stderr_body
+            stderr_body = b""
+
+        self.args = command
+        self.pid = 0
+        self.returncode = replay.returncode
+        self.stdin = None
+        self.stdout = _AsyncPipeReader(stdout_body) if stdout_target == subprocess.PIPE else None
+        self.stderr = _AsyncPipeReader(stderr_body) if stderr_target == subprocess.PIPE else None
+        self._stdout_body = stdout_body if stdout_target == subprocess.PIPE else None
+        self._stderr_body = stderr_body if stderr_target == subprocess.PIPE else None
+        _write_async_redirect(stdout_target, stdout_body)
+        if stderr_target != subprocess.STDOUT:
+            _write_async_redirect(stderr_target, stderr_body)
+
+    async def communicate(self, input: bytes | None = None) -> tuple[bytes | None, bytes | None]:
+        del input
+        return self._stdout_body, self._stderr_body
+
+    async def wait(self) -> int:
+        return int(self.returncode)
+
+    def send_signal(self, signal: int) -> None:
+        self.returncode = -int(signal)
+
+    def terminate(self) -> None:
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+class _AsyncPipeReader:
+    def __init__(self, body: bytes) -> None:
+        self._stream = io.BytesIO(body)
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._stream.read(n)
+
+    async def readline(self) -> bytes:
+        return self._stream.readline()
+
+    async def readexactly(self, n: int) -> bytes:
+        value = self._stream.read(n)
+        if len(value) != n:
+            raise asyncio.IncompleteReadError(value, n)
+        return value
+
+    def at_eof(self) -> bool:
+        current = self._stream.tell()
+        self._stream.seek(0, io.SEEK_END)
+        end = self._stream.tell()
+        self._stream.seek(current)
+        return current >= end
+
+
+def _write_async_redirect(target: Any, body: bytes) -> None:
+    if target in {None, subprocess.PIPE, subprocess.DEVNULL, subprocess.STDOUT}:
+        return
+    if hasattr(target, "write"):
+        target.write(body)
 
 
 def _check_command(
