@@ -1,0 +1,3 @@
+[submodule "ui-workflows"]
+	path = ui-workflows
+	url = git@github.com:packit/ai-workflows.git

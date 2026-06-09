@@ -7,9 +7,11 @@ from functools import partial
 from typing import Any
 
 from ymir_harness.enforcement import enforce_benchmark_boundaries
+from ymir_harness.ymir_source import ensure_ymir_source_path
 
 
 def main() -> None:
+    ensure_ymir_source_path()
     from ymir.tools.privileged.gateway import main as gateway_main  # type: ignore[import-not-found]
 
     _patch_ymir_jira_mock_remote_links()

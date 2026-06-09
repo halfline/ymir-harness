@@ -18,6 +18,7 @@ from ymir_harness.artifacts import merge_artifact_fields
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.runner import RunCaseExecution, RunCaseRequest
 from ymir_harness.scoring import load_json_file
+from ymir_harness.ymir_source import ensure_ymir_source_path
 
 AsyncWorkflow = Callable[..., Awaitable[Any]]
 AgentFactory = Callable[..., Any]
@@ -441,6 +442,7 @@ def _triage_dependencies(
     if workflow is not None and agent_factory is not None:
         return workflow, agent_factory
 
+    ensure_ymir_source_path()
     from ymir.agents.triage_agent import (  # type: ignore[import-not-found]
         create_triage_agent,
         run_workflow,
@@ -456,6 +458,7 @@ def _backport_dependencies(
     if workflow is not None and agent_factory is not None:
         return workflow, agent_factory
 
+    ensure_ymir_source_path()
     from ymir.agents.backport_agent import (  # type: ignore[import-not-found]
         create_backport_agent,
         run_workflow,
@@ -489,6 +492,7 @@ def _agent_class_workflow(
     *,
     class_names: tuple[str, ...],
 ) -> AsyncWorkflow:
+    ensure_ymir_source_path()
     module = importlib.import_module(module_name)
 
     for class_name in class_names:
