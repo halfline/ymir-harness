@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import shlex
@@ -9,11 +10,16 @@ from contextvars import ContextVar
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request
 
-from ymir_harness.replay import ReplayCache, ReplayCacheError, request_url
-from ymir_harness.safety import detect_replay_violations, detect_unsafe_command
+from ymir_harness.replay import ReplayCache, ReplayCacheError, ReplayResponse, request_url
+from ymir_harness.safety import (
+    detect_replay_violations,
+    detect_unsafe_command,
+    detect_unsafe_http_request,
+)
 
 
 class BenchmarkBoundaryViolation(RuntimeError):
@@ -127,6 +133,14 @@ def _patch_subprocess(
         replayed = _replayed_shell_download(command, replay_cache, kwargs)
         if replayed is not None:
             return replayed
+        replay_miss = _replay_miss_subprocess(
+            command,
+            network_mode=network_mode,
+            mock_git_urls=mock_git_urls,
+            kwargs=kwargs,
+        )
+        if replay_miss is not None:
+            return replay_miss
         return originals.subprocess_run(command, *args, **kwargs)
 
     class guarded_popen(subprocess.Popen):  # type: ignore[type-arg]
@@ -142,6 +156,11 @@ def _patch_subprocess(
                 raise BenchmarkBoundaryViolation(
                     "shell replay through subprocess.Popen is not supported; "
                     "use Python URL adapters or subprocess.run"
+                )
+            replay_miss_url = _subprocess_replay_miss_url(command, network_mode, mock_git_urls)
+            if replay_miss_url is not None:
+                raise BenchmarkBoundaryViolation(
+                    f"external subprocess Popen replay miss blocked: {replay_miss_url}"
                 )
             super().__init__(command, *args, **kwargs)
 
@@ -173,8 +192,14 @@ def _check_command(
             and all(_can_replay_url(url, replay_cache, recorded_urls) for url in external_urls)
         )
         mock_git_command = _is_mock_git_command(tokens, external_urls, mock_git_urls)
-        if external_urls and not (replayable_download or mock_git_command):
+        if (
+            network_mode == "network_denied"
+            and external_urls
+            and not (replayable_download or mock_git_command)
+        ):
             raise BenchmarkBoundaryViolation(f"external subprocess URL blocked: {external_urls[0]}")
+        if network_mode == "replay_only" and external_urls:
+            return
         if replayable_download:
             return
         if mock_git_command:
@@ -200,13 +225,89 @@ def _replayed_shell_download(
         return None
 
     body = replay_cache.read_bytes(urls[0])
-    text_mode = bool(
-        kwargs.get("text") or kwargs.get("encoding") or kwargs.get("universal_newlines")
+    return _completed_process(command, 0, stdout_body=body, stderr_body=b"", kwargs=kwargs)
+
+
+def _replay_miss_subprocess(
+    command: Any,
+    *,
+    network_mode: str | None,
+    mock_git_urls: Sequence[str],
+    kwargs: Mapping[str, Any],
+) -> subprocess.CompletedProcess[Any] | None:
+    if network_mode != "replay_only":
+        return None
+
+    tokens = _command_tokens(command)
+    external_urls = _external_urls(tokens)
+    if not external_urls or _is_mock_git_command(tokens, external_urls, mock_git_urls):
+        return None
+
+    body = b"".join(_replay_miss_body(url) for url in external_urls)
+    if _is_shell_download(command):
+        return _completed_process(command, 0, stdout_body=body, stderr_body=b"", kwargs=kwargs)
+
+    stderr = b"".join(_replay_miss_body(url) for url in external_urls)
+    returncode = 128 if _is_git_command(tokens) else 1
+    return _completed_process(
+        command, returncode, stdout_body=b"", stderr_body=stderr, kwargs=kwargs
     )
-    stdout = body.decode(kwargs.get("encoding") or "utf-8") if text_mode else body
-    if kwargs.get("stdout") is None:
-        stdout = None
-    return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=None)
+
+
+def _subprocess_replay_miss_url(
+    command: Any,
+    network_mode: str | None,
+    mock_git_urls: Sequence[str],
+) -> str | None:
+    if network_mode != "replay_only":
+        return None
+    tokens = _command_tokens(command)
+    external_urls = _external_urls(tokens)
+    if not external_urls or _is_mock_git_command(tokens, external_urls, mock_git_urls):
+        return None
+    return external_urls[0]
+
+
+def _completed_process(
+    command: Any,
+    returncode: int,
+    *,
+    stdout_body: bytes,
+    stderr_body: bytes,
+    kwargs: Mapping[str, Any],
+) -> subprocess.CompletedProcess[Any]:
+    stdout_target = subprocess.PIPE if kwargs.get("capture_output") else kwargs.get("stdout")
+    stderr_target = subprocess.PIPE if kwargs.get("capture_output") else kwargs.get("stderr")
+    stdout = _stream_value(stdout_target, stdout_body, kwargs)
+    stderr = _stream_value(stderr_target, stderr_body, kwargs)
+    if stderr_target == subprocess.STDOUT and stdout is not None:
+        addition = _output_value(stderr_body, kwargs)
+        stdout = stdout + addition if addition is not None else stdout
+        stderr = None
+    completed = subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
+    if kwargs.get("check"):
+        completed.check_returncode()
+    return completed
+
+
+def _stream_value(target: Any, body: bytes, kwargs: Mapping[str, Any]) -> Any:
+    if target is None or target == subprocess.DEVNULL:
+        return None
+    value = _output_value(body, kwargs)
+    if target == subprocess.PIPE:
+        return value
+    if hasattr(target, "write") and value is not None:
+        target.write(value)
+    return None
+
+
+def _output_value(body: bytes, kwargs: Mapping[str, Any]) -> Any:
+    if kwargs.get("text") or kwargs.get("encoding") or kwargs.get("universal_newlines"):
+        return body.decode(
+            kwargs.get("encoding") or "utf-8",
+            errors=kwargs.get("errors") or "strict",
+        )
+    return body
 
 
 def _can_replay_url(
@@ -258,6 +359,8 @@ def _patch_urllib(
         )
         if target_url is None:
             return originals.urllib_urlopen(url, *args, **kwargs)
+        method = request.get_method() if isinstance(request, Request) else "GET"
+        _check_http_operation(method, target_url, source="urllib")
         if (
             network_mode == "replay_only"
             and replay_cache is not None
@@ -267,6 +370,8 @@ def _patch_urllib(
         if _is_model_provider_url(target_url, model_hosts):
             with _model_socket_passthrough():
                 return originals.urllib_urlopen(url, *args, **kwargs)
+        if network_mode == "replay_only":
+            raise _replay_miss_http_error(target_url)
         _raise_network_violation(network_mode, target_url)
         return originals.urllib_urlopen(url, *args, **kwargs)
 
@@ -283,6 +388,7 @@ def _patch_requests(
         return
 
     def guarded_request(session: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+        _check_http_operation(method, url, source="requests")
         if network_mode == "replay_only" and replay_cache is not None and replay_cache.has_url(url):
             import requests  # type: ignore[import-not-found]
 
@@ -297,6 +403,8 @@ def _patch_requests(
         if _is_model_provider_url(url, model_hosts):
             with _model_socket_passthrough():
                 return originals.requests_request(session, method, url, *args, **kwargs)
+        if network_mode == "replay_only":
+            return _replay_miss_requests_response(method, url)
         _raise_network_violation(network_mode, url)
         return originals.requests_request(session, method, url, *args, **kwargs)
 
@@ -315,12 +423,25 @@ def _patch_aiohttp(
     async def guarded_request(
         session: Any, method: str, url: str, *args: Any, **kwargs: Any
     ) -> Any:
-        if network_mode == "replay_only" and replay_cache is not None and replay_cache.has_url(url):
-            return replay_cache.open_aiohttp_response(url)
-        if _is_model_provider_url(str(url), model_hosts):
+        target_url = str(url)
+        _check_http_operation(method, target_url, source="aiohttp")
+        if (
+            network_mode == "replay_only"
+            and replay_cache is not None
+            and replay_cache.has_url(target_url)
+        ):
+            return replay_cache.open_aiohttp_response(target_url)
+        if _is_model_provider_url(target_url, model_hosts):
             with _model_socket_passthrough():
                 return await originals.aiohttp_request(session, method, url, *args, **kwargs)
-        _raise_network_violation(network_mode, url)
+        if network_mode == "replay_only":
+            return ReplayResponse(
+                target_url,
+                _replay_miss_body(target_url),
+                headers=_replay_miss_headers(),
+                status=404,
+            )
+        _raise_network_violation(network_mode, target_url)
         return await originals.aiohttp_request(session, method, url, *args, **kwargs)
 
     originals.aiohttp_client_session._request = guarded_request
@@ -351,11 +472,42 @@ def _is_model_provider_url(url: str | None, allowed_hosts: Sequence[str]) -> boo
     return any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts)
 
 
+def _check_http_operation(method: str, url: str, *, source: str) -> None:
+    operation = detect_unsafe_http_request(method, url, source=source)
+    if operation:
+        raise BenchmarkBoundaryViolation(f"unsafe operation blocked: {operation.detail}")
+
+
+def _replay_miss_requests_response(method: str, url: str) -> Any:
+    import requests  # type: ignore[import-not-found]
+
+    body = _replay_miss_body(url)
+    response = requests.Response()
+    response.status_code = 404
+    response.reason = "Replay miss"
+    response.url = url
+    response._content = body
+    response.headers.update(_replay_miss_headers())
+    response.request = requests.Request(method=method, url=url).prepare()
+    return response
+
+
+def _replay_miss_http_error(url: str) -> HTTPError:
+    body = _replay_miss_body(url)
+    return HTTPError(url, 404, "Replay miss", _replay_miss_headers(), io.BytesIO(body))
+
+
+def _replay_miss_body(url: str) -> bytes:
+    return f"replay miss: URL is not recorded in replay cache: {url}\n".encode("utf-8")
+
+
+def _replay_miss_headers() -> dict[str, str]:
+    return {"Content-Type": "text/plain; charset=utf-8"}
+
+
 def _raise_network_violation(network_mode: str | None, url: str) -> None:
     if network_mode == "network_denied":
         raise BenchmarkBoundaryViolation(f"external network access blocked: {url}")
-    if network_mode == "replay_only":
-        raise BenchmarkBoundaryViolation(f"unrecorded replay URL blocked: {url}")
 
 
 def _replay_cache(environment: Mapping[str, str]) -> ReplayCache | None:
@@ -425,6 +577,11 @@ def _is_mock_git_command(
         return False
     mock_url_set = set(mock_git_urls)
     return all(url in mock_url_set for url in external_urls)
+
+
+def _is_git_command(tokens: Sequence[str]) -> bool:
+    command_tokens = _tokens_after_env(tokens)
+    return bool(command_tokens) and PathName(command_tokens[0]).name == "git"
 
 
 def _tokens_after_env(tokens: Sequence[str]) -> list[str]:

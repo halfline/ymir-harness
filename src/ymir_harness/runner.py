@@ -425,12 +425,14 @@ def _run_case_result(
         execution_actual_path = execution.actual_path or actual_path
         score = None
         replay_violations = _artifact_replay_violations(results_dir, case_id, repetition)
+        replay_misses = _artifact_replay_misses(results_dir, case_id, repetition)
         actual_result = _apply_run_policies(
             cases_dir,
             case_id,
             expected,
             execution.actual_result,
-            replay_violations,
+            artifact_replay_violations=replay_violations,
+            artifact_replay_misses=replay_misses,
         )
         if actual_result is not None:
             try:
@@ -762,6 +764,7 @@ def _apply_run_policies(
     expected: Mapping[str, Any],
     actual_result: Mapping[str, Any] | None,
     artifact_replay_violations: Sequence[str] = (),
+    artifact_replay_misses: Sequence[str] = (),
 ) -> Mapping[str, Any] | None:
     if actual_result is None:
         return None
@@ -769,6 +772,8 @@ def _apply_run_policies(
     payload = dict(actual_result)
     if artifact_replay_violations:
         _append_result_values(payload, "replay_violations", artifact_replay_violations)
+    if artifact_replay_misses:
+        _append_result_values(payload, "replay_misses", artifact_replay_misses)
 
     events = _actual_result_events(payload)
     if not events:
@@ -789,7 +794,8 @@ def _apply_run_policies(
             recorded_urls = _recorded_urls(cases_dir / "web_cache" / case_id / "manifest.json")
         replay_violations = detect_replay_violations(events, recorded_urls=recorded_urls)
         if replay_violations:
-            _append_result_values(payload, "replay_violations", replay_violations)
+            target = "replay_misses" if network_mode == "replay_only" else "replay_violations"
+            _append_result_values(payload, target, replay_violations)
 
     return payload
 
@@ -816,14 +822,37 @@ def _artifact_replay_violations(
     case_id: str,
     repetition: int,
 ) -> list[str]:
+    return [
+        blocked.to_replay_violation()
+        for blocked in _artifact_blocked_urls(results_dir, case_id, repetition)
+        if blocked.reason != "replay miss"
+    ]
+
+
+def _artifact_replay_misses(
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+) -> list[str]:
+    return [
+        blocked.to_replay_violation()
+        for blocked in _artifact_blocked_urls(results_dir, case_id, repetition)
+        if blocked.reason == "replay miss"
+    ]
+
+
+def _artifact_blocked_urls(
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+):
     artifact_root = results_dir / f"repeat-{repetition}"
     if not artifact_root.exists():
         return []
     try:
-        blocked_urls = blocked_urls_from_run_path(artifact_root)
+        return blocked_urls_from_run_path(artifact_root)
     except CaptureMissingError:
         return []
-    return [blocked.to_replay_violation() for blocked in blocked_urls]
 
 
 def _actual_result_events(actual_result: Mapping[str, Any]) -> list[Mapping[str, Any]]:

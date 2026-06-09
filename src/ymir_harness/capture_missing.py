@@ -26,6 +26,14 @@ DEFAULT_ALLOWED_HOSTS = (
 )
 MISSING_URL_PATTERNS = (
     (
+        "replay miss",
+        re.compile(
+            r"replay miss:\s*"
+            r"(?:URL is not (?:recorded|available) in replay cache:\s*)?"
+            r"(https?://[^\s\"'<>]+)"
+        ),
+    ),
+    (
         "unrecorded replay URL blocked",
         re.compile(r"unrecorded replay URL blocked:\s*(https?://[^\s\"'<>]+)"),
     ),
