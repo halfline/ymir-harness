@@ -34,6 +34,30 @@ def test_score_case_accepts_nested_triage_result() -> None:
     assert report.summary()["fail"] == 0
 
 
+def test_score_case_extracts_cve_ids_from_modern_triage_text() -> None:
+    expected = {
+        "schema_version": 1,
+        "case_id": "RHEL-12345",
+        "case_type": "not_affected",
+        "resolution": "not_affected",
+        "package": "rpm-ostree",
+        "cve_ids": ["CVE-2026-28390"],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "not_affected",
+        "resolution": "not-affected",
+        "package": "rpm-ostree",
+        "data": {
+            "findings": "CVE-2026-28390 is not in the package execute path.",
+        },
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+
+
 def test_score_case_reports_field_failures() -> None:
     expected = {
         "case_id": "RHEL-12345",

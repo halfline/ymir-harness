@@ -88,6 +88,37 @@ def test_capture_missing_records_replay_miss_url(
     assert [capture.url for capture in result.captured] == [url]
 
 
+def test_capture_missing_canonicalizes_escaped_newline_urls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.json"
+    clean_url = "https://gitlab.example/group/pkg"
+    escaped_url = clean_url + r"\\n\\"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(run_file, f'{{"reason": "replay miss: {escaped_url}"}}\n')
+
+    def fake_urlopen(request, timeout: float):
+        assert request.full_url == clean_url
+        assert timeout == 30.0
+        return _Response(b"ok\n", "text/plain")
+
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            allowed_hosts=("gitlab.example",),
+        )
+    )
+
+    assert result.candidate_urls == [clean_url]
+    assert [capture.url for capture in result.captured] == [clean_url]
+
+
 def test_capture_missing_skips_disallowed_hosts(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     run_file = tmp_path / "run.json"

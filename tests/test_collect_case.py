@@ -137,6 +137,23 @@ def test_collect_case_refuses_to_overwrite_existing_files(tmp_path: Path) -> Non
         collect_case(request)
 
 
+def test_collect_case_auto_caches_package_distgit_when_cache_is_requested(
+    tmp_path: Path,
+) -> None:
+    request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-12345",
+        package="rpm-ostree",
+        network_mode="replay_only",
+        mock_repo_cache=tmp_path / "mock-repos",
+    )
+
+    assert collect_case_module._auto_source_project_urls(  # noqa: SLF001
+        request,
+        collect_case_module.FetchedEvidence(),
+    ) == ("https://gitlab.com/redhat/centos-stream/rpms/rpm-ostree",)
+
+
 def test_collect_case_rejects_network_denied_external_records(tmp_path: Path) -> None:
     with pytest.raises(CollectCaseError, match="network_denied cases must not declare"):
         collect_case(
