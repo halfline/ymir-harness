@@ -362,6 +362,33 @@ def test_enforcement_blocks_unrecorded_git_subprocess_url(tmp_path: Path) -> Non
     assert str(exc_info.value) == f"external subprocess URL blocked: {url}"
 
 
+def test_enforcement_replays_recorded_git_subprocess_failure(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    url = "https://example.invalid/repo.git"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["git_failures"] = {
+        url: {
+            "returncode": 128,
+            "stdout": "",
+            "stderr": "fatal: unable to access repository\n",
+        }
+    }
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        completed = subprocess.run(
+            ["git", "ls-remote", "https://example.invalid/repo"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    assert completed.returncode == 128
+    assert completed.stdout == ""
+    assert completed.stderr == "fatal: unable to access repository\n"
+
+
 def test_enforcement_blocks_unrecorded_git_popen_url(tmp_path: Path) -> None:
     manifest_path = _write_replay_manifest(tmp_path, {})
     url = "https://example.invalid/repo.git"

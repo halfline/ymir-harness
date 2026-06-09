@@ -567,6 +567,56 @@ def test_capture_missing_mirrors_blocked_git_source(
     assert (captured / "config").is_file()
 
 
+def test_capture_missing_records_git_source_failure_for_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    url = "https://gitlab.example/group/project.git"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}\n",
+    )
+
+    def fake_run(command, cwd, check, stdout, stderr, text):
+        assert command[:4] == ["git", "clone", "--mirror", "--quiet"]
+        assert command[4] == url
+        assert cwd == Path(command[5]).parent
+        assert check is False
+        assert stdout == subprocess.PIPE
+        assert stderr == subprocess.PIPE
+        assert text is True
+        return subprocess.CompletedProcess(
+            command,
+            128,
+            stdout="",
+            stderr="fatal: unable to access repository\n",
+        )
+
+    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            allowed_hosts=("gitlab.example",),
+        )
+    )
+
+    assert result.failed == []
+    assert [capture.url for capture in result.captured_git_failures] == [url]
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    failure = manifest["git_failures"][url]
+    assert failure["returncode"] == 128
+    assert "fatal: unable to access repository" in failure["stderr"]
+    assert "https://gitlab.example/group/project" in manifest["git_failures"]
+
+
 class _Response:
     def __init__(self, body: bytes, content_type: str):
         self.status = 200
