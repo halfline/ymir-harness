@@ -5,6 +5,7 @@ import os
 import shlex
 import socket
 import subprocess
+from contextvars import ContextVar
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
@@ -19,11 +20,24 @@ class BenchmarkBoundaryViolation(RuntimeError):
     """Raised when a benchmark run attempts forbidden I/O."""
 
 
+_MODEL_SOCKET_PASSTHROUGH = ContextVar("ymir_harness_model_socket_passthrough", default=False)
+MODEL_PROVIDER_HOSTS = {
+    "anthropic": ("api.anthropic.com",),
+    "gemini": ("generativelanguage.googleapis.com",),
+    "openai": ("api.openai.com",),
+    "vertexai": (
+        "aiplatform.googleapis.com",
+        "oauth2.googleapis.com",
+    ),
+}
+
+
 @contextmanager
 def enforce_benchmark_boundaries(environment: Mapping[str, str]) -> Iterator[None]:
     network_mode = environment.get("YMIR_BENCHMARK_NETWORK_MODE")
     replay_cache = _replay_cache(environment)
     recorded_urls = _recorded_urls(environment, replay_cache)
+    model_hosts = _model_provider_hosts(environment)
     active_network_guard = network_mode in {"replay_only", "network_denied"}
 
     originals = _PatchState.capture()
@@ -31,9 +45,9 @@ def enforce_benchmark_boundaries(environment: Mapping[str, str]) -> Iterator[Non
         _patch_subprocess(originals, network_mode, replay_cache, recorded_urls)
         if active_network_guard:
             _patch_socket(originals)
-            _patch_urllib(originals, network_mode, replay_cache)
-            _patch_requests(originals, network_mode, replay_cache)
-            _patch_aiohttp(originals, network_mode, replay_cache)
+            _patch_urllib(originals, network_mode, replay_cache, model_hosts)
+            _patch_requests(originals, network_mode, replay_cache, model_hosts)
+            _patch_aiohttp(originals, network_mode, replay_cache, model_hosts)
         yield
     finally:
         originals.restore()
@@ -187,6 +201,8 @@ def _patch_socket(originals: _PatchState) -> None:
 
 
 def _check_socket_address(address: Any) -> None:
+    if _MODEL_SOCKET_PASSTHROUGH.get():
+        return
     if not isinstance(address, tuple) or not address:
         return
     host = str(address[0])
@@ -199,6 +215,7 @@ def _patch_urllib(
     originals: _PatchState,
     network_mode: str | None,
     replay_cache: ReplayCache | None,
+    model_hosts: Sequence[str],
 ) -> None:
     import urllib.request
 
@@ -215,6 +232,9 @@ def _patch_urllib(
             and replay_cache.has_url(target_url)
         ):
             return replay_cache.open_urllib_response(target_url)
+        if _is_model_provider_url(target_url, model_hosts):
+            with _model_socket_passthrough():
+                return originals.urllib_urlopen(url, *args, **kwargs)
         _raise_network_violation(network_mode, target_url)
         return originals.urllib_urlopen(url, *args, **kwargs)
 
@@ -225,6 +245,7 @@ def _patch_requests(
     originals: _PatchState,
     network_mode: str | None,
     replay_cache: ReplayCache | None,
+    model_hosts: Sequence[str],
 ) -> None:
     if originals.requests_session is None or originals.requests_request is None:
         return
@@ -239,6 +260,9 @@ def _patch_requests(
             response._content = replay_cache.read_bytes(url)
             response.request = requests.Request(method=method, url=url).prepare()
             return response
+        if _is_model_provider_url(url, model_hosts):
+            with _model_socket_passthrough():
+                return originals.requests_request(session, method, url, *args, **kwargs)
         _raise_network_violation(network_mode, url)
         return originals.requests_request(session, method, url, *args, **kwargs)
 
@@ -249,6 +273,7 @@ def _patch_aiohttp(
     originals: _PatchState,
     network_mode: str | None,
     replay_cache: ReplayCache | None,
+    model_hosts: Sequence[str],
 ) -> None:
     if originals.aiohttp_client_session is None or originals.aiohttp_request is None:
         return
@@ -258,10 +283,38 @@ def _patch_aiohttp(
     ) -> Any:
         if network_mode == "replay_only" and replay_cache is not None and replay_cache.has_url(url):
             return replay_cache.open_aiohttp_response(url)
+        if _is_model_provider_url(str(url), model_hosts):
+            with _model_socket_passthrough():
+                return await originals.aiohttp_request(session, method, url, *args, **kwargs)
         _raise_network_violation(network_mode, url)
         return await originals.aiohttp_request(session, method, url, *args, **kwargs)
 
     originals.aiohttp_client_session._request = guarded_request
+
+
+@contextmanager
+def _model_socket_passthrough() -> Iterator[None]:
+    token = _MODEL_SOCKET_PASSTHROUGH.set(True)
+    try:
+        yield
+    finally:
+        _MODEL_SOCKET_PASSTHROUGH.reset(token)
+
+
+def _model_provider_hosts(environment: Mapping[str, str]) -> tuple[str, ...]:
+    model_name = environment.get("CHAT_MODEL", "")
+    prefix = model_name.split(":", 1)[0].lower()
+    return MODEL_PROVIDER_HOSTS.get(prefix, ())
+
+
+def _is_model_provider_url(url: str | None, allowed_hosts: Sequence[str]) -> bool:
+    if not url or not allowed_hosts:
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname is None:
+        return False
+    host = parsed.hostname.lower()
+    return any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts)
 
 
 def _raise_network_violation(network_mode: str | None, url: str) -> None:
