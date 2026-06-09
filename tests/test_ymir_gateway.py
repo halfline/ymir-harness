@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ymir_harness.jira_replay import write_jira_search_fixture
+from ymir_harness.jira_replay import parse_jira_replay_misses, write_jira_search_fixture
 from ymir_harness.ymir_gateway import (
     _install_optional_gateway_shims,
     _patch_ymir_jira_mock_remote_links,
@@ -175,6 +175,56 @@ def test_patch_ymir_jira_mock_replays_cached_search(
             return await response.json()
 
     assert asyncio.run(search()) == expected_response
+
+
+def test_patch_ymir_jira_mock_reports_missing_issue(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class BaseSession:
+        issue_get_regex = re.compile(r"https://jira.example/rest/api/3/issue/([A-Z0-9-]+)")
+        remote_link_get_regex = re.compile(
+            r"https://jira.example/rest/api/3/issue/([A-Z0-9-]+)/remotelink"
+        )
+
+        @asynccontextmanager
+        async def get(self, *_args: object, **_kwargs: object):
+            yield SimpleNamespace(raise_for_status=lambda: None, json=lambda: {})
+
+    async def read_jira_mock(issue_key: str, remote_link: bool = False) -> object:
+        raise FileNotFoundError(issue_key)
+
+    mock_module = SimpleNamespace(
+        aiohttpClientSessionMock=BaseSession,
+        _read_jira_mock=read_jira_mock,
+        flexmock=lambda **attrs: SimpleNamespace(**attrs),
+    )
+    jira_module = SimpleNamespace(aiohttpClientSession=BaseSession)
+
+    monkeypatch.setenv("MOCK_JIRA", "true")
+    monkeypatch.setitem(
+        sys.modules,
+        "ymir.tools.privileged.aiohttp_client_session_mock",
+        mock_module,
+    )
+    monkeypatch.setitem(sys.modules, "ymir.tools.privileged.jira", jira_module)
+
+    _patch_ymir_jira_mock_remote_links()
+
+    async def read_missing_issue() -> None:
+        session = jira_module.aiohttpClientSession()
+        async with session.get("https://jira.example/rest/api/3/issue/RHEL-99999") as response:
+            response.raise_for_status()
+            with pytest.raises(FileNotFoundError):
+                await response.json()
+
+    asyncio.run(read_missing_issue())
+
+    misses = parse_jira_replay_misses(capsys.readouterr().err)
+    assert len(misses) == 1
+    assert misses[0].kind == "jira_issue"
+    assert misses[0].method == "GET"
+    assert misses[0].payload == {"issue_key": "RHEL-99999"}
 
 
 def test_patch_ymir_jira_mock_serves_dev_status(
