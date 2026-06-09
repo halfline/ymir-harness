@@ -224,6 +224,131 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     assert result.fetched_urls == seen_urls == list(responses)
 
 
+def test_collect_case_writes_embedded_linked_jira_for_local_issue_json(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "issue.json"
+    issue_path.write_text(
+        json.dumps(
+            {
+                "key": "RHEL-12345",
+                "fields": {
+                    "summary": "Clone issue",
+                    "issuelinks": [
+                        {
+                            "outwardIssue": {
+                                "key": "RHEL-23456",
+                                "fields": {"summary": "Original issue"},
+                            }
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            network_mode="network_denied",
+            jira_issue_json=issue_path,
+        )
+    )
+
+    linked = json.loads(
+        (
+            tmp_path
+            / "benchmark_cases"
+            / "jiras"
+            / "RHEL-12345"
+            / "linked"
+            / "RHEL-23456"
+            / "starting-issue.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert linked["key"] == "RHEL-23456"
+    assert linked["fields"]["summary"] == "Original issue"
+
+
+def test_collect_case_uses_embedded_linked_jira_when_fetch_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+            "key": "RHEL-12345",
+            "fields": {
+                "summary": "Clone issue",
+                "issuelinks": [
+                    {
+                        "outwardIssue": {
+                            "key": "RHEL-23456",
+                            "fields": {"summary": "Original issue"},
+                        }
+                    }
+                ],
+            },
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/comment": {"comments": []},
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [],
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-23456": HTTPError(
+            "https://issues.example.invalid/rest/api/2/issue/RHEL-23456",
+            403,
+            "Forbidden",
+            None,
+            None,
+        ),
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(responses, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            network_mode="network_denied",
+            jira_url="https://issues.example.invalid/browse/RHEL-12345",
+        )
+    )
+
+    linked = json.loads(
+        (
+            tmp_path
+            / "benchmark_cases"
+            / "jiras"
+            / "RHEL-12345"
+            / "linked"
+            / "RHEL-23456"
+            / "starting-issue.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert linked["key"] == "RHEL-23456"
+    assert linked["fields"]["summary"] == "Original issue"
+    assert any(
+        warning.startswith(
+            "used embedded linked Jira RHEL-23456: failed to fetch "
+            "https://issues.example.invalid/rest/api/2/issue/RHEL-23456"
+        )
+        and "HTTP Error 403" in warning
+        for warning in result.warnings
+    )
+
+
 def test_collect_case_fetches_jira_with_basic_auth_token_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
