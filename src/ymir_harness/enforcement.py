@@ -37,12 +37,13 @@ def enforce_benchmark_boundaries(environment: Mapping[str, str]) -> Iterator[Non
     network_mode = environment.get("YMIR_BENCHMARK_NETWORK_MODE")
     replay_cache = _replay_cache(environment)
     recorded_urls = _recorded_urls(environment, replay_cache)
+    mock_git_urls = _mock_git_urls(environment)
     model_hosts = _model_provider_hosts(environment)
     active_network_guard = network_mode in {"replay_only", "network_denied"}
 
     originals = _PatchState.capture()
     try:
-        _patch_subprocess(originals, network_mode, replay_cache, recorded_urls)
+        _patch_subprocess(originals, network_mode, replay_cache, recorded_urls, mock_git_urls)
         if active_network_guard:
             _patch_socket(originals)
             _patch_urllib(originals, network_mode, replay_cache, model_hosts)
@@ -113,9 +114,15 @@ def _patch_subprocess(
     network_mode: str | None,
     replay_cache: ReplayCache | None,
     recorded_urls: Sequence[str],
+    mock_git_urls: Sequence[str],
 ) -> None:
     def guarded_run(command: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        _check_command(command, network_mode=network_mode, recorded_urls=recorded_urls)
+        _check_command(
+            command,
+            network_mode=network_mode,
+            recorded_urls=recorded_urls,
+            mock_git_urls=mock_git_urls,
+        )
         replayed = _replayed_shell_download(command, replay_cache, kwargs)
         if replayed is not None:
             return replayed
@@ -123,7 +130,12 @@ def _patch_subprocess(
 
     class guarded_popen(subprocess.Popen):  # type: ignore[type-arg]
         def __init__(self, command: Any, *args: Any, **kwargs: Any) -> None:
-            _check_command(command, network_mode=network_mode, recorded_urls=recorded_urls)
+            _check_command(
+                command,
+                network_mode=network_mode,
+                recorded_urls=recorded_urls,
+                mock_git_urls=mock_git_urls,
+            )
             if _is_shell_download(command):
                 raise BenchmarkBoundaryViolation(
                     "shell replay through subprocess.Popen is not supported; "
@@ -140,13 +152,15 @@ def _check_command(
     *,
     network_mode: str | None,
     recorded_urls: Sequence[str],
+    mock_git_urls: Sequence[str],
 ) -> None:
-    operations = detect_unsafe_command(_command_for_safety(command), source="subprocess")
+    tokens = _command_tokens(command)
+    command_tokens = _tokens_after_env(tokens)
+    operations = detect_unsafe_command(command_tokens or tokens, source="subprocess")
     if operations:
         operation = operations[0]
         raise BenchmarkBoundaryViolation(f"unsafe operation blocked: {operation.detail}")
 
-    tokens = _command_tokens(command)
     if network_mode in {"replay_only", "network_denied"}:
         external_urls = _external_urls(tokens)
         replayable_download = (
@@ -155,8 +169,11 @@ def _check_command(
             and external_urls
             and all(url in recorded_urls for url in external_urls)
         )
-        if external_urls and not replayable_download:
+        mock_git_command = _is_mock_git_command(tokens, external_urls, mock_git_urls)
+        if external_urls and not (replayable_download or mock_git_command):
             raise BenchmarkBoundaryViolation(f"external subprocess URL blocked: {external_urls[0]}")
+        if mock_git_command:
+            return
         violations = detect_replay_violations(
             [{"argv": tokens}],
             recorded_urls=recorded_urls,
@@ -351,12 +368,15 @@ def _recorded_urls(
     return tuple(dict.fromkeys(urls))
 
 
-def _command_for_safety(command: Any) -> str | Sequence[str]:
-    if isinstance(command, str):
-        return command
-    if isinstance(command, Sequence):
-        return [str(part) for part in command]
-    return str(command)
+def _mock_git_urls(environment: Mapping[str, str]) -> tuple[str, ...]:
+    encoded = environment.get("MOCK_BLOCKED_URLS", "")
+    urls = []
+    for line in encoded.splitlines():
+        url = line.strip()
+        if not url:
+            continue
+        urls.extend(_git_url_aliases(url))
+    return tuple(dict.fromkeys(urls))
 
 
 def _command_tokens(command: Any) -> list[str]:
@@ -374,7 +394,48 @@ def _is_shell_download(command: Any) -> bool:
     tokens = _command_tokens(command)
     if not tokens:
         return False
-    return PathName(tokens[0]).name in {"curl", "wget"}
+    command_tokens = _tokens_after_env(tokens)
+    return bool(command_tokens) and PathName(command_tokens[0]).name in {"curl", "wget"}
+
+
+def _is_mock_git_command(
+    tokens: Sequence[str],
+    external_urls: Sequence[str],
+    mock_git_urls: Sequence[str],
+) -> bool:
+    if not external_urls or not mock_git_urls:
+        return False
+    command_tokens = _tokens_after_env(tokens)
+    if not command_tokens or PathName(command_tokens[0]).name != "git":
+        return False
+    mock_url_set = set(mock_git_urls)
+    return all(url in mock_url_set for url in external_urls)
+
+
+def _tokens_after_env(tokens: Sequence[str]) -> list[str]:
+    output = list(tokens)
+    if output and PathName(output[0]).name == "env":
+        output = output[1:]
+        while output and output[0].startswith("-"):
+            option = output.pop(0)
+            if option in {"-i", "--ignore-environment", "-0", "--null"}:
+                continue
+            if option in {"-u", "--unset"} and output:
+                output.pop(0)
+                continue
+            if option.startswith(("-u=", "--unset=")):
+                continue
+            break
+    while output and _is_env_assignment(output[0]):
+        output.pop(0)
+    return output
+
+
+def _is_env_assignment(token: str) -> bool:
+    name, separator, _value = token.partition("=")
+    if not separator or not name:
+        return False
+    return all(char == "_" or char.isalnum() for char in name)
 
 
 def _external_urls(tokens: Sequence[str]) -> list[str]:
@@ -384,6 +445,15 @@ def _external_urls(tokens: Sequence[str]) -> list[str]:
         if parsed.scheme in {"http", "https"} and parsed.netloc:
             urls.append(token)
     return urls
+
+
+def _git_url_aliases(url: str) -> tuple[str, ...]:
+    aliases = [url]
+    if url.endswith(".git"):
+        aliases.append(url.removesuffix(".git"))
+    else:
+        aliases.append(f"{url}.git")
+    return tuple(dict.fromkeys(aliases))
 
 
 class PathName(str):

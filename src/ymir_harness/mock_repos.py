@@ -88,12 +88,15 @@ def materialize_case_mock_repos(
         for index, repo_config in enumerate(_repo_configs(config, mock_path)):
             remote_url = repo_config.get("remote_url")
             if isinstance(remote_url, str) and remote_url:
-                blocked_urls.append(remote_url)
+                blocked_urls.extend(_remote_url_aliases(remote_url))
             materialized = _materialize_repo(repo_config, index, mock_path, workdir)
             if materialized is None:
                 continue
             repos.append(materialized)
-            git_rewrites.append((materialized.original_url, _git_url(materialized.local_path)))
+            git_rewrites.extend(
+                (url, _git_url(materialized.local_path))
+                for url in _remote_url_aliases(materialized.original_url)
+            )
 
         for blocked_url in _string_list(config.get("blocked_original_urls")):
             blocked_urls.append(blocked_url)
@@ -235,7 +238,7 @@ def _git_url(path: Path) -> str:
 
 def _write_gitconfig(path: Path, rewrites: list[tuple[str, str]]) -> None:
     lines = []
-    for original_url, local_url in rewrites:
+    for original_url, local_url in dict.fromkeys(rewrites):
         lines.extend(
             [
                 f'[url "{local_url}"]',
@@ -244,6 +247,18 @@ def _write_gitconfig(path: Path, rewrites: list[tuple[str, str]]) -> None:
             ]
         )
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _remote_url_aliases(remote_url: str) -> tuple[str, ...]:
+    parsed = urlparse(remote_url)
+    if parsed.scheme not in {"http", "https", "ssh", "git"}:
+        return (remote_url,)
+    aliases = [remote_url]
+    if remote_url.endswith(".git"):
+        aliases.append(remote_url.removesuffix(".git"))
+    else:
+        aliases.append(f"{remote_url}.git")
+    return tuple(dict.fromkeys(aliases))
 
 
 def _string_list(value: Any) -> list[str]:
