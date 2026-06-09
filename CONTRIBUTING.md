@@ -25,7 +25,7 @@ Use `uv run ruff format src tests` when formatting changes are needed.
 ## Coding Guidelines
 
 Keep benchmark logic deterministic. Given the same fixtures, expected result,
-actual structured output, replay cache, and validation phase, the same reports
+actual structured output, replay cache, and validation settings, the same reports
 and exit codes should be produced.
 
 Prefer explicit data records over dynamic dictionaries for internal model
