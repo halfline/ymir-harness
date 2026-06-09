@@ -6,10 +6,11 @@ from pathlib import Path
 import pytest
 
 from ymir_harness import __version__
-from ymir_harness.capture_missing import CaptureMissingResult
+from ymir_harness.capture_missing import CapturedJiraRequest, CaptureMissingResult
 import ymir_harness.cli as cli_module
 from ymir_harness.cli import main
 from ymir_harness.collect_case import CollectCaseResult
+from ymir_harness.models import CaseValidationResult, RunCaseResult, RunReport, ValidationReport
 from ymir_harness.runner import RunCaseExecution
 
 
@@ -836,6 +837,115 @@ def test_cli_run_can_use_ymir_rebuild_workflow(
     assert output["cases"][0]["status"] == "passed"
     assert output["cases"][0]["score"]["summary"]["passed"] is True
     assert Path(output["cases"][0]["actual_path"]).is_file()
+
+
+def test_cli_prepare_case_collects_until_run_succeeds(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    collect_requests = []
+    capture_requests = []
+    run_ids = []
+    run_statuses = ["failed", "passed"]
+
+    def fake_collect_case(request):
+        collect_requests.append(request)
+        return CollectCaseResult(case_id=request.case_id, cases_dir=request.cases_dir)
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    case_status="active",
+                    status="valid",
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        status = run_statuses.pop(0)
+        run_ids.append(kwargs["run_id"])
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    status=status,
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    def fake_capture_missing(request):
+        capture_requests.append(request)
+        result = CaptureMissingResult(
+            case_id=request.case_id,
+            cases_dir=request.cases_dir,
+            run_path=request.run_path,
+        )
+        result.captured_jira.append(
+            CapturedJiraRequest(
+                kind="jira_search",
+                method="POST",
+                url="https://redhat.atlassian.net/rest/api/2/search",
+                relative_path="api/search/abc.json",
+            )
+        )
+        return result
+
+    monkeypatch.setattr(cli_module, "collect_case", fake_collect_case)
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--jira-url",
+                "https://redhat.atlassian.net/browse/RHEL-12345",
+                "--jira-token-file",
+                str(tmp_path / "jira-token.txt"),
+                "--gitlab-token-env",
+                "GITLAB_API_TOKEN",
+                "--workflow",
+                "ymir-triage",
+                "--variant",
+                "baseline",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "succeeded"
+    assert output["collected"]["case_id"] == "RHEL-12345"
+    assert [iteration["run"]["run_id"] for iteration in output["iterations"]] == [
+        "baseline-RHEL-12345-iter-1",
+        "baseline-RHEL-12345-iter-2",
+    ]
+    assert run_ids == ["baseline-RHEL-12345-iter-1", "baseline-RHEL-12345-iter-2"]
+    assert len(capture_requests) == 1
+    assert capture_requests[0].case_id == "RHEL-12345"
+    assert collect_requests[0].jira_url == "https://redhat.atlassian.net/browse/RHEL-12345"
+    assert collect_requests[0].mock_agent == "triage"
+    assert collect_requests[0].gitlab_token_env == "GITLAB_API_TOKEN"
 
 
 def test_cli_run_blocks_invalid_fixtures(
