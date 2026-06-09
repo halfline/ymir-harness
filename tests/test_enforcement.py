@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -133,6 +134,82 @@ def test_enforcement_replays_recorded_shell_download(tmp_path: Path) -> None:
     assert completed.stdout == "cached patch\n"
 
 
+def test_enforcement_replays_gitlab_commit_patch_from_source_cache(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    source_repo, commit_sha = _create_git_repo(tmp_path)
+    cached_repo = tmp_path / "source_cache" / "RHEL-12345" / "upstream" / "pkg.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            "https://gitlab.example/group/pkg.git",
+        ],
+        check=True,
+    )
+
+    url = f"https://gitlab.example/group/pkg/-/commit/{commit_sha}.patch"
+    environment = {
+        **_environment(manifest_path),
+        "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
+    }
+
+    with enforce_benchmark_boundaries(environment):
+        response = urllib.request.urlopen(url)
+        completed = subprocess.run(
+            ["curl", url],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+
+    body = response.read()
+    assert b"Subject: [PATCH] fix" in body
+    assert "Subject: [PATCH] fix" in completed.stdout
+
+
+def test_enforcement_returns_404_for_missing_source_cache_commit(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    source_repo, _commit_sha = _create_git_repo(tmp_path)
+    cached_repo = tmp_path / "source_cache" / "RHEL-12345" / "upstream" / "pkg.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            "https://gitlab.example/group/pkg.git",
+        ],
+        check=True,
+    )
+
+    missing_sha = "f" * 40
+    environment = {
+        **_environment(manifest_path),
+        "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
+    }
+
+    with enforce_benchmark_boundaries(environment):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(f"https://gitlab.example/group/pkg/-/commit/{missing_sha}.patch")
+
+    assert exc_info.value.code == 404
+    assert exc_info.value.read() == (
+        f"commit {missing_sha} is not available in source cache\n".encode("utf-8")
+    )
+
+
 def test_enforcement_blocks_external_subprocess_url(tmp_path: Path) -> None:
     manifest_path = _write_replay_manifest(tmp_path, {})
 
@@ -207,3 +284,23 @@ def _write_replay_manifest(tmp_path: Path, recorded_files: dict[str, str]) -> Pa
         encoding="utf-8",
     )
     return manifest_path
+
+
+def _create_git_repo(tmp_path: Path) -> tuple[Path, str]:
+    repo_path = tmp_path / "source-repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "-C", str(repo_path), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_path), "config", "user.email", "dev@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "Dev"], check=True)
+    (repo_path / "source.c").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "add", "source.c"], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-q", "-m", "initial"], check=True)
+    (repo_path / "source.c").write_text("after\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-am", "fix", "-q"], check=True)
+    commit_sha = subprocess.check_output(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    return repo_path, commit_sha
