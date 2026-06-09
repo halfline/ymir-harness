@@ -530,6 +530,73 @@ def test_score_case_records_advisory_metrics_without_failing() -> None:
     }
 
 
+def test_score_result_directory_accepts_recorded_patch_commit_coverage(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    actual_dir = tmp_path / "actual-results"
+    commit_sha = "b94b44407a088e6e8278d9db8b59fb377e84bda4"
+    extra_sha = "8297bbc00c14c5db3ad3d1570dd74f137aec2f7d"
+    commit_url = f"https://gitlab.example/group/pkg/-/commit/{commit_sha}.patch"
+    mr_url = "https://gitlab.example/group/pkg/-/merge_requests/7.patch"
+
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "glib2",
+            "case_status": "active",
+            "patch_urls": [commit_url],
+        },
+    )
+    _write_json(
+        actual_dir / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "glib2",
+            "patch_urls": [mr_url],
+        },
+    )
+    _write_json(
+        cases_dir / "web_cache" / "RHEL-12345" / "manifest.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "required_urls": [commit_url, mr_url],
+            "recorded_files": {
+                commit_url: "patches/commit.patch",
+                mr_url: "patches/mr.patch",
+            },
+        },
+    )
+    _write_text(
+        cases_dir / "web_cache" / "RHEL-12345" / "patches" / "commit.patch",
+        f"From {commit_sha} Mon Sep 17 00:00:00 2001\n",
+    )
+    _write_text(
+        cases_dir / "web_cache" / "RHEL-12345" / "patches" / "mr.patch",
+        (
+            f"From {commit_sha} Mon Sep 17 00:00:00 2001\n"
+            f"From {extra_sha} Mon Sep 17 00:00:00 2001\n"
+        ),
+    )
+
+    report = score_result_directory(cases_dir, actual_dir)
+
+    assert report.entries[0].status == "passed"
+    metrics = {metric.name: metric for metric in report.entries[0].score.metrics}
+    assert metrics["patch_urls"].status == "pass"
+    assert metrics["patch_urls"].notes == (
+        "actual patch URLs include the expected patch commit IDs"
+    )
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
@@ -701,3 +768,8 @@ def _write_expected(
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
