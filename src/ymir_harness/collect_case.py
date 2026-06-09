@@ -13,6 +13,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
@@ -424,6 +425,17 @@ def _fetch_evidence(
         )
     jira_patch_urls = tuple(valid_jira_patch_urls)
 
+    package = request.package or _derive_package(jira_issue_source)
+    if (
+        package is not None
+        and request.network_mode != "network_denied"
+        and (request.jira_url or request.jira_base_url or gitlab_mr_url)
+    ):
+        try:
+            gitlab_records.append(_fetch_maintainer_rules_record(package, request, result))
+        except CollectCaseError as exc:
+            result.warnings.append(f"skipped maintainer rules for {package}: {exc}")
+
     return FetchedEvidence(
         jira_issue=jira_issue,
         jira_comments=jira_comments,
@@ -720,6 +732,42 @@ def _fetch_bytes(
     return body
 
 
+def _fetch_maintainer_rules_record(
+    package: str,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> FetchedRecord:
+    url = _maintainer_rules_url(package)
+    http_request = Request(url, headers=_gitlab_headers(request.gitlab_token_env), method="GET")
+    try:
+        with urlopen(http_request, timeout=request.http_timeout) as response:
+            body = response.read()
+    except HTTPError as exc:
+        result.fetched_urls.append(url)
+        if exc.code != 404:
+            raise CollectCaseError(f"failed to fetch {url}: HTTP {exc.code}") from exc
+        body = (
+            f"No maintainer rules found for package '{package}' "
+            "(file 'AGENTS.md' not found in rules repository)."
+        ).encode("utf-8")
+    except OSError as exc:
+        raise CollectCaseError(f"failed to fetch {url}: {exc}") from exc
+    else:
+        result.fetched_urls.append(url)
+
+    return FetchedRecord(
+        url=url,
+        relative_path=f"gitlab/maintainer_rules/{package}/AGENTS.md",
+        body=body,
+    )
+
+
+def _maintainer_rules_url(package: str) -> str:
+    project = quote(f"redhat/centos-stream/rules/{package}", safe="")
+    file_path = quote("AGENTS.md", safe="")
+    return f"https://gitlab.com/api/v4/projects/{project}/repository/files/{file_path}/raw?ref=main"
+
+
 def _complete_request(
     request: CollectCaseRequest,
     fetched: FetchedEvidence,
@@ -892,6 +940,7 @@ def _derive_network_mode(request: CollectCaseRequest, fetched: FetchedEvidence) 
         request.gitlab_mr_url
         or fetched.gitlab_patch_url
         or fetched.jira_patch_urls
+        or fetched.web_records
         or request.patch_urls
         or request.web_records
     ):
