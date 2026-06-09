@@ -120,6 +120,7 @@ def _patch_subprocess(
         _check_command(
             command,
             network_mode=network_mode,
+            replay_cache=replay_cache,
             recorded_urls=recorded_urls,
             mock_git_urls=mock_git_urls,
         )
@@ -133,6 +134,7 @@ def _patch_subprocess(
             _check_command(
                 command,
                 network_mode=network_mode,
+                replay_cache=replay_cache,
                 recorded_urls=recorded_urls,
                 mock_git_urls=mock_git_urls,
             )
@@ -151,6 +153,7 @@ def _check_command(
     command: Any,
     *,
     network_mode: str | None,
+    replay_cache: ReplayCache | None,
     recorded_urls: Sequence[str],
     mock_git_urls: Sequence[str],
 ) -> None:
@@ -167,11 +170,13 @@ def _check_command(
             network_mode == "replay_only"
             and _is_shell_download(command)
             and external_urls
-            and all(url in recorded_urls for url in external_urls)
+            and all(_can_replay_url(url, replay_cache, recorded_urls) for url in external_urls)
         )
         mock_git_command = _is_mock_git_command(tokens, external_urls, mock_git_urls)
         if external_urls and not (replayable_download or mock_git_command):
             raise BenchmarkBoundaryViolation(f"external subprocess URL blocked: {external_urls[0]}")
+        if replayable_download:
+            return
         if mock_git_command:
             return
         violations = detect_replay_violations(
@@ -202,6 +207,16 @@ def _replayed_shell_download(
     if kwargs.get("stdout") is None:
         stdout = None
     return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=None)
+
+
+def _can_replay_url(
+    url: str,
+    replay_cache: ReplayCache | None,
+    recorded_urls: Sequence[str],
+) -> bool:
+    if url in recorded_urls:
+        return True
+    return replay_cache is not None and replay_cache.has_url(url)
 
 
 def _patch_socket(originals: _PatchState) -> None:

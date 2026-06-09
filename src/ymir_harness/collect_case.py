@@ -227,7 +227,7 @@ def collect_case(request: CollectCaseRequest) -> CollectCaseResult:
     _write_jira_fixtures(cases_dir, request, fetched, result)
     _write_mock_data(cases_dir, request, fetched, result)
     _write_web_cache(cases_dir, request, fetched, result)
-    _write_source_cache(cases_dir, request, result)
+    _write_source_cache(cases_dir, request, fetched, result)
 
     _append_completion_warnings(request, fetched, result)
     return result
@@ -1900,6 +1900,7 @@ def _write_web_cache(
 def _write_source_cache(
     cases_dir: Path,
     request: CollectCaseRequest,
+    fetched: FetchedEvidence,
     result: CollectCaseResult,
 ) -> None:
     for source in request.source_upstream:
@@ -1909,6 +1910,8 @@ def _write_source_cache(
             overwrite=request.overwrite,
             result=result,
         )
+    for project_url in _auto_source_project_urls(request, fetched):
+        _cache_upstream_source_repo(cases_dir, request, project_url, result)
     for source in request.source_lookaside:
         _copy_into_dir(
             source,
@@ -1916,6 +1919,93 @@ def _write_source_cache(
             overwrite=request.overwrite,
             result=result,
         )
+
+
+def _auto_source_project_urls(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> tuple[str, ...]:
+    if request.network_mode == "network_denied":
+        return ()
+
+    urls = [
+        request.gitlab_mr_url,
+        fetched.gitlab_mr_url,
+        fetched.gitlab_patch_url,
+        *request.patch_urls,
+        *fetched.jira_patch_urls,
+        *[record.url for record in fetched.web_records],
+    ]
+    projects = []
+    for url in urls:
+        if url is None:
+            continue
+        project_url = _gitlab_project_url_from_evidence_url(url)
+        if project_url is not None and not _is_reserved_source_host(project_url):
+            projects.append(project_url)
+    return tuple(dict.fromkeys(projects))
+
+
+def _gitlab_project_url_from_evidence_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    for marker in ("/-/merge_requests/", "/-/commit/"):
+        if marker not in parsed.path:
+            continue
+        project_path = parsed.path.split(marker, 1)[0].rstrip("/")
+        if not project_path:
+            return None
+        return f"{parsed.scheme}://{parsed.netloc}{project_path}"
+    return None
+
+
+def _is_reserved_source_host(url: str) -> bool:
+    hostname = (urlparse(url).hostname or "").lower()
+    return (
+        hostname in {"localhost"}
+        or hostname.endswith(".example")
+        or hostname.endswith(".invalid")
+        or hostname.endswith(".test")
+    )
+
+
+def _cache_upstream_source_repo(
+    cases_dir: Path,
+    request: CollectCaseRequest,
+    project_url: str,
+    result: CollectCaseResult,
+) -> None:
+    remote_url = _git_clone_url(project_url)
+    destination = (
+        cases_dir
+        / "source_cache"
+        / request.case_id
+        / "upstream"
+        / _mock_repo_cache_name(remote_url)
+    )
+    try:
+        if destination.exists():
+            if not request.overwrite:
+                return
+            _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
+        else:
+            _run_git(["clone", "--mirror", "--quiet", remote_url, str(destination)], destination)
+    except CollectCaseError as exc:
+        if not destination.exists():
+            result.warnings.append(f"skipped upstream source cache for {project_url}: {exc}")
+            return
+        result.warnings.append(f"upstream source cache may be stale for {project_url}: {exc}")
+        return
+
+    for path in (destination / "HEAD", destination / "config"):
+        if path.is_file():
+            _record_written(path, result)
+
+
+def _git_clone_url(project_url: str) -> str:
+    return project_url if project_url.endswith(".git") else f"{project_url}.git"
 
 
 def _append_completion_warnings(

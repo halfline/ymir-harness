@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import io
 import json
+import re
+import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
 from urllib.error import HTTPError
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from urllib.response import addinfourl
 
 
@@ -44,10 +48,24 @@ class ReplayResponse:
         return json.loads(await self.text())
 
 
+@dataclass(frozen=True)
+class _SourcePatchRequest:
+    project_url: str
+    commit: str
+
+
+@dataclass(frozen=True)
+class _SourcePatchResponse:
+    body: bytes
+    status: int
+    headers: Mapping[str, str]
+
+
 class ReplayCache:
-    def __init__(self, manifest_path: Path):
+    def __init__(self, manifest_path: Path, *, source_cache_dir: Path | None = None):
         self.manifest_path = manifest_path
         self.cache_dir = manifest_path.parent
+        self.source_cache_dir = source_cache_dir
         self._recorded_files = self._load_recorded_files(manifest_path)
         self._response_metadata = self._load_response_metadata(manifest_path)
 
@@ -56,16 +74,25 @@ class ReplayCache:
         manifest = environment.get("YMIR_BENCHMARK_REPLAY_MANIFEST")
         if not manifest:
             return None
-        return cls(Path(manifest))
+        source_cache_dir = environment.get("YMIR_BENCHMARK_SOURCE_CACHE_DIR")
+        return cls(
+            Path(manifest),
+            source_cache_dir=Path(source_cache_dir) if source_cache_dir else None,
+        )
 
     @property
     def recorded_urls(self) -> tuple[str, ...]:
         return tuple(self._recorded_files)
 
     def has_url(self, url: str) -> bool:
-        return url in self._recorded_files
+        return url in self._recorded_files or self._source_patch_repo_for(url) is not None
 
     def read_bytes(self, url: str) -> bytes:
+        if url not in self._recorded_files:
+            source_patch = self._source_patch_response(url)
+            if source_patch is not None:
+                return source_patch.body
+
         path = self.path_for_url(url)
         try:
             return path.read_bytes()
@@ -97,6 +124,11 @@ class ReplayCache:
         )
 
     def response_headers(self, url: str, body: bytes | None = None) -> dict[str, str]:
+        if url not in self._recorded_files:
+            source_patch = self._source_patch_response(url)
+            if source_patch is not None:
+                return dict(source_patch.headers)
+
         body = self.read_bytes(url) if body is None else body
         path = self.path_for_url(url)
         metadata = self._response_metadata.get(url, {})
@@ -110,6 +142,11 @@ class ReplayCache:
         return output
 
     def status_code(self, url: str) -> int:
+        if url not in self._recorded_files:
+            source_patch = self._source_patch_response(url)
+            if source_patch is not None:
+                return source_patch.status
+
         metadata = self._response_metadata.get(url, {})
         status = metadata.get("status") if isinstance(metadata, Mapping) else None
         if isinstance(status, int):
@@ -165,6 +202,52 @@ class ReplayCache:
             raise ReplayCacheError(f"replay manifest must contain an object: {manifest_path}")
         return manifest
 
+    def _source_patch_response(self, url: str) -> _SourcePatchResponse | None:
+        repo_path = self._source_patch_repo_for(url)
+        if repo_path is None:
+            return None
+
+        request = _source_patch_request(url)
+        if request is None:
+            return None
+
+        if not _git_commit_exists(repo_path, request.commit):
+            return _SourcePatchResponse(
+                body=f"commit {request.commit} is not available in source cache\n".encode("utf-8"),
+                status=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+            )
+
+        body = _git_format_patch(repo_path, request.commit)
+        return _SourcePatchResponse(
+            body=body,
+            status=200,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+        )
+
+    def _source_patch_repo_for(self, url: str) -> Path | None:
+        request = _source_patch_request(url)
+        if request is None or self.source_cache_dir is None:
+            return None
+
+        upstream_dir = self.source_cache_dir / "upstream"
+        if not upstream_dir.is_dir():
+            return None
+
+        repositories = _source_git_repositories(upstream_dir)
+        matching = [
+            repository
+            for repository in repositories
+            if _same_git_project(_git_remote_url(repository), request.project_url)
+        ]
+        if matching:
+            return matching[0]
+
+        for repository in repositories:
+            if _git_commit_exists(repository, request.commit):
+                return repository
+        return None
+
 
 def _content_type_for(path: Path, body: bytes) -> str:
     stripped = body.lstrip()
@@ -173,6 +256,111 @@ def _content_type_for(path: Path, body: bytes) -> str:
     if path.suffix.lower() in {".diff", ".md", ".patch", ".txt"}:
         return "text/plain; charset=utf-8"
     return "application/octet-stream"
+
+
+def _source_patch_request(url: str) -> _SourcePatchRequest | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return None
+
+    marker = "/-/commit/"
+    if marker not in parsed.path:
+        return None
+
+    project_path, commit_part = parsed.path.split(marker, 1)
+    commit = commit_part.strip("/").split("/", 1)[0].removesuffix(".patch")
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
+        return None
+
+    query = parse_qs(parsed.query)
+    if not parsed.path.endswith(".patch") and query.get("format") != [".patch"]:
+        return None
+
+    project_url = f"{parsed.scheme}://{parsed.netloc}{project_path.rstrip('/')}"
+    return _SourcePatchRequest(project_url=project_url, commit=commit)
+
+
+def _source_git_repositories(upstream_dir: Path) -> tuple[Path, ...]:
+    candidates = [upstream_dir, *sorted(upstream_dir.iterdir())]
+    repositories = [
+        candidate
+        for candidate in candidates
+        if candidate.is_dir()
+        and (_is_git_checkout(candidate) or _is_bare_git_repository(candidate))
+    ]
+    return tuple(dict.fromkeys(repositories))
+
+
+def _is_git_checkout(path: Path) -> bool:
+    return (path / ".git").exists()
+
+
+def _is_bare_git_repository(path: Path) -> bool:
+    return (path / "HEAD").is_file() and (path / "objects").is_dir()
+
+
+def _git_remote_url(repo_path: Path) -> str | None:
+    completed = subprocess.run(
+        _git_command(repo_path, ["config", "--get", "remote.origin.url"]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0:
+        return None
+    remote_url = completed.stdout.decode("utf-8", errors="ignore").strip()
+    return remote_url or None
+
+
+def _git_commit_exists(repo_path: Path, commit: str) -> bool:
+    completed = subprocess.run(
+        _git_command(repo_path, ["cat-file", "-e", f"{commit}^{{commit}}"]),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return completed.returncode == 0
+
+
+def _git_format_patch(repo_path: Path, commit: str) -> bytes:
+    completed = subprocess.run(
+        _git_command(repo_path, ["format-patch", "-1", commit, "--stdout"]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="ignore").strip()
+        detail = f": {stderr}" if stderr else ""
+        raise ReplayCacheError(f"source cache cannot format patch for {commit}{detail}")
+    return completed.stdout
+
+
+def _git_command(repo_path: Path, args: list[str]) -> list[str]:
+    if _is_bare_git_repository(repo_path):
+        return ["git", f"--git-dir={repo_path}", *args]
+    return ["git", "-C", str(repo_path), *args]
+
+
+def _same_git_project(first: str | None, second: str) -> bool:
+    if first is None:
+        return False
+    return _normalized_git_project(first) == _normalized_git_project(second)
+
+
+def _normalized_git_project(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        path = parsed.path
+        return f"{parsed.netloc.lower()}/{_normalized_git_path(path)}"
+    return _normalized_git_path(url)
+
+
+def _normalized_git_path(path: str) -> str:
+    value = path.strip().rstrip("/")
+    if value.endswith(".git"):
+        value = value.removesuffix(".git")
+    return value.strip("/").lower()
 
 
 def request_url(value: Any, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> str | None:
