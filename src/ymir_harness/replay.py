@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 from collections.abc import Mapping
+from urllib.error import HTTPError
 from pathlib import Path
 from typing import Any
 from urllib.response import addinfourl
@@ -48,6 +49,7 @@ class ReplayCache:
         self.manifest_path = manifest_path
         self.cache_dir = manifest_path.parent
         self._recorded_files = self._load_recorded_files(manifest_path)
+        self._response_metadata = self._load_response_metadata(manifest_path)
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "ReplayCache | None":
@@ -72,23 +74,47 @@ class ReplayCache:
 
     def open_urllib_response(self, url: str) -> addinfourl:
         body = self.read_bytes(url)
+        status = self.status_code(url)
+        headers = self.response_headers(url, body)
+        if status >= 400:
+            raise HTTPError(url, status, "Recorded response", headers, io.BytesIO(body))
         response = addinfourl(
             io.BytesIO(body),
-            headers=self.response_headers(url, body),
+            headers=headers,
             url=url,
-            code=200,
+            code=status,
         )
-        response.msg = "OK"
+        response.msg = "Recorded response"
         return response
 
     def open_aiohttp_response(self, url: str) -> ReplayResponse:
         body = self.read_bytes(url)
-        return ReplayResponse(url, body, headers=self.response_headers(url, body))
+        return ReplayResponse(
+            url,
+            body,
+            headers=self.response_headers(url, body),
+            status=self.status_code(url),
+        )
 
     def response_headers(self, url: str, body: bytes | None = None) -> dict[str, str]:
         body = self.read_bytes(url) if body is None else body
         path = self.path_for_url(url)
-        return {"Content-Type": _content_type_for(path, body)}
+        metadata = self._response_metadata.get(url, {})
+        headers = metadata.get("headers") if isinstance(metadata, Mapping) else None
+        output = {
+            str(name): str(value)
+            for name, value in (headers or {}).items()
+            if isinstance(name, str) and isinstance(value, str)
+        }
+        output.setdefault("Content-Type", _content_type_for(path, body))
+        return output
+
+    def status_code(self, url: str) -> int:
+        metadata = self._response_metadata.get(url, {})
+        status = metadata.get("status") if isinstance(metadata, Mapping) else None
+        if isinstance(status, int):
+            return status
+        return 200
 
     def path_for_url(self, url: str) -> Path:
         recorded = self._recorded_files.get(url)
@@ -106,12 +132,7 @@ class ReplayCache:
         return path
 
     def _load_recorded_files(self, manifest_path: Path) -> dict[str, str]:
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ReplayCacheError(f"cannot read replay manifest: {manifest_path}") from exc
-        if not isinstance(manifest, Mapping):
-            raise ReplayCacheError(f"replay manifest must contain an object: {manifest_path}")
+        manifest = self._load_manifest(manifest_path)
         recorded_files = manifest.get("recorded_files")
         if not isinstance(recorded_files, Mapping):
             raise ReplayCacheError(
@@ -123,6 +144,26 @@ class ReplayCache:
             if isinstance(url, str) and url and isinstance(recorded, str) and recorded
         }
         return output
+
+    def _load_response_metadata(self, manifest_path: Path) -> dict[str, Mapping[str, Any]]:
+        manifest = self._load_manifest(manifest_path)
+        response_metadata = manifest.get("response_metadata")
+        if not isinstance(response_metadata, Mapping):
+            return {}
+        return {
+            url: metadata
+            for url, metadata in response_metadata.items()
+            if isinstance(url, str) and isinstance(metadata, Mapping)
+        }
+
+    def _load_manifest(self, manifest_path: Path) -> Mapping[str, Any]:
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ReplayCacheError(f"cannot read replay manifest: {manifest_path}") from exc
+        if not isinstance(manifest, Mapping):
+            raise ReplayCacheError(f"replay manifest must contain an object: {manifest_path}")
+        return manifest
 
 
 def _content_type_for(path: Path, body: bytes) -> str:

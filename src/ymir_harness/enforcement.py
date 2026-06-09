@@ -256,7 +256,7 @@ def _patch_requests(
 
             body = replay_cache.read_bytes(url)
             response = requests.Response()
-            response.status_code = 200
+            response.status_code = replay_cache.status_code(url)
             response.url = url
             response._content = body
             response.headers.update(replay_cache.response_headers(url, body))
