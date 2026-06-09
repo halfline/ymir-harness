@@ -174,10 +174,11 @@ and points `JIRA_MOCK_FILES` at that generated directory. If
 `starting-issue.json` is present, that redacted issue is what Ymir sees during
 triage replay; the completed Jira evidence remains available only as fixture
 ground truth.
-Live Ymir workflow adapters still connect to an external MCP gateway through
-`MCP_GATEWAY_URL`. That gateway is outside the harness process, so start it
-with access to the same generated Jira mock directory, mock gitconfig/repo
-workspace, and replay/cache policy that the run report records.
+Live Ymir workflow adapters start a managed MCP gateway when `MCP_GATEWAY_URL`
+is not already set. The managed gateway inherits the generated Jira mock
+directory, mock gitconfig/repo workspace, and replay/cache policy for the case.
+If `MCP_GATEWAY_URL` is set, the harness uses that external gateway instead;
+start external gateways with access to the same fixture paths and policy.
 
 `score-results` reads every `benchmark_cases/expected/*.expected.json` file and
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
