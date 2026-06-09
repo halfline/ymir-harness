@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 
 import yaml
 
+from ymir_harness.jira_replay import derive_as_of_from_comments, filter_comments_as_of
 from ymir_harness.models import (
     ALLOWED_ANSWER_LEAKAGE,
     ALLOWED_CASE_STATUSES,
@@ -1628,6 +1629,19 @@ def _write_jira_fixtures(
         )
 
     if issue_for_start is not None:
+        as_of = derive_as_of_from_comments(comments_for_start)
+        if as_of is not None:
+            _write_json(
+                jira_dir / "reconstruction.json",
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "case_id": request.case_id,
+                    "as_of": as_of,
+                    "method": "first_historical_result_comment",
+                },
+                overwrite=request.overwrite,
+                result=result,
+            )
         _write_json(
             jira_dir / "starting-issue.json",
             _build_starting_jira_issue(
@@ -1635,6 +1649,7 @@ def _write_jira_fixtures(
                 comments_for_start,
                 case_id=request.case_id,
                 case_type=request.case_type,
+                as_of=as_of,
             ),
             overwrite=request.overwrite,
             result=result,
@@ -1697,6 +1712,7 @@ def _write_fetched_jira_fixture(
             comments,
             case_id=case_id,
             case_type=case_type,
+            as_of=derive_as_of_from_comments(comments),
         ),
         overwrite=overwrite,
         result=result,
@@ -1748,6 +1764,7 @@ def _build_starting_jira_issue(
     *,
     case_id: str,
     case_type: str | None,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     payload = copy.deepcopy(dict(issue))
     payload.setdefault("schema_version", SCHEMA_VERSION)
@@ -1770,7 +1787,7 @@ def _build_starting_jira_issue(
     fields["labels"] = _starting_labels(fields.get("labels"))
     fields["status"] = _starting_status(fields.get("status"))
     fields["resolution"] = None
-    fields["comment"] = _starting_comment_block(comments, fields.get("comment"))
+    fields["comment"] = _starting_comment_block(comments, fields.get("comment"), as_of=as_of)
     payload["remote_links"] = []
     return payload
 
@@ -1799,8 +1816,9 @@ def _starting_status(status: Any) -> Any:
     return copy.deepcopy(dict(status))
 
 
-def _starting_comment_block(comments: Any, issue_comment: Any) -> dict[str, Any]:
+def _starting_comment_block(comments: Any, issue_comment: Any, *, as_of: str | None) -> dict[str, Any]:
     source = comments if comments is not None else issue_comment
+    source = filter_comments_as_of(source, as_of=as_of)
     comment_values = [
         copy.deepcopy(dict(comment))
         for comment in _comment_values(source)
