@@ -148,7 +148,17 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     responses = {
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
             "key": "RHEL-12345",
-            "fields": {"summary": "Backport CVE fix"},
+            "fields": {
+                "summary": "Backport CVE fix",
+                "issuelinks": [
+                    {
+                        "outwardIssue": {
+                            "key": "RHEL-23456",
+                            "fields": {"summary": "Original issue"},
+                        }
+                    }
+                ],
+            },
         },
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/comment": {
             "comments": [{"body": "Please backport this fix."}],
@@ -156,6 +166,12 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [
             {"object": {"url": "https://gitlab.example/group/pkg/-/merge_requests/7"}}
         ],
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-23456": {
+            "key": "RHEL-23456",
+            "fields": {"summary": "Original issue"},
+        },
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-23456/comment": {"comments": []},
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-23456/remotelink": [],
     }
     seen_urls: list[str] = []
     monkeypatch.setattr(
@@ -182,6 +198,9 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     comments = json.loads((jira_dir / "comments.json").read_text(encoding="utf-8"))
     links = json.loads((jira_dir / "links.json").read_text(encoding="utf-8"))
     starting = json.loads((jira_dir / "starting-issue.json").read_text(encoding="utf-8"))
+    linked = json.loads(
+        (jira_dir / "linked" / "RHEL-23456" / "starting-issue.json").read_text(encoding="utf-8")
+    )
     assert issue["key"] == "RHEL-12345"
     assert comments["comments"][0]["body"] == "Please backport this fix."
     assert links["links"][0]["object"]["url"] == (
@@ -189,6 +208,8 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     )
     assert starting["fields"]["comment"]["comments"] == [{"body": "Please backport this fix."}]
     assert starting["remote_links"] == []
+    assert linked["key"] == "RHEL-23456"
+    assert linked["fields"]["summary"] == "Original issue"
     assert result.fetched_urls == seen_urls == list(responses)
 
 
