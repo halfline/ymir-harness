@@ -304,43 +304,15 @@ def _fetch_evidence(
             request=request,
             result=result,
         )
-        for linked_key in _linked_jira_keys(jira_issue, request.case_id):
-            linked_urls = _jira_urls(request, linked_key)
-            try:
-                linked_issue = _fetch_json(
-                    linked_urls["issue"],
-                    headers=jira_headers,
-                    request=request,
-                    result=result,
-                )
-                linked_comments = _fetch_json(
-                    linked_urls["comments"],
-                    headers=jira_headers,
-                    request=request,
-                    result=result,
-                )
-                linked_links = _fetch_json_value(
-                    linked_urls["links"],
-                    headers=jira_headers,
-                    request=request,
-                    result=result,
-                )
-            except CollectCaseError as exc:
-                linked_stub = _linked_jira_issue_stub(jira_issue, request.case_id, linked_key)
-                if linked_stub is None:
-                    result.warnings.append(f"skipped linked Jira {linked_key}: {exc}")
-                    continue
-                result.warnings.append(f"used embedded linked Jira {linked_key}: {exc}")
-                linked_jira_issues.append(linked_stub)
-                continue
-            linked_jira_issues.append(
-                FetchedJiraIssue(
-                    key=linked_key,
-                    issue=linked_issue,
-                    comments=linked_comments,
-                    links=linked_links,
-                )
+        linked_jira_issues.extend(
+            _fetch_linked_jira_issues(
+                request,
+                result,
+                jira_headers,
+                root_issue=jira_issue,
+                root_case_id=request.case_id,
             )
+        )
 
     jira_issue_source = _jira_issue_source(request, jira_issue)
     jira_comments_source = _jira_comments_source(request, jira_comments)
@@ -569,6 +541,87 @@ def _linked_jira_keys(
             if key is not None and key != case_id:
                 keys.append(key)
     return list(dict.fromkeys(keys))
+
+
+def _fetch_linked_jira_issues(
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+    jira_headers: Mapping[str, str],
+    *,
+    root_issue: Mapping[str, Any] | None,
+    root_case_id: str,
+    max_depth: int = 2,
+) -> list[FetchedJiraIssue]:
+    linked_issues: list[FetchedJiraIssue] = []
+    seen_keys = {root_case_id}
+    queue: list[tuple[Mapping[str, Any] | None, str, int]] = [(root_issue, root_case_id, 1)]
+
+    while queue:
+        parent_issue, parent_key, depth = queue.pop(0)
+        for linked_key in _linked_jira_keys(parent_issue, parent_key):
+            if linked_key in seen_keys:
+                continue
+            seen_keys.add(linked_key)
+            linked_issue = _fetch_linked_jira_issue(
+                request,
+                result,
+                jira_headers,
+                parent_issue=parent_issue,
+                parent_key=parent_key,
+                linked_key=linked_key,
+            )
+            if linked_issue is None:
+                continue
+            linked_issues.append(linked_issue)
+            if depth < max_depth:
+                queue.append((linked_issue.issue, linked_key, depth + 1))
+
+    return linked_issues
+
+
+def _fetch_linked_jira_issue(
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+    jira_headers: Mapping[str, str],
+    *,
+    parent_issue: Mapping[str, Any] | None,
+    parent_key: str,
+    linked_key: str,
+) -> FetchedJiraIssue | None:
+    linked_urls = _jira_urls(request, linked_key)
+    try:
+        linked_issue = _fetch_json(
+            linked_urls["issue"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+        linked_comments = _fetch_json(
+            linked_urls["comments"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+        linked_links = _fetch_json_value(
+            linked_urls["links"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+    except CollectCaseError as exc:
+        linked_stub = _linked_jira_issue_stub(parent_issue, parent_key, linked_key)
+        if linked_stub is None:
+            result.warnings.append(f"skipped linked Jira {linked_key}: {exc}")
+            return None
+        result.warnings.append(f"used embedded linked Jira {linked_key}: {exc}")
+        return linked_stub
+
+    return FetchedJiraIssue(
+        key=linked_key,
+        issue=linked_issue,
+        comments=linked_comments,
+        links=linked_links,
+    )
 
 
 def _embedded_linked_jira_issues(
@@ -1816,7 +1869,9 @@ def _starting_status(status: Any) -> Any:
     return copy.deepcopy(dict(status))
 
 
-def _starting_comment_block(comments: Any, issue_comment: Any, *, as_of: str | None) -> dict[str, Any]:
+def _starting_comment_block(
+    comments: Any, issue_comment: Any, *, as_of: str | None
+) -> dict[str, Any]:
     source = comments if comments is not None else issue_comment
     source = filter_comments_as_of(source, as_of=as_of)
     comment_values = [
