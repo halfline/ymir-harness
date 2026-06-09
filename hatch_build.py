@@ -19,6 +19,7 @@ class YmirHarnessMetadataHook(MetadataHookInterface):
             "beautifulsoup4>=4.13.4",
             "beeai-framework[duckduckgo,mcp]==0.1.80",
             "fastmcp>=2.11.3",
+            "google-cloud-aiplatform>=1.38",
             "openinference-instrumentation-beeai>=0.1.8",
             "typer>=0.16.0",
             "backoff>=2.2.1",

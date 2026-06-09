@@ -20,18 +20,28 @@ uv sync
 uv run ymir-harness --version
 ```
 
-For live Ymir runs, export the model credential for the `CHAT_MODEL` you want
+For live Ymir runs, export the model credentials for the `CHAT_MODEL` you want
 to use. If `CHAT_MODEL` is unset, the harness defaults to
-`gemini:gemini-2.5-pro`.
+`vertexai:claude-sonnet-4-6`.
 
-For Gemini models, create or copy an API key from
+The default model uses Vertex AI. Authenticate with Google application-default
+credentials, then point the Vertex client at the Claude project:
+
+```bash
+gcloud auth application-default login
+export GOOGLE_VERTEX_PROJECT="itpc-gcp-core-pe-eng-claude"
+export GOOGLE_VERTEX_LOCATION="global"
+export JIRA_TOKEN_FILE="/path/to/redhat-jira-api-token"
+export JIRA_EMAIL="you@example.com"
+```
+
+To run with Gemini instead, set `CHAT_MODEL` and create or copy an API key from
 <https://console.cloud.google.com/apis/credentials> after selecting the
 `packit-automated-packaging` project.
 
 ```bash
+export CHAT_MODEL="gemini:gemini-2.5-pro"
 export GEMINI_API_KEY="..."
-export JIRA_TOKEN_FILE="/path/to/redhat-jira-api-token"
-export JIRA_EMAIL="you@example.com"
 ```
 
 To turn a completed Jira into a repeatable triage experiment, use
@@ -400,9 +410,11 @@ actual result path and the exception reason.
 Workflow adapters start from a no-write environment profile that forces
 `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
 known write credentials and Kerberos keytab paths from the process environment.
-Default live Ymir workflow adapters use `gemini:gemini-2.5-pro` when
+Default live Ymir workflow adapters use `vertexai:claude-sonnet-4-6` when
 `CHAT_MODEL` is not set. Model provider credentials still need to come from
-the user environment, such as `GEMINI_API_KEY` for Gemini models.
+the user environment. For the default Vertex Claude model, provide Google
+application-default credentials plus `GOOGLE_VERTEX_PROJECT` and
+`GOOGLE_VERTEX_LOCATION`. For Gemini models, provide `GEMINI_API_KEY`.
 Run reports include a `provenance` object populated from explicit
 `--provenance` entries and recognized environment variables such as
 `AGENTIC_SKILLS_SHA`, `AGENTIC_SKILLS_CHECKSUM`, `CONTAINER_IMAGE_DIGEST`,

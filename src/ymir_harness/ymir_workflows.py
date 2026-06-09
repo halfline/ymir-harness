@@ -17,7 +17,7 @@ from typing import Any
 
 from ymir_harness.artifacts import merge_artifact_fields
 from ymir_harness.models import SCHEMA_VERSION
-from ymir_harness.runner import RunCaseExecution, RunCaseRequest
+from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseRequest
 from ymir_harness.scoring import load_json_file
 from ymir_harness.ymir_source import ensure_ymir_source_path
 
@@ -323,7 +323,7 @@ def _live_workflow_dependency_failure(
         status="failed",
         reason=(
             f"ymir {workflow_name} workflow missing {CHAT_MODEL_ENV}; "
-            "set CHAT_MODEL in the run environment, e.g. gemini:gemini-2.5-pro"
+            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}"
         ),
     )
 

@@ -37,7 +37,7 @@ from ymir_harness.safety import detect_replay_violations, detect_unsafe_operatio
 from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
 
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
-DEFAULT_CHAT_MODEL = "gemini:gemini-2.5-pro"
+DEFAULT_CHAT_MODEL = "vertexai:claude-sonnet-4-6"
 MAX_ITERATIONS_OVERRIDE_ENV = "BENCHMARK_MAX_ITERATIONS_OVERRIDE"
 MAX_COST_PER_RUN_ENV = "BENCHMARK_MAX_COST_PER_RUN"
 COST_ALERT_THRESHOLD_ENV = "BENCHMARK_COST_ALERT_THRESHOLD"
@@ -136,6 +136,7 @@ def build_no_write_environment(
 
     env.update(NO_WRITE_ENVIRONMENT)
     env.setdefault("CHAT_MODEL", DEFAULT_CHAT_MODEL)
+    _normalize_model_environment(env)
     env["JIRA_MOCK_FILES"] = str((jira_mock_dir or cases_dir / "jiras").resolve())
     env["MOCK_REPOS_DIR"] = str((cases_dir / "mock_data").resolve())
     env.setdefault("GIT_REPO_BASEPATH", str(results_dir.resolve()))
@@ -167,6 +168,26 @@ def build_no_write_environment(
         env.pop("YMIR_BENCHMARK_WEB_CACHE_DIR", None)
         env.pop("YMIR_BENCHMARK_SOURCE_CACHE_DIR", None)
     return env
+
+
+def _normalize_model_environment(env: dict[str, str]) -> None:
+    model_name = env.get("CHAT_MODEL", "")
+    if not model_name.lower().startswith("vertexai:"):
+        return
+
+    location = env.get("GOOGLE_VERTEX_LOCATION") or env.get("CLOUD_ML_REGION")
+    if location:
+        env.setdefault("GOOGLE_VERTEX_LOCATION", location)
+    else:
+        env["GOOGLE_VERTEX_LOCATION"] = "global"
+
+    project = (
+        env.get("GOOGLE_VERTEX_PROJECT")
+        or env.get("ANTHROPIC_VERTEX_PROJECT_ID")
+        or env.get("GOOGLE_CLOUD_PROJECT")
+    )
+    if project:
+        env.setdefault("GOOGLE_VERTEX_PROJECT", project)
 
 
 def load_case_manifest(cases_dir: Path) -> tuple[list[str], list[ValidationIssue]]:
