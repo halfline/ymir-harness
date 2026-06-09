@@ -4,6 +4,7 @@ import json
 import subprocess
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -33,6 +34,38 @@ def test_enforcement_blocks_unrecorded_urllib_response(tmp_path: Path) -> None:
     with enforce_benchmark_boundaries(_environment(manifest_path)):
         with pytest.raises(BenchmarkBoundaryViolation, match="unrecorded replay URL"):
             urllib.request.urlopen("https://example.invalid/missing")
+
+
+def test_enforcement_allows_configured_model_provider_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    calls = []
+
+    class Response:
+        def read(self) -> bytes:
+            return b"model response\n"
+
+    def fake_urlopen(url: str, *_args: Any, **_kwargs: Any) -> Response:
+        calls.append(url)
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    environment = {
+        **_environment(manifest_path),
+        "CHAT_MODEL": "gemini:gemini-2.5-pro",
+    }
+    with enforce_benchmark_boundaries(environment):
+        response = urllib.request.urlopen(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+        )
+
+    assert response.read() == b"model response\n"
+    assert calls == [
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+    ]
 
 
 def test_enforcement_blocks_unsafe_subprocess_command() -> None:
