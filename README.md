@@ -11,50 +11,109 @@ requires `replay_only` cases to declare recorded web-cache files. Fixture
 collection can make explicit read-only Jira and GitLab requests to build those
 offline fixtures when a Jira URL or GitLab MR URL is provided.
 
-## Commands
+## Workflow
+
+Start by installing the harness and the checked-out Ymir submodule:
 
 ```bash
-ymir-harness validate-cases benchmark_cases/
-ymir-harness collect-case \
-  --cases benchmark_cases/ \
-  --case-id RHEL-12345 \
-  --case-type cve_backport \
-  --resolution backport \
-  --package dnsmasq \
-  --target-branch rhel-8.10.z \
-  --expected-basis merged_mr \
-  --network-mode replay_only \
-  --remote-url https://example.invalid/dnsmasq.git \
-  --pre-fix-ref abc123 \
-  --branch c9s \
-  --reference-patch evidence/fix.patch \
-  --reference-patch-mode scope_only \
-  --jira-issue-json evidence/issue.json \
-  --web-record https://example.invalid/fix.patch=evidence/fix.patch.response
-ymir-harness score-result \
-  benchmark_cases/expected/RHEL-12345.expected.json \
-  reports/RHEL-12345.actual.json
-ymir-harness score-results benchmark_cases/ reports/actual-results/ \
-  --run-id baseline-2026-06-04T120000Z \
-  --ymir-sha 6e22912f83d57ddae1031e6207d4716171a99be0 \
-  --variant baseline
-ymir-harness run \
-  --cases benchmark_cases/ \
-  --variant baseline \
-  --run-id baseline-2026-06-04T120000Z \
-  --case RHEL-12345 \
-  --repeat 3 \
-  --workflow ymir-triage
-ymir-harness prepare-case \
-  --cases benchmark_cases/ \
+uv sync
+uv run ymir-harness --version
+```
+
+For live Ymir runs, export the model credential for the `CHAT_MODEL` you want
+to use. If `CHAT_MODEL` is unset, the harness defaults to
+`gemini:gemini-2.5-pro`.
+
+For Gemini models, create or copy an API key from
+<https://console.cloud.google.com/apis/credentials> after selecting the
+`packit-automated-packaging` project.
+
+```bash
+export GEMINI_API_KEY="..."
+export JIRA_TOKEN_FILE="/path/to/redhat-jira-api-token"
+export JIRA_EMAIL="you@example.com"
+```
+
+To turn a completed Jira into a repeatable triage experiment, use
+`prepare-case`. It imports the Jira, writes replay fixtures, runs the selected
+workflow, captures any missing Jira searches or web requests, and repeats until
+the run succeeds or reaches the iteration limit.
+
+```bash
+uv run ymir-harness prepare-case \
+  --cases examples/benchmark_cases \
   --case RHEL-12345 \
   --jira-url https://redhat.atlassian.net/browse/RHEL-12345 \
+  --jira-token-file "$JIRA_TOKEN_FILE" \
+  --jira-email "$JIRA_EMAIL" \
+  --mock-repo-cache .cache/mock-repos \
   --workflow ymir-triage \
-  --max-iterations 3
-ymir-harness compare-results \
-  reports/baseline-results.json \
-  reports/enhanced-results.json \
-  --markdown-output reports/comparison.md
+  --variant baseline \
+  --run-id RHEL-12345-baseline \
+  --max-iterations 3 \
+  --overwrite \
+  --json > prepare.json
+```
+
+Inspect `prepare.json` first. Its `status` shows whether preparation succeeded,
+hit the iteration limit, or stopped on a capture problem. The last iteration's
+`run.run_json` points at the final report.
+
+```bash
+python -m json.tool prepare.json
+RUN_DIR="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.load(open("prepare.json", encoding="utf-8"))
+print(Path(payload["iterations"][-1]["run"]["run_json"]).parent)
+PY
+)"
+python -m json.tool "$RUN_DIR/run.json"
+python -m json.tool "$RUN_DIR/repeat-1/actual-results/RHEL-12345.actual.json"
+```
+
+After the fixture is prepared, rerun it without collecting new inputs:
+
+```bash
+uv run ymir-harness run \
+  --cases examples/benchmark_cases \
+  --case RHEL-12345 \
+  --workflow ymir-triage \
+  --variant baseline \
+  --run-id RHEL-12345-rerun
+```
+
+To test a Ymir change, check out the desired revision in `ui-workflows`, run
+`uv sync`, and run the same case with a different `--variant` and `--run-id`.
+Then compare the run reports:
+
+```bash
+uv run ymir-harness compare-results \
+  examples/benchmark_cases/reports/runs/RHEL-12345-rerun/run.json \
+  examples/benchmark_cases/reports/runs/RHEL-12345-candidate/run.json \
+  --markdown-output examples/benchmark_cases/reports/RHEL-12345-comparison.md
+```
+
+Use `collect-case` directly when you only want to import fixture data and do
+not want to run Ymir yet:
+
+```bash
+uv run ymir-harness collect-case \
+  --cases examples/benchmark_cases \
+  --case-id RHEL-12345 \
+  --jira-url https://redhat.atlassian.net/browse/RHEL-12345 \
+  --jira-token-file "$JIRA_TOKEN_FILE" \
+  --jira-email "$JIRA_EMAIL" \
+  --mock-repo-cache .cache/mock-repos \
+  --overwrite
+```
+
+Validate fixture structure before relying on a case:
+
+```bash
+uv run ymir-harness validate-cases examples/benchmark_cases --workflow ymir-triage
 ```
 
 The `benchmark` script is an alias for the same CLI:
