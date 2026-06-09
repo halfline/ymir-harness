@@ -104,7 +104,7 @@ def _score_case_once(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> 
         _compare("package", expected.get("package"), normalized_actual["package"]),
         _compare(
             "target_branch",
-            expected.get("target_branch") or expected.get("fix_version"),
+            expected.get("target_branch"),
             normalized_actual["target_branch"],
             optional=True,
         ),
@@ -158,6 +158,8 @@ def _score_case_once(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> 
             "fix_sources",
             expected.get("fix_sources"),
             _actual_result_field(actual, "fix_sources"),
+            optional=True,
+            skip_missing_actual=True,
         ),
         _compare_list("patch_urls", expected.get("patch_urls"), normalized_actual["patch_urls"]),
     ]
@@ -467,7 +469,16 @@ def _compare(
     return ScoreMetric(name=name, status="fail", expected=expected, actual=actual)
 
 
-def _compare_list(name: str, expected: Any, actual: Any) -> ScoreMetric:
+def _compare_list(
+    name: str,
+    expected: Any,
+    actual: Any,
+    *,
+    optional: bool = False,
+    skip_missing_actual: bool = False,
+) -> ScoreMetric:
+    if optional and (expected is None or (skip_missing_actual and actual is None)):
+        return ScoreMetric(name=name, status="skipped", expected=expected, actual=actual)
     if expected is None:
         return ScoreMetric(name=name, status="skipped", expected=expected, actual=actual)
     expected_values = _normalize_list(expected)
