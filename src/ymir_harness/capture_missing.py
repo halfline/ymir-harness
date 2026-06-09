@@ -22,18 +22,37 @@ DEFAULT_ALLOWED_HOSTS = (
     "gitlab.gnome.org",
     "issues.redhat.com",
     "redhat.atlassian.net",
+    "src.fedoraproject.org",
 )
 MISSING_URL_PATTERNS = (
-    re.compile(r"unrecorded replay URL blocked:\s*(https?://[^\s\"'<>]+)"),
-    re.compile(r"external subprocess URL blocked:\s*(https?://[^\s\"'<>]+)"),
-    re.compile(r"external network access blocked:\s*(https?://[^\s\"'<>]+)"),
-    re.compile(r"unrecorded URL:\s*(https?://[^\s\"'<>]+)"),
+    (
+        "unrecorded replay URL blocked",
+        re.compile(r"unrecorded replay URL blocked:\s*(https?://[^\s\"'<>]+)"),
+    ),
+    (
+        "external subprocess URL blocked",
+        re.compile(r"external subprocess URL blocked:\s*(https?://[^\s\"'<>]+)"),
+    ),
+    (
+        "external network access blocked",
+        re.compile(r"external network access blocked:\s*(https?://[^\s\"'<>]+)"),
+    ),
+    ("unrecorded URL", re.compile(r"unrecorded URL:\s*(https?://[^\s\"'<>]+)")),
 )
 TEXT_SUFFIXES = {".json", ".log", ".md", ".out", ".txt"}
 
 
 class CaptureMissingError(RuntimeError):
     """Raised when missing replay evidence cannot be captured."""
+
+
+@dataclass(frozen=True)
+class BlockedUrl:
+    reason: str
+    url: str
+
+    def to_replay_violation(self) -> str:
+        return f"{self.reason}: {self.url}"
 
 
 @dataclass(frozen=True)
@@ -163,6 +182,10 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
 
 
 def _blocked_urls_from_run_path(run_path: Path) -> list[str]:
+    return list(dict.fromkeys(blocked.url for blocked in blocked_urls_from_run_path(run_path)))
+
+
+def blocked_urls_from_run_path(run_path: Path) -> list[BlockedUrl]:
     if run_path.is_file():
         paths = [run_path]
     elif run_path.is_dir():
@@ -170,16 +193,18 @@ def _blocked_urls_from_run_path(run_path: Path) -> list[str]:
     else:
         raise CaptureMissingError(f"run path does not exist: {run_path}")
 
-    urls: list[str] = []
+    blocked_urls: list[BlockedUrl] = []
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        for pattern in MISSING_URL_PATTERNS:
+        for reason, pattern in MISSING_URL_PATTERNS:
             for match in pattern.finditer(text):
-                urls.append(_clean_url(match.group(1)))
-    return list(dict.fromkeys(url for url in urls if url))
+                url = _clean_url(match.group(1))
+                if url:
+                    blocked_urls.append(BlockedUrl(reason=reason, url=url))
+    return list({blocked.to_replay_violation(): blocked for blocked in blocked_urls}.values())
 
 
 def _looks_like_text_artifact(path: Path) -> bool:

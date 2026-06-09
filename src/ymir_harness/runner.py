@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ import yaml
 
 from ymir_harness import __version__
 from ymir_harness.artifacts import artifact_environment
+from ymir_harness.capture_missing import CaptureMissingError, blocked_urls_from_run_path
 from ymir_harness.enforcement import BenchmarkBoundaryViolation, enforce_benchmark_boundaries
 from ymir_harness.jira_mock import (
     JiraMockMaterializationError,
@@ -99,6 +101,18 @@ def default_results_dir(cases_dir: Path, run_id: str) -> Path:
 
 def actual_result_path(results_dir: Path, case_id: str, repetition: int) -> Path:
     return results_dir / f"repeat-{repetition}" / "actual-results" / f"{case_id}.actual.json"
+
+
+def workflow_trace_dir(results_dir: Path, repetition: int) -> Path:
+    return results_dir / f"repeat-{repetition}" / "workflow-trace"
+
+
+def workflow_stdout_path(results_dir: Path, case_id: str, repetition: int) -> Path:
+    return workflow_trace_dir(results_dir, repetition) / f"{case_id}.stdout.log"
+
+
+def workflow_stderr_path(results_dir: Path, case_id: str, repetition: int) -> Path:
+    return workflow_trace_dir(results_dir, repetition) / f"{case_id}.stderr.log"
 
 
 def build_no_write_environment(
@@ -378,7 +392,10 @@ def _run_case_result(
         )
         try:
             started_at = time.monotonic()
-            with enforce_benchmark_boundaries(request.environment):
+            with (
+                _capture_workflow_output(results_dir, case_id, repetition),
+                enforce_benchmark_boundaries(request.environment),
+            ):
                 execution = executor(request)
             runtime_seconds = time.monotonic() - started_at
         except BenchmarkBoundaryViolation as exc:
@@ -392,6 +409,7 @@ def _run_case_result(
                 reason=f"benchmark boundary blocked: {exc}",
             )
         except Exception as exc:
+            replay_violations = _artifact_replay_violations(results_dir, case_id, repetition)
             return RunCaseResult(
                 case_id=case_id,
                 case_type=case_type,
@@ -399,15 +417,17 @@ def _run_case_result(
                 repetition=repetition,
                 expected_path=expected_path if expected_path.is_file() else None,
                 actual_path=actual_path,
-                reason=_executor_failure_reason(exc),
+                reason=_with_replay_violations(_executor_failure_reason(exc), replay_violations),
             )
         execution_actual_path = execution.actual_path or actual_path
         score = None
+        replay_violations = _artifact_replay_violations(results_dir, case_id, repetition)
         actual_result = _apply_run_policies(
             cases_dir,
             case_id,
             expected,
             execution.actual_result,
+            replay_violations,
         )
         if actual_result is not None:
             try:
@@ -461,6 +481,12 @@ def _run_case_result(
 
 def _executor_failure_reason(exc: Exception) -> str:
     return "executor failed: " + _exception_summary(exc)
+
+
+def _with_replay_violations(reason: str, replay_violations: Sequence[str]) -> str:
+    if not replay_violations:
+        return reason
+    return reason + "; replay violations: " + "; ".join(replay_violations[:3])
 
 
 def _exception_summary(exc: BaseException) -> str:
@@ -616,11 +642,15 @@ def _apply_run_policies(
     case_id: str,
     expected: Mapping[str, Any],
     actual_result: Mapping[str, Any] | None,
+    artifact_replay_violations: Sequence[str] = (),
 ) -> Mapping[str, Any] | None:
     if actual_result is None:
         return None
 
     payload = dict(actual_result)
+    if artifact_replay_violations:
+        _append_result_values(payload, "replay_violations", artifact_replay_violations)
+
     events = _actual_result_events(payload)
     if not events:
         return payload
@@ -643,6 +673,38 @@ def _apply_run_policies(
             _append_result_values(payload, "replay_violations", replay_violations)
 
     return payload
+
+
+@contextmanager
+def _capture_workflow_output(
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+) -> Iterator[None]:
+    stdout_path = workflow_stdout_path(results_dir, case_id, repetition)
+    stderr_path = workflow_stderr_path(results_dir, case_id, repetition)
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    with ExitStack() as stack:
+        stdout = stack.enter_context(stdout_path.open("w", encoding="utf-8"))
+        stderr = stack.enter_context(stderr_path.open("w", encoding="utf-8"))
+        stack.enter_context(redirect_stdout(stdout))
+        stack.enter_context(redirect_stderr(stderr))
+        yield
+
+
+def _artifact_replay_violations(
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+) -> list[str]:
+    artifact_root = results_dir / f"repeat-{repetition}"
+    if not artifact_root.exists():
+        return []
+    try:
+        blocked_urls = blocked_urls_from_run_path(artifact_root)
+    except CaptureMissingError:
+        return []
+    return [blocked.to_replay_violation() for blocked in blocked_urls]
 
 
 def _actual_result_events(actual_result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
