@@ -12,7 +12,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ymir_harness.enforcement import enforce_benchmark_boundaries
-from ymir_harness.jira_replay import jira_search_replay_miss, load_jira_search_response
+from ymir_harness.jira_replay import (
+    jira_issue_replay_miss,
+    jira_search_replay_miss,
+    load_jira_search_response,
+)
 from ymir_harness.ymir_source import ensure_ymir_source_path
 
 
@@ -66,12 +70,33 @@ def _patch_ymir_jira_mock_remote_links() -> None:
         @asynccontextmanager
         async def get(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
             url = args[0] if args else None
-            if isinstance(url, str) and (match_data := self.remote_link_get_regex.fullmatch(url)):
+            issue_get_regex = getattr(self, "issue_get_regex", None)
+            if (
+                isinstance(url, str)
+                and issue_get_regex is not None
+                and (match_data := issue_get_regex.fullmatch(url))
+            ):
+                issue_key = match_data.group(1)
                 yield flexmock_factory(
                     raise_for_status=lambda: None,
                     json=partial(
+                        _read_jira_mock_with_miss,
                         read_jira_mock,
-                        issue_key=match_data.group(1),
+                        url,
+                        issue_key,
+                        remote_link=False,
+                    ),
+                )
+                return
+            if isinstance(url, str) and (match_data := self.remote_link_get_regex.fullmatch(url)):
+                issue_key = match_data.group(1)
+                yield flexmock_factory(
+                    raise_for_status=lambda: None,
+                    json=partial(
+                        _read_jira_mock_with_miss,
+                        read_jira_mock,
+                        url,
+                        issue_key,
                         remote_link=True,
                     ),
                 )
@@ -188,6 +213,20 @@ async def _all_mock_jira_issues() -> list[dict[str, Any]]:
 
 async def _async_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
+
+
+async def _read_jira_mock_with_miss(
+    read_jira_mock: Any,
+    url: str,
+    issue_key: str,
+    *,
+    remote_link: bool,
+) -> Any:
+    try:
+        return await read_jira_mock(issue_key=issue_key, remote_link=remote_link)
+    except Exception:
+        print(jira_issue_replay_miss(url, issue_key), file=sys.stderr, flush=True)
+        raise
 
 
 if __name__ == "__main__":

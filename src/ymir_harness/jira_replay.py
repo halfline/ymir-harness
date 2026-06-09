@@ -157,6 +157,17 @@ def jira_search_replay_miss(url: str, payload: Mapping[str, Any]) -> str:
     )
 
 
+def jira_issue_replay_miss(url: str, issue_key: str) -> str:
+    return jira_replay_miss_line(
+        JiraReplayMiss(
+            kind="jira_issue",
+            method="GET",
+            url=url,
+            payload={"issue_key": issue_key},
+        )
+    )
+
+
 def parse_jira_replay_misses(text: str) -> list[JiraReplayMiss]:
     misses: list[JiraReplayMiss] = []
     for line in text.splitlines():
