@@ -69,6 +69,26 @@ class _SourcePatchResponse:
     headers: Mapping[str, str]
 
 
+TRAILING_ESCAPED_URL_GARBAGE_RE = re.compile(r"(?:\\+[nrt]|\\+)+$", re.IGNORECASE)
+
+
+def canonicalize_replay_url(value: Any) -> str:
+    url = value if isinstance(value, str) else str(value)
+    url = url.strip()
+    if not url:
+        return url
+
+    split = re.split(r"[\s\"'<>]", url, maxsplit=1)
+    url = split[0] if split else url
+    previous = None
+    while previous != url:
+        previous = url
+        url = url.rstrip(".,;:)]}\"'")
+        url = TRAILING_ESCAPED_URL_GARBAGE_RE.sub("", url)
+        url = url.strip()
+    return url
+
+
 class ReplayCache:
     def __init__(self, manifest_path: Path, *, source_cache_dir: Path | None = None):
         self.manifest_path = manifest_path
@@ -191,9 +211,12 @@ class ReplayCache:
                 f"replay manifest recorded_files must be an object: {manifest_path}"
             )
         output = {
-            url: recorded
+            canonicalize_replay_url(url): recorded
             for url, recorded in recorded_files.items()
-            if isinstance(url, str) and url and isinstance(recorded, str) and recorded
+            if isinstance(url, str)
+            and canonicalize_replay_url(url)
+            and isinstance(recorded, str)
+            and recorded
         }
         return output
 
@@ -203,9 +226,9 @@ class ReplayCache:
         if not isinstance(response_metadata, Mapping):
             return {}
         return {
-            url: metadata
+            canonicalize_replay_url(url): metadata
             for url, metadata in response_metadata.items()
-            if isinstance(url, str) and isinstance(metadata, Mapping)
+            if isinstance(url, str) and canonicalize_replay_url(url) and isinstance(metadata, Mapping)
         }
 
     def _load_manifest(self, manifest_path: Path) -> Mapping[str, Any]:
@@ -330,7 +353,7 @@ def _content_type_for(path: Path, body: bytes) -> str:
 
 
 def _url_text(url: Any) -> str:
-    return url if isinstance(url, str) else str(url)
+    return canonicalize_replay_url(url)
 
 
 def _source_patch_request(url: Any) -> _SourcePatchRequest | None:
@@ -503,13 +526,13 @@ def _normalized_git_path(path: str) -> str:
 
 def request_url(value: Any, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> str | None:
     if isinstance(value, str):
-        return value
+        return canonicalize_replay_url(value)
     if hasattr(value, "full_url"):
         url = getattr(value, "full_url")
-        return url if isinstance(url, str) else None
+        return canonicalize_replay_url(url) if isinstance(url, str) else None
     if args:
         first = args[0]
         if isinstance(first, str):
-            return first
+            return canonicalize_replay_url(first)
     url = kwargs.get("url")
-    return url if isinstance(url, str) else None
+    return canonicalize_replay_url(url) if isinstance(url, str) else None

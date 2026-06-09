@@ -16,7 +16,13 @@ from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request
 
-from ymir_harness.replay import ReplayCache, ReplayCacheError, ReplayResponse, request_url
+from ymir_harness.replay import (
+    ReplayCache,
+    ReplayCacheError,
+    ReplayResponse,
+    canonicalize_replay_url,
+    request_url,
+)
 from ymir_harness.safety import (
     detect_replay_violations,
     detect_unsafe_command,
@@ -617,6 +623,7 @@ def _patch_urllib(
         )
         if target_url is None:
             return originals.urllib_urlopen(url, *args, **kwargs)
+        target_url = canonicalize_replay_url(target_url)
         method = request.get_method() if isinstance(request, Request) else "GET"
         _check_http_operation(method, target_url, source="urllib")
         if (
@@ -646,24 +653,29 @@ def _patch_requests(
         return
 
     def guarded_request(session: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
-        _check_http_operation(method, url, source="requests")
-        if network_mode == "replay_only" and replay_cache is not None and replay_cache.has_url(url):
+        target_url = canonicalize_replay_url(url)
+        _check_http_operation(method, target_url, source="requests")
+        if (
+            network_mode == "replay_only"
+            and replay_cache is not None
+            and replay_cache.has_url(target_url)
+        ):
             import requests  # type: ignore[import-not-found]
 
-            body = replay_cache.read_bytes(url)
+            body = replay_cache.read_bytes(target_url)
             response = requests.Response()
-            response.status_code = replay_cache.status_code(url)
-            response.url = url
+            response.status_code = replay_cache.status_code(target_url)
+            response.url = target_url
             response._content = body
-            response.headers.update(replay_cache.response_headers(url, body))
-            response.request = requests.Request(method=method, url=url).prepare()
+            response.headers.update(replay_cache.response_headers(target_url, body))
+            response.request = requests.Request(method=method, url=target_url).prepare()
             return response
-        if _is_model_provider_url(url, model_hosts):
+        if _is_model_provider_url(target_url, model_hosts):
             with _model_socket_passthrough():
                 return originals.requests_request(session, method, url, *args, **kwargs)
         if network_mode == "replay_only":
-            return _replay_miss_requests_response(method, url)
-        _raise_network_violation(network_mode, url)
+            return _replay_miss_requests_response(method, target_url)
+        _raise_network_violation(network_mode, target_url)
         return originals.requests_request(session, method, url, *args, **kwargs)
 
     originals.requests_session.request = guarded_request
@@ -681,7 +693,7 @@ def _patch_aiohttp(
     async def guarded_request(
         session: Any, method: str, url: str, *args: Any, **kwargs: Any
     ) -> Any:
-        target_url = str(url)
+        target_url = canonicalize_replay_url(url)
         _check_http_operation(method, target_url, source="aiohttp")
         if (
             network_mode == "replay_only"
@@ -756,6 +768,7 @@ def _replay_miss_http_error(url: str) -> HTTPError:
 
 
 def _replay_miss_body(url: str) -> bytes:
+    url = canonicalize_replay_url(url)
     return f"replay miss: URL is not recorded in replay cache: {url}\n".encode("utf-8")
 
 
@@ -797,7 +810,7 @@ def _mock_git_urls(environment: Mapping[str, str]) -> tuple[str, ...]:
     encoded = environment.get("MOCK_BLOCKED_URLS", "")
     urls = []
     for line in encoded.splitlines():
-        url = line.strip()
+        url = canonicalize_replay_url(line)
         if not url:
             continue
         urls.extend(_git_url_aliases(url))
@@ -896,11 +909,12 @@ def _external_urls(tokens: Sequence[str]) -> list[str]:
     for token in tokens[1:]:
         parsed = urlparse(token)
         if parsed.scheme in {"http", "https"} and parsed.netloc:
-            urls.append(token)
+            urls.append(canonicalize_replay_url(token))
     return urls
 
 
 def _git_url_aliases(url: str) -> tuple[str, ...]:
+    url = canonicalize_replay_url(url)
     aliases = [url]
     if url.endswith(".git"):
         aliases.append(url.removesuffix(".git"))

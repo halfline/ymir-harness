@@ -32,6 +32,7 @@ from ymir_harness.models import (
 )
 from ymir_harness.mock_repos import MockRepoMaterializationError, materialize_case_mock_repos
 from ymir_harness.provenance import collect_provenance
+from ymir_harness.replay import canonicalize_replay_url
 from ymir_harness.safety import detect_replay_violations, detect_unsafe_operations
 from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
 
@@ -562,8 +563,11 @@ def _apply_source_cache_git_rewrites(
     environment["GIT_CONFIG_GLOBAL"] = str(gitconfig_path)
     environment["YMIR_BENCHMARK_GITCONFIG"] = str(gitconfig_path)
 
-    blocked_urls = environment.get("MOCK_BLOCKED_URLS", "").splitlines()
-    blocked_urls.extend(original for original, _local in rewrites)
+    blocked_urls = [
+        canonicalize_replay_url(url)
+        for url in environment.get("MOCK_BLOCKED_URLS", "").splitlines()
+    ]
+    blocked_urls.extend(canonicalize_replay_url(original) for original, _local in rewrites)
     environment["MOCK_BLOCKED_URLS"] = "\n".join(dict.fromkeys(url for url in blocked_urls if url))
 
 
@@ -593,6 +597,7 @@ def _source_cache_git_repositories(upstream_dir: Path) -> tuple[Path, ...]:
 
 
 def _source_cache_git_aliases(remote_url: str) -> tuple[str, ...]:
+    remote_url = canonicalize_replay_url(remote_url)
     aliases = [*_remote_git_aliases(remote_url)]
     parsed = urlparse(remote_url)
     if parsed.scheme in {"http", "https"}:
@@ -607,6 +612,7 @@ def _source_cache_git_aliases(remote_url: str) -> tuple[str, ...]:
 
 
 def _remote_git_aliases(remote_url: str) -> tuple[str, ...]:
+    remote_url = canonicalize_replay_url(remote_url)
     aliases = [remote_url]
     if remote_url.endswith(".git"):
         aliases.append(remote_url.removesuffix(".git"))
@@ -752,11 +758,19 @@ def _recorded_urls(manifest_path: Path) -> list[str]:
     urls = []
     required_urls = manifest.get("required_urls")
     if isinstance(required_urls, list):
-        urls.extend(url for url in required_urls if isinstance(url, str) and url)
+        urls.extend(
+            canonicalize_replay_url(url)
+            for url in required_urls
+            if isinstance(url, str) and canonicalize_replay_url(url)
+        )
 
     recorded_files = manifest.get("recorded_files")
     if isinstance(recorded_files, Mapping):
-        urls.extend(url for url in recorded_files if isinstance(url, str) and url)
+        urls.extend(
+            canonicalize_replay_url(url)
+            for url in recorded_files
+            if isinstance(url, str) and canonicalize_replay_url(url)
+        )
     return list(dict.fromkeys(urls))
 
 

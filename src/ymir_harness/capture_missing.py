@@ -24,6 +24,7 @@ from ymir_harness.jira_replay import (
     write_jira_search_fixture,
 )
 from ymir_harness.models import SCHEMA_VERSION
+from ymir_harness.replay import canonicalize_replay_url
 from ymir_harness.scoring import load_json_file
 
 
@@ -342,7 +343,7 @@ def _looks_like_text_artifact(path: Path) -> bool:
 
 
 def _clean_url(url: str) -> str:
-    return url.rstrip(".,;:)]}\"'")
+    return canonicalize_replay_url(url)
 
 
 def _load_or_create_manifest(
@@ -367,13 +368,17 @@ def _load_or_create_manifest(
 def _manifest_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, str) and item]
+    return [canonical for item in value if isinstance(item, str) and (canonical := _clean_url(item))]
 
 
 def _manifest_mapping(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
-    return {str(key): item for key, item in value.items() if isinstance(key, str) and key}
+    return {
+        canonical: item
+        for key, item in value.items()
+        if isinstance(key, str) and (canonical := _clean_url(key))
+    }
 
 
 def _allowed_url(url: str, allowed_hosts: Sequence[str]) -> bool:
