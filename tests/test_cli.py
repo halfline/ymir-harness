@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from ymir_harness import __version__
-from ymir_harness.capture_missing import CapturedJiraRequest, CaptureMissingResult
+from ymir_harness.capture_missing import (
+    CapturedJiraRequest,
+    CapturedResponse,
+    CaptureFailure,
+    CaptureMissingResult,
+)
 import ymir_harness.cli as cli_module
 from ymir_harness.cli import main
 from ymir_harness.collect_case import CollectCaseResult
@@ -1134,6 +1139,182 @@ def test_cli_prepare_case_blocks_passing_run_with_uncaptured_replay_miss(
     assert output["iterations"][0]["capture"]["candidate_urls"] == [
         "https://example.invalid/missing.patch"
     ]
+
+
+def test_cli_prepare_case_auto_allows_denied_capture_hosts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    capture_requests = []
+    run_statuses = ["failed", "passed"]
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    case_status="active",
+                    status="valid",
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        status = run_statuses.pop(0)
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    status=status,
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    def fake_capture_missing(request):
+        capture_requests.append(request)
+        result = CaptureMissingResult(
+            case_id=request.case_id,
+            cases_dir=request.cases_dir,
+            run_path=request.run_path,
+        )
+        url = "https://www.sqlite.org/changes.html"
+        if "www.sqlite.org" not in request.allowed_hosts:
+            result.candidate_urls.append(url)
+            result.skipped.append(CaptureFailure(url=url, reason="host is not allowed"))
+        else:
+            result.candidate_urls.append(url)
+            result.captured.append(
+                CapturedResponse(
+                    url=url,
+                    relative_path="captured/www.sqlite.org/changes.html",
+                    status=200,
+                )
+            )
+        return result
+
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--workflow",
+                "ymir-triage",
+                "--variant",
+                "baseline",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "succeeded"
+    assert output["auto_allowed_hosts"] == ["www.sqlite.org"]
+    assert output["iterations"][0]["auto_allowed_hosts"] == ["www.sqlite.org"]
+    assert len(output["iterations"][0]["capture"]["captured"]) == 1
+    assert output["iterations"][0]["capture"]["skipped"] == []
+    assert "www.sqlite.org" not in capture_requests[0].allowed_hosts
+    assert "www.sqlite.org" in capture_requests[1].allowed_hosts
+    assert len(capture_requests) == 2
+
+
+def test_cli_prepare_case_does_not_auto_allow_private_hosts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    capture_requests = []
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    case_status="active",
+                    status="valid",
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    status="failed",
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    def fake_capture_missing(request):
+        capture_requests.append(request)
+        result = CaptureMissingResult(
+            case_id=request.case_id,
+            cases_dir=request.cases_dir,
+            run_path=request.run_path,
+        )
+        url = "http://127.0.0.1/secret"
+        result.candidate_urls.append(url)
+        result.skipped.append(CaptureFailure(url=url, reason="host is not allowed"))
+        return result
+
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--workflow",
+                "ymir-triage",
+                "--variant",
+                "baseline",
+                "--json",
+            ]
+        )
+        == 1
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "blocked"
+    assert output["auto_allowed_hosts"] == []
+    assert "127.0.0.1" not in capture_requests[0].allowed_hosts
+    assert len(capture_requests) == 1
 
 
 def test_cli_run_blocks_invalid_fixtures(
