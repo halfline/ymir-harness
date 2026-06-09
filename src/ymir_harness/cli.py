@@ -288,6 +288,13 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--jira-token-file", type=Path, help="file containing a Jira token")
     capture.add_argument("--jira-email", help="Atlassian account email for Jira Basic auth")
     capture.add_argument(
+        "--as-of",
+        help=(
+            "historical Jira timestamp to reconstruct search results against; "
+            "defaults to the first existing Ymir/Jotnar result comment when available"
+        ),
+    )
+    capture.add_argument(
         "--http-timeout",
         type=float,
         default=30.0,
@@ -559,6 +566,7 @@ def _cmd_capture_missing(args: argparse.Namespace) -> int:
         jira_token_env=args.jira_token_env,
         jira_token_file=args.jira_token_file,
         jira_email=args.jira_email,
+        as_of=args.as_of,
         http_timeout=args.http_timeout,
         dry_run=args.dry_run,
         overwrite=args.overwrite,

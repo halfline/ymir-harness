@@ -10,9 +10,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
+from ymir_harness.jira_replay import (
+    JiraReplayMiss,
+    derive_as_of,
+    filter_comments_as_of,
+    filter_search_response_as_of,
+    jira_search_fixture_path,
+    parse_jira_replay_misses,
+    write_jira_dev_status_fixture,
+    write_jira_search_fixture,
+)
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.scoring import load_json_file
 
@@ -73,6 +83,7 @@ class CaptureMissingRequest:
     jira_token_env: str = "JIRA_TOKEN"
     jira_token_file: Path | None = None
     jira_email: str | None = None
+    as_of: str | None = None
     http_timeout: float = 30.0
     dry_run: bool = False
     overwrite: bool = False
@@ -93,6 +104,22 @@ class CapturedResponse:
 
 
 @dataclass(frozen=True)
+class CapturedJiraRequest:
+    kind: str
+    method: str
+    url: str
+    relative_path: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "method": self.method,
+            "url": self.url,
+            "relative_path": self.relative_path,
+        }
+
+
+@dataclass(frozen=True)
 class CaptureFailure:
     url: str
     reason: str
@@ -107,7 +134,9 @@ class CaptureMissingResult:
     cases_dir: Path
     run_path: Path
     candidate_urls: list[str] = field(default_factory=list)
+    candidate_jira_requests: list[dict[str, Any]] = field(default_factory=list)
     captured: list[CapturedResponse] = field(default_factory=list)
+    captured_jira: list[CapturedJiraRequest] = field(default_factory=list)
     skipped: list[CaptureFailure] = field(default_factory=list)
     failed: list[CaptureFailure] = field(default_factory=list)
 
@@ -117,7 +146,9 @@ class CaptureMissingResult:
             "cases_dir": str(self.cases_dir),
             "run_path": str(self.run_path),
             "candidate_urls": self.candidate_urls,
+            "candidate_jira_requests": self.candidate_jira_requests,
             "captured": [capture.to_json() for capture in self.captured],
+            "captured_jira": [capture.to_json() for capture in self.captured_jira],
             "skipped": [skip.to_json() for skip in self.skipped],
             "failed": [failure.to_json() for failure in self.failed],
         }
@@ -140,6 +171,8 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
     )
     urls = _blocked_urls_from_run_path(run_path)
     result.candidate_urls.extend(urls)
+    jira_requests = _blocked_jira_requests_from_run_path(run_path)
+    result.candidate_jira_requests.extend(miss.to_json() for miss in jira_requests)
 
     manifest_path = cases_dir / "web_cache" / request.case_id / "manifest.json"
     manifest = _load_or_create_manifest(cases_dir, request.case_id, manifest_path)
@@ -176,6 +209,68 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             CapturedResponse(url=url, relative_path=relative_path, status=fetched.status)
         )
 
+    as_of = request.as_of or derive_as_of(cases_dir, request.case_id)
+    for miss in jira_requests:
+        if miss.kind != "jira_search":
+            result.skipped.append(CaptureFailure(url=miss.url, reason=f"unsupported Jira miss {miss.kind}"))
+            continue
+        if miss.method != "POST":
+            result.skipped.append(CaptureFailure(url=miss.url, reason=f"unsupported Jira method {miss.method}"))
+            continue
+        if not _allowed_url(miss.url, request.allowed_hosts):
+            result.skipped.append(CaptureFailure(url=miss.url, reason="host is not allowed"))
+            continue
+        search_path = jira_search_fixture_path(cases_dir, request.case_id, miss.payload)
+        if search_path.is_file() and not request.overwrite:
+            try:
+                existing = load_json_file(search_path)
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+            if existing.get("response"):
+                result.skipped.append(CaptureFailure(url=miss.url, reason="Jira search is already recorded"))
+                continue
+        if request.dry_run:
+            continue
+
+        try:
+            fetched = _post_json(miss.url, miss.payload, request)
+            response = _json_object_from_body(fetched.body, miss.url)
+        except (OSError, CaptureMissingError) as exc:
+            result.failed.append(CaptureFailure(url=miss.url, reason=str(exc)))
+            continue
+        issue_details = _fetch_search_issue_details(miss.url, response, request, result)
+        filtered_response = filter_search_response_as_of(
+            response,
+            as_of=as_of,
+            issue_details=issue_details,
+        )
+        _capture_related_jira_from_search(
+            miss.url,
+            filtered_response,
+            cases_dir,
+            request.case_id,
+            as_of,
+            request,
+            result,
+        )
+        path = write_jira_search_fixture(
+            cases_dir,
+            request.case_id,
+            url=miss.url,
+            payload=miss.payload,
+            response=filtered_response,
+            as_of=as_of,
+            overwrite=True,
+        )
+        result.captured_jira.append(
+            CapturedJiraRequest(
+                kind=miss.kind,
+                method=miss.method,
+                url=miss.url,
+                relative_path=str(path.relative_to(cases_dir / "jiras" / request.case_id)),
+            )
+        )
+
     if not request.dry_run and result.captured:
         manifest["required_urls"] = required_urls
         manifest["recorded_files"] = recorded_files
@@ -191,6 +286,33 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
 
 def _blocked_urls_from_run_path(run_path: Path) -> list[str]:
     return list(dict.fromkeys(blocked.url for blocked in blocked_urls_from_run_path(run_path)))
+
+
+def _blocked_jira_requests_from_run_path(run_path: Path) -> list[JiraReplayMiss]:
+    return list(
+        {
+            json.dumps(miss.to_json(), sort_keys=True): miss
+            for miss in jira_requests_from_run_path(run_path)
+        }.values()
+    )
+
+
+def jira_requests_from_run_path(run_path: Path) -> list[JiraReplayMiss]:
+    if run_path.is_file():
+        paths = [run_path]
+    elif run_path.is_dir():
+        paths = sorted(path for path in run_path.rglob("*") if _looks_like_text_artifact(path))
+    else:
+        raise CaptureMissingError(f"run path does not exist: {run_path}")
+
+    misses: list[JiraReplayMiss] = []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        misses.extend(parse_jira_replay_misses(text))
+    return misses
 
 
 def blocked_urls_from_run_path(run_path: Path) -> list[BlockedUrl]:
@@ -277,6 +399,279 @@ def _fetch_url(url: str, request: CaptureMissingRequest) -> _FetchedResponse:
         status = exc.code
         headers = _selected_headers(dict(exc.headers.items()))
     return _FetchedResponse(body=body, status=int(status), headers=headers)
+
+
+def _post_json(
+    url: str,
+    payload: Mapping[str, Any],
+    request: CaptureMissingRequest,
+) -> _FetchedResponse:
+    body = json.dumps(payload).encode("utf-8")
+    headers = _headers_for_url(url, request)
+    headers["Content-Type"] = "application/json"
+    http_request = Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(http_request, timeout=request.http_timeout) as response:
+            response_body = response.read()
+            status = getattr(response, "status", None) or getattr(response, "code", 200)
+            response_headers = _selected_headers(dict(response.headers.items()))
+    except HTTPError as exc:
+        response_body = exc.read()
+        status = exc.code
+        response_headers = _selected_headers(dict(exc.headers.items()))
+    return _FetchedResponse(body=response_body, status=int(status), headers=response_headers)
+
+
+def _json_object_from_body(body: bytes, url: str) -> dict[str, Any]:
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CaptureMissingError(f"failed to decode JSON response from {url}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CaptureMissingError(f"JSON response from {url} must be an object")
+    return data
+
+
+def _fetch_search_issue_details(
+    search_url: str,
+    response: Mapping[str, Any],
+    request: CaptureMissingRequest,
+    result: CaptureMissingResult,
+) -> dict[str, Mapping[str, Any]]:
+    details = {}
+    issues = response.get("issues")
+    if not isinstance(issues, list):
+        return details
+
+    for issue in issues:
+        if not isinstance(issue, Mapping) or _has_field(issue, "created"):
+            continue
+        key = issue.get("key")
+        if not isinstance(key, str) or not key:
+            continue
+        url = _jira_issue_detail_url(search_url, key)
+        try:
+            fetched = _fetch_url(url, request)
+            detail = _json_object_from_body(fetched.body, url)
+        except (OSError, CaptureMissingError) as exc:
+            result.failed.append(CaptureFailure(url=url, reason=str(exc)))
+            continue
+        details[key] = detail
+    return details
+
+
+def _capture_related_jira_from_search(
+    search_url: str,
+    response: Mapping[str, Any],
+    cases_dir: Path,
+    case_id: str,
+    as_of: str | None,
+    request: CaptureMissingRequest,
+    result: CaptureMissingResult,
+) -> None:
+    issues = response.get("issues")
+    if not isinstance(issues, list):
+        return
+
+    for issue in issues:
+        if not isinstance(issue, Mapping):
+            continue
+        issue_key = issue.get("key")
+        if not isinstance(issue_key, str) or not issue_key:
+            continue
+        jira_dir = cases_dir / "jiras" / case_id / "linked" / issue_key
+        if (jira_dir / "issue.json").is_file() and not request.overwrite:
+            continue
+
+        issue_url = _jira_issue_url(search_url, issue_key)
+        try:
+            issue_payload = _json_object_from_body(_fetch_url(issue_url, request).body, issue_url)
+        except (OSError, CaptureMissingError) as exc:
+            result.failed.append(CaptureFailure(url=issue_url, reason=str(exc)))
+            continue
+
+        comments_url = f"{issue_url}/comment"
+        links_url = f"{issue_url}/remotelink"
+        try:
+            comments_payload = _json_object_from_body(
+                _fetch_url(comments_url, request).body,
+                comments_url,
+            )
+        except (OSError, CaptureMissingError) as exc:
+            result.failed.append(CaptureFailure(url=comments_url, reason=str(exc)))
+            comments_payload = {"comments": []}
+        try:
+            links_payload = _json_value_from_body(_fetch_url(links_url, request).body, links_url)
+        except (OSError, CaptureMissingError) as exc:
+            result.failed.append(CaptureFailure(url=links_url, reason=str(exc)))
+            links_payload = []
+
+        filtered_comments = filter_comments_as_of(comments_payload, as_of=as_of)
+        _write_json(jira_dir / "issue.json", issue_payload, overwrite=request.overwrite)
+        _write_json(jira_dir / "comments.json", filtered_comments, overwrite=request.overwrite)
+        _write_json(
+            jira_dir / "links.json",
+            {"schema_version": SCHEMA_VERSION, "case_id": issue_key, "links": links_payload},
+            overwrite=request.overwrite,
+        )
+        _write_linked_starting_issue(
+            jira_dir,
+            issue_key,
+            issue_payload,
+            filtered_comments,
+            as_of,
+            overwrite=request.overwrite,
+        )
+        _capture_dev_status(
+            search_url,
+            cases_dir,
+            case_id,
+            issue_key,
+            issue_payload,
+            as_of,
+            request,
+            result,
+        )
+
+
+def _write_linked_starting_issue(
+    jira_dir: Path,
+    issue_key: str,
+    issue_payload: Mapping[str, Any],
+    comments_payload: Mapping[str, Any],
+    as_of: str | None,
+    *,
+    overwrite: bool,
+) -> None:
+    from ymir_harness.collect_case import _build_starting_jira_issue
+
+    starting = _build_starting_jira_issue(
+        issue_payload,
+        comments_payload,
+        case_id=issue_key,
+        case_type=None,
+        as_of=as_of,
+    )
+    _write_json(jira_dir / "starting-issue.json", starting, overwrite=overwrite)
+    if as_of is not None:
+        _write_json(
+            jira_dir / "reconstruction.json",
+            {
+                "schema_version": SCHEMA_VERSION,
+                "case_id": issue_key,
+                "as_of": as_of,
+                "method": "captured_from_search_result",
+            },
+            overwrite=overwrite,
+        )
+
+
+def _capture_dev_status(
+    search_url: str,
+    cases_dir: Path,
+    case_id: str,
+    issue_key: str,
+    issue_payload: Mapping[str, Any],
+    as_of: str | None,
+    request: CaptureMissingRequest,
+    result: CaptureMissingResult,
+) -> None:
+    issue_id = issue_payload.get("id")
+    if not isinstance(issue_id, str) or not issue_id:
+        return
+    summary_url = _jira_dev_status_summary_url(search_url, issue_id)
+    try:
+        summary_payload = _json_object_from_body(_fetch_url(summary_url, request).body, summary_url)
+    except (OSError, CaptureMissingError) as exc:
+        result.failed.append(CaptureFailure(url=summary_url, reason=str(exc)))
+        return
+
+    summary = summary_payload.get("summary")
+    if not isinstance(summary, Mapping):
+        summary = {}
+    details: dict[str, Any] = {}
+    repository_summary = summary.get("repository")
+    by_instance = (
+        repository_summary.get("byInstanceType") if isinstance(repository_summary, Mapping) else None
+    )
+    if isinstance(by_instance, Mapping):
+        for app_type in by_instance:
+            if not isinstance(app_type, str) or not app_type:
+                continue
+            detail_url = _jira_dev_status_detail_url(
+                search_url,
+                issue_id,
+                application_type=app_type,
+                data_type="repository",
+            )
+            try:
+                detail_payload = _json_object_from_body(_fetch_url(detail_url, request).body, detail_url)
+            except (OSError, CaptureMissingError) as exc:
+                result.failed.append(CaptureFailure(url=detail_url, reason=str(exc)))
+                continue
+            detail = detail_payload.get("detail")
+            if isinstance(detail, list):
+                details[f"{app_type}:repository"] = detail
+
+    write_jira_dev_status_fixture(
+        cases_dir,
+        case_id,
+        issue_key,
+        summary=summary,
+        details=details,
+        as_of=as_of,
+        overwrite=request.overwrite,
+    )
+
+
+def _has_field(issue: Mapping[str, Any], field: str) -> bool:
+    fields = issue.get("fields")
+    return isinstance(fields, Mapping) and fields.get(field) is not None
+
+
+def _jira_issue_url(search_url: str, issue_key: str) -> str:
+    parsed = urlparse(search_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    return f"{origin}/rest/api/2/issue/{quote(issue_key)}"
+
+
+def _jira_issue_detail_url(search_url: str, issue_key: str) -> str:
+    return f"{_jira_issue_url(search_url, issue_key).replace('/rest/api/2/', '/rest/api/3/')}?fields=created,updated"
+
+
+def _jira_dev_status_summary_url(search_url: str, issue_id: str) -> str:
+    parsed = urlparse(search_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    return f"{origin}/rest/dev-status/1.0/issue/summary?issueId={quote(issue_id)}"
+
+
+def _jira_dev_status_detail_url(
+    search_url: str,
+    issue_id: str,
+    *,
+    application_type: str,
+    data_type: str,
+) -> str:
+    parsed = urlparse(search_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    return (
+        f"{origin}/rest/dev-status/1.0/issue/detail?issueId={quote(issue_id)}"
+        f"&applicationType={quote(application_type)}&dataType={quote(data_type)}"
+    )
+
+
+def _json_value_from_body(body: bytes, url: str) -> Any:
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CaptureMissingError(f"failed to decode JSON response from {url}: {exc}") from exc
+
+
+def _write_json(path: Path, data: object, *, overwrite: bool) -> None:
+    if path.exists() and not overwrite:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _headers_for_url(url: str, request: CaptureMissingRequest) -> dict[str, str]:
