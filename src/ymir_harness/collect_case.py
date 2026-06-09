@@ -340,7 +340,15 @@ def _fetch_evidence(
     jira_links_source = _jira_links_source(request, jira_links)
     if request.network_mode != "network_denied":
         jira_patch_urls = tuple(
-            _patch_urls_from_jira_evidence(jira_issue_source, jira_comments_source)
+            _patch_urls_from_jira_evidence(
+                jira_issue_source,
+                jira_comments_source,
+                *[
+                    value
+                    for linked in linked_jira_issues
+                    for value in (linked.issue, linked.comments)
+                ],
+            )
         )
 
     gitlab_mr_url = request.gitlab_mr_url
@@ -567,12 +575,12 @@ def _gitlab_mr_url_from_jira_evidence(*values: Any) -> str | None:
     return None
 
 
-def _patch_urls_from_jira_evidence(issue: Mapping[str, Any] | None, comments: Any) -> list[str]:
+def _patch_urls_from_jira_evidence(*values: Any) -> list[str]:
     urls: list[str] = []
-    for text in [*_issue_text_values(issue), *_comment_bodies(comments)]:
+    for text in _string_values(values):
         for url in _urls_from_text(text):
-            if _is_patch_url(url):
-                urls.append(url)
+            if patch_url := _patch_url_candidate(url):
+                urls.append(patch_url)
     return list(dict.fromkeys(urls))
 
 
@@ -583,6 +591,15 @@ def _urls_from_text(text: str) -> list[str]:
 def _is_patch_url(url: str) -> bool:
     path = urlparse(url).path.lower()
     return path.endswith((".patch", ".diff"))
+
+
+def _patch_url_candidate(url: str) -> str | None:
+    if _is_patch_url(url):
+        return url
+    path = urlparse(url).path
+    if "/-/merge_requests/" in path or "/-/commit/" in path:
+        return url.rstrip("/") + ".patch"
+    return None
 
 
 def _patch_suffix(url: str) -> str:
