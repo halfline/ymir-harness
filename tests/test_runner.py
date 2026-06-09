@@ -7,6 +7,7 @@ from pathlib import Path
 import ymir_harness.runner as runner_module
 from ymir_harness.models import CaseValidationResult, ValidationReport
 from ymir_harness.runner import (
+    DEFAULT_CHAT_MODEL,
     RunCaseExecution,
     build_no_write_environment,
     build_run_report,
@@ -47,6 +48,7 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["AUTO_CHAIN"] == "false"
     assert env["SILENT_RUN"] == "true"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["CHAT_MODEL"] == DEFAULT_CHAT_MODEL
     assert env["BENCHMARK_MAX_ITERATIONS_OVERRIDE"] == "50"
     assert env["BEEAI_MAX_ITERATIONS"] == "50"
     assert "GITLAB_TOKEN" not in env
@@ -237,6 +239,7 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     assert requests[0].environment["DRY_RUN"] == "true"
     assert requests[0].environment["YMIR_BENCHMARK_CASE_ID"] == "RHEL-12345"
     assert requests[0].environment["JIRA_TOKEN"] == "ymir-harness-token"
+    assert requests[0].environment["CHAT_MODEL"] == DEFAULT_CHAT_MODEL
     assert requests[0].environment["JIRA_MOCK_FILES"] == str(
         results_dir.resolve() / "repeat-1" / "jira-mock"
     )
