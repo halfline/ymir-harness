@@ -172,6 +172,12 @@ def test_enforcement_replays_gitlab_commit_patch_from_source_cache(tmp_path: Pat
 
     with enforce_benchmark_boundaries(environment):
         response = urllib.request.urlopen(url)
+        diff_response = urllib.request.urlopen(
+            f"https://gitlab.example/group/pkg/-/commit/{commit_sha}.diff"
+        )
+        github_response = urllib.request.urlopen(
+            f"https://github.com/group/pkg/commit/{commit_sha}.patch"
+        )
         completed = subprocess.run(
             ["curl", url],
             check=True,
@@ -181,6 +187,8 @@ def test_enforcement_replays_gitlab_commit_patch_from_source_cache(tmp_path: Pat
 
     body = response.read()
     assert b"Subject: [PATCH] fix" in body
+    assert b"diff --git" in diff_response.read()
+    assert b"Subject: [PATCH] fix" in github_response.read()
     assert "Subject: [PATCH] fix" in completed.stdout
 
 
@@ -213,11 +221,54 @@ def test_enforcement_returns_404_for_missing_source_cache_commit(tmp_path: Path)
     with enforce_benchmark_boundaries(environment):
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(f"https://gitlab.example/group/pkg/-/commit/{missing_sha}.patch")
+        with pytest.raises(urllib.error.HTTPError) as diff_exc_info:
+            urllib.request.urlopen(f"https://gitlab.example/group/pkg/-/commit/{missing_sha}.diff")
+        with pytest.raises(urllib.error.HTTPError) as github_exc_info:
+            urllib.request.urlopen(f"https://github.com/group/pkg/commit/{missing_sha}.patch")
 
     assert exc_info.value.code == 404
     assert exc_info.value.read() == (
         f"commit {missing_sha} is not available in source cache\n".encode("utf-8")
     )
+    assert diff_exc_info.value.code == 404
+    assert github_exc_info.value.code == 404
+
+
+def test_enforcement_replays_fedora_raw_url_from_source_cache(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    source_repo, _commit_sha = _create_git_repo(tmp_path)
+    cached_repo = tmp_path / "source_cache" / "RHEL-12345" / "upstream" / "pkg.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            "https://gitlab.com/redhat/centos-stream/rpms/pkg.git",
+        ],
+        check=True,
+    )
+    environment = {
+        **_environment(manifest_path),
+        "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
+    }
+
+    with enforce_benchmark_boundaries(environment):
+        response = urllib.request.urlopen(
+            "https://src.fedoraproject.org/rpms/pkg/raw/HEAD/f/source.c"
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(
+                "https://src.fedoraproject.org/rpms/pkg/raw/main/f/missing.patch"
+            )
+
+    assert response.read() == b"after\n"
+    assert exc_info.value.code == 404
 
 
 def test_enforcement_blocks_external_subprocess_url(tmp_path: Path) -> None:
