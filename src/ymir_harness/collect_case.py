@@ -426,6 +426,7 @@ def _fetch_evidence(
     jira_patch_urls = tuple(valid_jira_patch_urls)
 
     package = request.package or _derive_package(jira_issue_source)
+    fix_version = request.fix_version or _derive_fix_version(jira_issue_source)
     if (
         package is not None
         and request.network_mode != "network_denied"
@@ -435,6 +436,16 @@ def _fetch_evidence(
             gitlab_records.append(_fetch_maintainer_rules_record(package, request, result))
         except CollectCaseError as exc:
             result.warnings.append(f"skipped maintainer rules for {package}: {exc}")
+    if (
+        package is not None
+        and fix_version is not None
+        and request.network_mode != "network_denied"
+        and (request.jira_url or request.jira_base_url)
+    ):
+        try:
+            gitlab_records.extend(_fetch_internal_rhel_branch_records(package, request, result))
+        except CollectCaseError as exc:
+            result.warnings.append(f"skipped internal RHEL branches for {package}: {exc}")
 
     return FetchedEvidence(
         jira_issue=jira_issue,
@@ -766,6 +777,49 @@ def _maintainer_rules_url(package: str) -> str:
     project = quote(f"redhat/centos-stream/rules/{package}", safe="")
     file_path = quote("AGENTS.md", safe="")
     return f"https://gitlab.com/api/v4/projects/{project}/repository/files/{file_path}/raw?ref=main"
+
+
+def _fetch_internal_rhel_branch_records(
+    package: str,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> tuple[FetchedRecord, ...]:
+    project_url = _internal_rhel_project_url(package)
+    project_body = _fetch_bytes(
+        project_url,
+        headers=_gitlab_headers(request.gitlab_token_env),
+        request=request,
+        result=result,
+    )
+    project = _json_object_from_body(project_body, project_url)
+    project_id = project.get("id")
+    if not isinstance(project_id, int):
+        raise CollectCaseError(f"internal RHEL project response lacks numeric id: {project_url}")
+
+    branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
+    branches_body = _fetch_bytes(
+        branches_url,
+        headers=_gitlab_headers(request.gitlab_token_env),
+        request=request,
+        result=result,
+    )
+    return (
+        FetchedRecord(
+            url=project_url,
+            relative_path=f"gitlab/internal_rhel/{package}/project.json",
+            body=project_body,
+        ),
+        FetchedRecord(
+            url=branches_url,
+            relative_path=f"gitlab/internal_rhel/{package}/branches.json",
+            body=branches_body,
+        ),
+    )
+
+
+def _internal_rhel_project_url(package: str) -> str:
+    project = quote(f"redhat/rhel/rpms/{package}", safe="")
+    return f"https://gitlab.com/api/v4/projects/{project}"
 
 
 def _complete_request(
