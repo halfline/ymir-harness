@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -378,6 +380,7 @@ def _run_case_result(
         )
         environment.update(artifact_environment(actual_path))
         environment.update(mock_repo_env)
+        _apply_source_cache_git_rewrites(environment, cases_dir, results_dir, case_id, repetition)
         request = RunCaseRequest(
             case_id=case_id,
             case_type=case_type,
@@ -532,6 +535,122 @@ def _mock_repo_environment(
     if materialized is None:
         return {}
     return materialized.to_environment()
+
+
+def _apply_source_cache_git_rewrites(
+    environment: dict[str, str],
+    cases_dir: Path,
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+) -> None:
+    rewrites = _source_cache_git_rewrites(cases_dir, case_id)
+    if not rewrites:
+        return
+
+    gitconfig_value = environment.get("GIT_CONFIG_GLOBAL")
+    gitconfig_path = (
+        Path(gitconfig_value)
+        if gitconfig_value
+        else results_dir / f"repeat-{repetition}" / "source-cache-gitconfig"
+    )
+    _append_gitconfig_rewrites(gitconfig_path, rewrites)
+    environment["GIT_CONFIG_GLOBAL"] = str(gitconfig_path)
+    environment["YMIR_BENCHMARK_GITCONFIG"] = str(gitconfig_path)
+
+    blocked_urls = environment.get("MOCK_BLOCKED_URLS", "").splitlines()
+    blocked_urls.extend(original for original, _local in rewrites)
+    environment["MOCK_BLOCKED_URLS"] = "\n".join(dict.fromkeys(url for url in blocked_urls if url))
+
+
+def _source_cache_git_rewrites(cases_dir: Path, case_id: str) -> tuple[tuple[str, str], ...]:
+    upstream_dir = cases_dir / "source_cache" / case_id / "upstream"
+    if not upstream_dir.is_dir():
+        return ()
+
+    rewrites = []
+    for repository in _source_cache_git_repositories(upstream_dir):
+        remote_url = _git_remote_url(repository)
+        if remote_url is None:
+            continue
+        local_url = repository.resolve().as_uri()
+        rewrites.extend((alias, local_url) for alias in _source_cache_git_aliases(remote_url))
+    return tuple(dict.fromkeys(rewrites))
+
+
+def _source_cache_git_repositories(upstream_dir: Path) -> tuple[Path, ...]:
+    candidates = [upstream_dir, *sorted(upstream_dir.iterdir())]
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate.is_dir()
+        and (_is_git_checkout(candidate) or _is_bare_git_repository(candidate))
+    )
+
+
+def _source_cache_git_aliases(remote_url: str) -> tuple[str, ...]:
+    aliases = [*_remote_git_aliases(remote_url)]
+    parsed = urlparse(remote_url)
+    if parsed.scheme in {"http", "https"}:
+        parts = [part for part in parsed.path.strip("/").removesuffix(".git").split("/") if part]
+        if len(parts) >= 2 and parts[-2] == "rpms":
+            fedora_url = f"https://src.fedoraproject.org/rpms/{parts[-1]}.git"
+            aliases.extend(_remote_git_aliases(fedora_url))
+        if parsed.hostname == "gitlab.gnome.org" and len(parts) >= 2:
+            github_url = f"https://github.com/{'/'.join(parts)}.git"
+            aliases.extend(_remote_git_aliases(github_url))
+    return tuple(dict.fromkeys(aliases))
+
+
+def _remote_git_aliases(remote_url: str) -> tuple[str, ...]:
+    aliases = [remote_url]
+    if remote_url.endswith(".git"):
+        aliases.append(remote_url.removesuffix(".git"))
+    else:
+        aliases.append(f"{remote_url}.git")
+    return tuple(dict.fromkeys(aliases))
+
+
+def _append_gitconfig_rewrites(path: Path, rewrites: Sequence[tuple[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    lines = []
+    for original_url, local_url in dict.fromkeys(rewrites):
+        section = f'[url "{local_url}"]\n\tinsteadOf = {original_url}\n'
+        if section not in existing:
+            lines.append(section)
+    if not lines:
+        return
+    prefix = existing.rstrip()
+    content = ("\n\n".join([prefix, *lines]) if prefix else "\n\n".join(lines)).rstrip()
+    path.write_text(content + "\n", encoding="utf-8")
+
+
+def _git_remote_url(repository: Path) -> str | None:
+    completed = subprocess.run(
+        _git_command(repository, ["config", "--get", "remote.origin.url"]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
+def _git_command(repository: Path, args: list[str]) -> list[str]:
+    if _is_bare_git_repository(repository):
+        return ["git", f"--git-dir={repository}", *args]
+    return ["git", "-C", str(repository), *args]
+
+
+def _is_git_checkout(path: Path) -> bool:
+    return (path / ".git").exists()
+
+
+def _is_bare_git_repository(path: Path) -> bool:
+    return (path / "HEAD").is_file() and (path / "objects").is_dir()
 
 
 def _jira_mock_directory(
