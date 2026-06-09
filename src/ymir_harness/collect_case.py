@@ -128,10 +128,19 @@ class FetchedRecord:
 
 
 @dataclass(frozen=True)
+class FetchedJiraIssue:
+    key: str
+    issue: Mapping[str, Any]
+    comments: Mapping[str, Any]
+    links: Any
+
+
+@dataclass(frozen=True)
 class FetchedEvidence:
     jira_issue: Mapping[str, Any] | None = None
     jira_comments: Mapping[str, Any] | None = None
     jira_links: Any = None
+    linked_jira_issues: tuple[FetchedJiraIssue, ...] = ()
     jira_patch_urls: tuple[str, ...] = ()
     gitlab_mr: Mapping[str, Any] | None = None
     gitlab_commits: Any = None
@@ -269,9 +278,10 @@ def _fetch_evidence(
     gitlab_records: list[FetchedRecord] = []
     gitlab_patch_url = None
     gitlab_patch_body = None
+    linked_jira_issues: list[FetchedJiraIssue] = []
 
     if request.jira_url or request.jira_base_url:
-        jira_urls = _jira_urls(request)
+        jira_urls = _jira_urls(request, request.case_id)
         jira_headers = _jira_headers(
             request.jira_token_env,
             token_file=request.jira_token_file,
@@ -292,6 +302,38 @@ def _fetch_evidence(
             request=request,
             result=result,
         )
+        for linked_key in _linked_jira_keys(jira_issue, request.case_id):
+            linked_urls = _jira_urls(request, linked_key)
+            try:
+                linked_issue = _fetch_json(
+                    linked_urls["issue"],
+                    headers=jira_headers,
+                    request=request,
+                    result=result,
+                )
+                linked_comments = _fetch_json(
+                    linked_urls["comments"],
+                    headers=jira_headers,
+                    request=request,
+                    result=result,
+                )
+                linked_links = _fetch_json_value(
+                    linked_urls["links"],
+                    headers=jira_headers,
+                    request=request,
+                    result=result,
+                )
+            except CollectCaseError as exc:
+                result.warnings.append(f"skipped linked Jira {linked_key}: {exc}")
+                continue
+            linked_jira_issues.append(
+                FetchedJiraIssue(
+                    key=linked_key,
+                    issue=linked_issue,
+                    comments=linked_comments,
+                    links=linked_links,
+                )
+            )
 
     jira_issue_source = _jira_issue_source(request, jira_issue)
     jira_comments_source = _jira_comments_source(request, jira_comments)
@@ -378,6 +420,7 @@ def _fetch_evidence(
         jira_issue=jira_issue,
         jira_comments=jira_comments,
         jira_links=jira_links,
+        linked_jira_issues=tuple(linked_jira_issues),
         jira_patch_urls=jira_patch_urls,
         gitlab_mr=gitlab_mr,
         gitlab_commits=gitlab_commits,
@@ -416,13 +459,15 @@ def _jira_links_source(request: CollectCaseRequest, jira_links: Any) -> Any:
     return _links_value(_load_json(request.jira_links_json))
 
 
-def _jira_urls(request: CollectCaseRequest) -> dict[str, str]:
-    if request.jira_url:
-        issue_url = _jira_issue_api_url(request.jira_url, request.case_id)
+def _jira_urls(request: CollectCaseRequest, case_id: str) -> dict[str, str]:
+    if request.jira_url and case_id == request.case_id:
+        issue_url = _jira_issue_api_url(request.jira_url, case_id)
+    elif request.jira_url:
+        issue_url = _join_url(_origin(request.jira_url), f"/rest/api/2/issue/{case_id}")
     elif request.jira_base_url:
         issue_url = _join_url(
             request.jira_base_url,
-            f"/rest/api/2/issue/{request.case_id}",
+            f"/rest/api/2/issue/{case_id}",
         )
     else:
         raise CollectCaseError("jira URL configuration is missing")
@@ -433,6 +478,31 @@ def _jira_urls(request: CollectCaseRequest) -> dict[str, str]:
         "comments": f"{issue_base}/comment",
         "links": f"{issue_base}/remotelink",
     }
+
+
+def _linked_jira_keys(
+    issue: Mapping[str, Any] | None,
+    case_id: str,
+) -> list[str]:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return []
+    values = fields.get("issuelinks")
+    if not isinstance(values, list):
+        return []
+
+    keys: list[str] = []
+    for link in values:
+        if not isinstance(link, Mapping):
+            continue
+        for name in ("inwardIssue", "outwardIssue"):
+            linked = link.get(name)
+            if not isinstance(linked, Mapping):
+                continue
+            key = _nonempty_string(linked.get("key"))
+            if key is not None and key != case_id:
+                keys.append(key)
+    return list(dict.fromkeys(keys))
 
 
 def _jira_issue_api_url(url: str, case_id: str) -> str:
@@ -1225,6 +1295,18 @@ def _write_jira_fixtures(
             result=result,
         )
 
+    for linked in fetched.linked_jira_issues:
+        _write_fetched_jira_fixture(
+            jira_dir / "linked" / linked.key,
+            linked.key,
+            None,
+            linked.issue,
+            linked.comments,
+            linked.links,
+            overwrite=request.overwrite,
+            result=result,
+        )
+
     for attachment in request.attachments:
         _copy_into_dir(
             attachment,
@@ -1234,7 +1316,57 @@ def _write_jira_fixtures(
         )
 
 
+def _write_fetched_jira_fixture(
+    jira_dir: Path,
+    case_id: str,
+    case_type: str | None,
+    issue: Mapping[str, Any],
+    comments: Mapping[str, Any],
+    links: Any,
+    *,
+    overwrite: bool,
+    result: CollectCaseResult,
+) -> None:
+    _write_json(
+        jira_dir / "issue.json",
+        issue,
+        overwrite=overwrite,
+        result=result,
+    )
+    _write_json(
+        jira_dir / "comments.json",
+        comments,
+        overwrite=overwrite,
+        result=result,
+    )
+    _write_json(
+        jira_dir / "links.json",
+        _jira_links_fixture_payload_for(case_id, case_type, links),
+        overwrite=overwrite,
+        result=result,
+    )
+    _write_json(
+        jira_dir / "starting-issue.json",
+        _build_starting_jira_issue(
+            issue,
+            comments,
+            case_id=case_id,
+            case_type=case_type,
+        ),
+        overwrite=overwrite,
+        result=result,
+    )
+
+
 def _jira_links_fixture_payload(request: CollectCaseRequest, links: Any) -> dict[str, Any]:
+    return _jira_links_fixture_payload_for(request.case_id, request.case_type, links)
+
+
+def _jira_links_fixture_payload_for(
+    case_id: str,
+    case_type: str | None,
+    links: Any,
+) -> dict[str, Any]:
     if isinstance(links, Mapping):
         payload = copy.deepcopy(dict(links))
         link_values = _links_value(payload)
@@ -1248,9 +1380,9 @@ def _jira_links_fixture_payload(request: CollectCaseRequest, links: Any) -> dict
         raise CollectCaseError("Jira links must be a list")
 
     payload.setdefault("schema_version", SCHEMA_VERSION)
-    payload.setdefault("case_id", request.case_id)
-    if request.case_type is not None:
-        payload.setdefault("case_type", request.case_type)
+    payload.setdefault("case_id", case_id)
+    if case_type is not None:
+        payload.setdefault("case_type", case_type)
     payload["links"] = link_values
     return payload
 
