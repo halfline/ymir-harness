@@ -491,7 +491,10 @@ def _collect_mock_repo(args: argparse.Namespace) -> MockRepoInput | None:
 def _cmd_score_result(args: argparse.Namespace) -> int:
     expected = load_json_file(args.expected_json)
     actual = load_json_file(args.actual_json)
-    report = score_case(expected, actual)
+    cases_dir = (
+        args.expected_json.parent.parent if args.expected_json.parent.name == "expected" else None
+    )
+    report = score_case(expected, actual, cases_dir=cases_dir)
     payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
 
     if args.output:

@@ -542,7 +542,8 @@ def _score_actual_result(
     expected_path: Path,
     actual_result: Mapping[str, Any],
 ) -> ScoreReport:
-    return score_case(load_json_file(expected_path), actual_result)
+    cases_dir = expected_path.parent.parent if expected_path.parent.name == "expected" else None
+    return score_case(load_json_file(expected_path), actual_result, cases_dir=cases_dir)
 
 
 def _execution_status(

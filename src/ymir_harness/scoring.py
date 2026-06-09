@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ ADVISORY_RESULT_FIELDS = (
     "retry_count",
     "total_cost_usd",
 )
+PATCH_COMMIT_RE = re.compile(r"(?m)^From ([0-9a-fA-F]{40}) ")
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
@@ -38,13 +40,18 @@ def load_json_file(path: Path) -> dict[str, Any]:
     return data
 
 
-def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreReport:
-    primary = _score_case_once(expected, actual)
+def score_case(
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    *,
+    cases_dir: Path | None = None,
+) -> ScoreReport:
+    primary = _score_case_once(expected, actual, cases_dir=cases_dir)
     if primary.passed:
         return primary
 
     for index, alternate in enumerate(_alternate_expected_results(expected), start=1):
-        alternate_report = _score_case_once(alternate, actual)
+        alternate_report = _score_case_once(alternate, actual, cases_dir=cases_dir)
         if alternate_report.passed:
             alternate_report.metrics.append(
                 ScoreMetric(
@@ -60,7 +67,12 @@ def score_case(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreR
     return primary
 
 
-def _score_case_once(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreReport:
+def _score_case_once(
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    *,
+    cases_dir: Path | None,
+) -> ScoreReport:
     case_id = str(expected.get("case_id") or actual.get("case_id") or "")
     case_type = _string_or_none(expected.get("case_type") or actual.get("case_type"))
     normalized_actual = normalize_actual_result(actual)
@@ -161,7 +173,12 @@ def _score_case_once(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> 
             optional=True,
             skip_missing_actual=True,
         ),
-        _compare_list("patch_urls", expected.get("patch_urls"), normalized_actual["patch_urls"]),
+        _patch_urls_metric(
+            expected,
+            normalized_actual["patch_urls"],
+            cases_dir=cases_dir,
+            case_id=case_id,
+        ),
     ]
 
     if actual.get("error") or actual.get("crash"):
@@ -211,7 +228,7 @@ def score_result_directory(
     cases_dir = cases_dir.resolve()
     actual_results_dir = actual_results_dir.resolve()
     entries = [
-        _score_expected_file(expected_path, actual_results_dir)
+        _score_expected_file(expected_path, actual_results_dir, cases_dir)
         for expected_path in _expected_result_files(cases_dir)
     ]
     return ScoreCollectionReport(
@@ -322,6 +339,94 @@ def _touched_files_metric(expected: Mapping[str, Any], actual: Mapping[str, Any]
     )
 
 
+def _patch_urls_metric(
+    expected: Mapping[str, Any],
+    actual: Any,
+    *,
+    cases_dir: Path | None,
+    case_id: str,
+) -> ScoreMetric:
+    exact_metric = _compare_list("patch_urls", expected.get("patch_urls"), actual)
+    if exact_metric.status != "fail" or cases_dir is None:
+        return exact_metric
+
+    expected_urls = _normalize_list(expected.get("patch_urls"))
+    actual_urls = _normalize_list(actual)
+    if _actual_patch_urls_cover_expected_commits(cases_dir, case_id, expected_urls, actual_urls):
+        return ScoreMetric(
+            name="patch_urls",
+            status="pass",
+            expected=expected_urls,
+            actual=actual_urls,
+            notes="actual patch URLs include the expected patch commit IDs",
+        )
+    return exact_metric
+
+
+def _actual_patch_urls_cover_expected_commits(
+    cases_dir: Path,
+    case_id: str,
+    expected_urls: list[str],
+    actual_urls: list[str],
+) -> bool:
+    if not expected_urls or not actual_urls:
+        return False
+
+    url_commits = _recorded_patch_commits(cases_dir, case_id)
+    if not url_commits:
+        return False
+
+    actual_commits = set().union(*(url_commits.get(url, set()) for url in actual_urls))
+    if not actual_commits:
+        return False
+
+    expected_commits = set().union(*(url_commits.get(url, set()) for url in expected_urls))
+    return bool(expected_commits) and expected_commits <= actual_commits
+
+
+def _recorded_patch_commits(cases_dir: Path, case_id: str) -> dict[str, set[str]]:
+    manifest_path = cases_dir / "web_cache" / case_id / "manifest.json"
+    manifest = _load_optional_json_object(manifest_path)
+    if manifest is None:
+        return {}
+
+    recorded_files = manifest.get("recorded_files")
+    if not isinstance(recorded_files, Mapping):
+        return {}
+
+    output: dict[str, set[str]] = {}
+    cache_dir = manifest_path.parent
+    for url, relative_path in recorded_files.items():
+        if not isinstance(url, str) or not isinstance(relative_path, str):
+            continue
+        recorded_path = cache_dir / relative_path
+        try:
+            recorded_path.resolve(strict=False).relative_to(cache_dir.resolve(strict=False))
+        except ValueError:
+            continue
+        if not recorded_path.is_file():
+            continue
+        commits = {
+            match.group(1).lower()
+            for match in PATCH_COMMIT_RE.finditer(
+                recorded_path.read_text(encoding="utf-8", errors="ignore")
+            )
+        }
+        if commits:
+            output[url] = commits
+    return output
+
+
+def _load_optional_json_object(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _file_scope_notes(missing: list[str], unexpected: list[str]) -> str | None:
     parts = []
     if missing:
@@ -348,7 +453,11 @@ def _advisory_metrics(actual: Mapping[str, Any]) -> list[AdvisoryMetric]:
     return metrics
 
 
-def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> ScoreCollectionEntry:
+def _score_expected_file(
+    expected_path: Path,
+    actual_results_dir: Path,
+    cases_dir: Path,
+) -> ScoreCollectionEntry:
     expected = load_json_file(expected_path)
     case_id = _case_id_from_expected_path(expected_path)
     case_type = _string_or_none(expected.get("case_type"))
@@ -383,7 +492,7 @@ def _score_expected_file(expected_path: Path, actual_results_dir: Path) -> Score
             reason="actual result file is missing",
         )
 
-    score = score_case(expected, load_json_file(actual_path))
+    score = score_case(expected, load_json_file(actual_path), cases_dir=cases_dir)
     return ScoreCollectionEntry(
         case_id=case_id,
         case_type=case_type,
