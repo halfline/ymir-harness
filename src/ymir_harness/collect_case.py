@@ -2020,7 +2020,15 @@ def _auto_source_project_urls(
         project_url = _gitlab_project_url_from_evidence_url(url)
         if project_url is not None and not _is_reserved_source_host(project_url):
             projects.append(project_url)
+    projects.extend(_auto_package_source_project_urls(request))
     return tuple(dict.fromkeys(projects))
+
+
+def _auto_package_source_project_urls(request: CollectCaseRequest) -> tuple[str, ...]:
+    if request.mock_repo_cache is None or request.package is None:
+        return ()
+    package = quote(request.package, safe="._+-")
+    return (f"https://gitlab.com/redhat/centos-stream/rpms/{package}",)
 
 
 def _gitlab_project_url_from_evidence_url(url: str) -> str | None:
