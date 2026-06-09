@@ -4,13 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ymir-harness"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Fixture validation and deterministic scoring for Ymir benchmark runs"
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-  "PyYAML>=6.0",
-]
+requires-python = ">=3.13,<3.14"
 license = "MIT"
 authors = [
   { name = "Ymir Harness contributors" },
@@ -18,8 +15,7 @@ authors = [
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "License :: OSI Approved :: MIT License",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Testing",
 ]
 
@@ -38,7 +34,22 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py313"
+
+[tool.hatch.metadata.hooks.custom]
+
+[[tool.uv.dependency-metadata]]
+name = "koji"
+requires-dist = [
+  "defusedxml",
+  "python-dateutil",
+  "requests",
+  "six",
+]
+
+[tool.uv.sources]
+ymir-common = { path = "ui-workflows/ymir/common", editable = true }
+ymir-tools = { path = "ui-workflows/ymir/tools", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ymir_harness"]
