@@ -308,6 +308,7 @@ def test_collect_case_normalizes_gitlab_links_as_patch_urls() -> None:
         "https://gitlab.example/group/pkg/-/commit/abc123.patch",
     ]
 
+
 def test_collect_case_imports_completed_jira_without_repeated_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -413,7 +414,15 @@ def test_collect_case_imports_completed_jira_without_repeated_metadata(
     assert mock["zstream_override"] == {"8": "rhel-8.10.z"}
     reference_patch = cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch"
     assert reference_patch.read_text(encoding="utf-8") == "diff --git a/source.c b/source.c\n"
-
+    assert (
+        cases_dir
+        / "web_cache"
+        / "RHEL-12345"
+        / "gitlab"
+        / "maintainer_rules"
+        / "dnsmasq"
+        / "AGENTS.md"
+    ).read_text(encoding="utf-8") == "Follow dnsmasq maintainer rules.\n"
     assert (
         cases_dir
         / "web_cache"
@@ -566,7 +575,7 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
     assert manifest["recorded_files"][upstream_patch_url] == "jira/patches/001.patch"
     assert bad_patch_url not in manifest["recorded_files"]
     assert manifest["recorded_files"][f"{mr_url}.patch"] == "gitlab/merge_request.patch"
-
+    assert manifest["recorded_files"][rules_url] == "gitlab/maintainer_rules/glib2/AGENTS.md"
     assert (
         manifest["recorded_files"][internal_project_url]
         == "gitlab/internal_rhel/glib2/project.json"
