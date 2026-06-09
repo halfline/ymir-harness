@@ -182,6 +182,7 @@ class _FetchedResponse:
     body: bytes
     status: int
     headers: Mapping[str, str]
+    capture_error: str | None = None
 
 
 def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
@@ -233,7 +234,7 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             continue
 
         try:
-            fetched = _fetch_url(url, request)
+            fetched = _fetch_url(url, request, record_errors=True)
         except OSError as exc:
             result.failed.append(CaptureFailure(url=url, reason=str(exc)))
             continue
@@ -486,7 +487,12 @@ def _allowed_url(url: str, allowed_hosts: Sequence[str]) -> bool:
     )
 
 
-def _fetch_url(url: str, request: CaptureMissingRequest) -> _FetchedResponse:
+def _fetch_url(
+    url: str,
+    request: CaptureMissingRequest,
+    *,
+    record_errors: bool = False,
+) -> _FetchedResponse:
     http_request = Request(url, headers=_headers_for_url(url, request), method="GET")
     try:
         with urlopen(http_request, timeout=request.http_timeout) as response:
@@ -497,7 +503,22 @@ def _fetch_url(url: str, request: CaptureMissingRequest) -> _FetchedResponse:
         body = exc.read()
         status = exc.code
         headers = _selected_headers(dict(exc.headers.items()))
+    except OSError as exc:
+        if not record_errors:
+            raise
+        return _transport_error_response(url, exc)
     return _FetchedResponse(body=body, status=int(status), headers=headers)
+
+
+def _transport_error_response(url: str, exc: OSError) -> _FetchedResponse:
+    reason = f"{type(exc).__name__}: {exc}".rstrip(": ")
+    body = (f"ymir-harness captured fetch error\nurl: {url}\nerror: {reason}\n").encode("utf-8")
+    return _FetchedResponse(
+        body=body,
+        status=599,
+        headers={"Content-Type": "text/plain"},
+        capture_error=reason,
+    )
 
 
 def _post_json(
@@ -860,6 +881,8 @@ def _response_metadata(fetched: _FetchedResponse) -> dict[str, Any]:
     metadata: dict[str, Any] = {"status": fetched.status}
     if fetched.headers:
         metadata["headers"] = dict(fetched.headers)
+    if fetched.capture_error:
+        metadata["capture_error"] = fetched.capture_error
     return metadata
 
 
