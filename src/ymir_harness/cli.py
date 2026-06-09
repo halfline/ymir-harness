@@ -714,9 +714,7 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
         sys.stdout.write(encoded)
     else:
         sys.stdout.write(
-            "prepare case: "
-            f"{payload['status']}, "
-            f"{len(payload['iterations'])} iteration(s)\n"
+            f"prepare case: {payload['status']}, {len(payload['iterations'])} iteration(s)\n"
         )
         if payload.get("collected"):
             sys.stdout.write(
@@ -726,8 +724,7 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
         for iteration in payload["iterations"]:
             run = iteration["run"]
             sys.stdout.write(
-                f"iteration {iteration['iteration']}: "
-                f"run {run['run_id']} -> {run['summary']}\n"
+                f"iteration {iteration['iteration']}: run {run['run_id']} -> {run['summary']}\n"
             )
             capture = iteration.get("capture")
             if capture:
@@ -794,7 +791,11 @@ def _prepare_case(
             exit_code = 2
             break
 
-        captured_count = len(capture_result.captured) + len(capture_result.captured_jira)
+        captured_count = (
+            len(capture_result.captured)
+            + len(capture_result.captured_jira)
+            + len(capture_result.captured_source)
+        )
         if captured_count == 0:
             payload["status"] = "blocked"
             exit_code = run_exit_code

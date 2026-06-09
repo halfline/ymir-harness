@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -126,6 +127,20 @@ class CapturedJiraRequest:
 
 
 @dataclass(frozen=True)
+class CapturedSource:
+    kind: str
+    url: str
+    relative_path: str
+
+    def to_json(self) -> dict[str, str]:
+        return {
+            "kind": self.kind,
+            "url": self.url,
+            "relative_path": self.relative_path,
+        }
+
+
+@dataclass(frozen=True)
 class CaptureFailure:
     url: str
     reason: str
@@ -143,6 +158,7 @@ class CaptureMissingResult:
     candidate_jira_requests: list[dict[str, Any]] = field(default_factory=list)
     captured: list[CapturedResponse] = field(default_factory=list)
     captured_jira: list[CapturedJiraRequest] = field(default_factory=list)
+    captured_source: list[CapturedSource] = field(default_factory=list)
     skipped: list[CaptureFailure] = field(default_factory=list)
     failed: list[CaptureFailure] = field(default_factory=list)
 
@@ -155,6 +171,7 @@ class CaptureMissingResult:
             "candidate_jira_requests": self.candidate_jira_requests,
             "captured": [capture.to_json() for capture in self.captured],
             "captured_jira": [capture.to_json() for capture in self.captured_jira],
+            "captured_source": [capture.to_json() for capture in self.captured_source],
             "skipped": [skip.to_json() for skip in self.skipped],
             "failed": [failure.to_json() for failure in self.failed],
         }
@@ -187,6 +204,25 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
     response_metadata = _manifest_mapping(manifest.get("response_metadata"))
 
     for url in urls:
+        if project_url := _git_source_project_url(url):
+            if not _allowed_url(project_url, request.allowed_hosts):
+                result.skipped.append(CaptureFailure(url=url, reason="host is not allowed"))
+                continue
+            if request.dry_run:
+                continue
+            try:
+                captured = _capture_git_source_repo(project_url, cases_dir, request)
+            except CaptureMissingError as exc:
+                result.failed.append(CaptureFailure(url=url, reason=str(exc)))
+                continue
+            if captured is None:
+                result.skipped.append(
+                    CaptureFailure(url=url, reason="source repo is already recorded")
+                )
+                continue
+            result.captured_source.append(captured)
+            continue
+
         if not _allowed_url(url, request.allowed_hosts):
             result.skipped.append(CaptureFailure(url=url, reason="host is not allowed"))
             continue
@@ -833,6 +869,94 @@ def _relative_capture_path(url: str) -> str:
     suffix = _path_suffix(parsed.path)
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
     return f"captured/{host}/{digest}{suffix}"
+
+
+def _capture_git_source_repo(
+    project_url: str,
+    cases_dir: Path,
+    request: CaptureMissingRequest,
+) -> CapturedSource | None:
+    remote_url = _git_clone_url(project_url)
+    destination = (
+        cases_dir
+        / "source_cache"
+        / request.case_id
+        / "upstream"
+        / _git_source_cache_name(remote_url)
+    )
+    if destination.exists() and not request.overwrite:
+        return None
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
+    else:
+        _run_git(["clone", "--mirror", "--quiet", remote_url, str(destination)], destination.parent)
+
+    return CapturedSource(
+        kind="git_mirror",
+        url=project_url,
+        relative_path=str(destination.relative_to(cases_dir)),
+    )
+
+
+def _git_source_project_url(url: str) -> str | None:
+    parsed = urlparse(canonicalize_replay_url(url))
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+
+    hostname = parsed.hostname.lower()
+    path = parsed.path.strip("/").removesuffix(".git")
+    parts = [part for part in path.split("/") if part]
+    if hostname == "github.com" and len(parts) == 2:
+        return f"{parsed.scheme}://{parsed.netloc}/{'/'.join(parts)}"
+    if hostname in {"gitlab.com", "gitlab.gnome.org"}:
+        if len(parts) < 2 or parts[0] == "api" or "/-/" in f"/{path}/":
+            return None
+        return f"{parsed.scheme}://{parsed.netloc}/{'/'.join(parts)}"
+    if (
+        hostname == "src.fedoraproject.org"
+        and len(parts) == 2
+        and parts[0]
+        in {
+            "modules",
+            "rpms",
+        }
+    ):
+        return f"{parsed.scheme}://{parsed.netloc}/{'/'.join(parts)}"
+    return None
+
+
+def _git_clone_url(project_url: str) -> str:
+    return project_url if project_url.endswith(".git") else f"{project_url}.git"
+
+
+def _git_source_cache_name(remote_url: str) -> str:
+    parsed = urlparse(remote_url)
+    source = parsed.path.rstrip("/").rsplit("/", 1)[-1] if parsed.path else "repo"
+    source = source.removesuffix(".git")
+    safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in source)
+    digest = hashlib.sha256(remote_url.encode("utf-8")).hexdigest()[:12]
+    return f"{safe or 'repo'}-{digest}.git"
+
+
+def _run_git(command: Sequence[str], cwd: Path) -> None:
+    completed = subprocess.run(
+        ["git", *command],
+        cwd=cwd if cwd.is_dir() else None,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode == 0:
+        return
+    detail = (completed.stderr or completed.stdout or "").strip()
+    if detail:
+        raise CaptureMissingError(f"git {' '.join(command)} failed: {detail}")
+    raise CaptureMissingError(f"git {' '.join(command)} failed with exit {completed.returncode}")
 
 
 def _path_suffix(path: str) -> str:
