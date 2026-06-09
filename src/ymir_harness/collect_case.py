@@ -393,7 +393,19 @@ def _fetch_evidence(
             )
         )
 
-    recorded_patch_urls = {gitlab_patch_url} if gitlab_patch_url else set()
+    gitlab_records.extend(
+        _gitlab_commit_patch_records_from_mr_patch(
+            gitlab_patch_url,
+            gitlab_patch_body,
+            request=request,
+            result=result,
+            skipped_urls=jira_patch_urls,
+        )
+    )
+
+    recorded_patch_urls = {
+        record.url for record in gitlab_records if _patch_url_candidate(record.url) is not None
+    }
     valid_jira_patch_urls: list[str] = []
     for index, patch_url in enumerate(jira_patch_urls, start=1):
         if patch_url in recorded_patch_urls:
@@ -573,6 +585,83 @@ def _gitlab_mr_urls(url: str) -> dict[str, str]:
         "changes": f"{api_base}/changes",
         "patch": f"{normalized_mr_url}.patch",
     }
+
+
+def _gitlab_commit_patch_records_from_mr_patch(
+    patch_url: str | None,
+    patch_body: bytes | None,
+    *,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+    skipped_urls: Sequence[str],
+) -> list[FetchedRecord]:
+    if patch_url is None or patch_body is None:
+        return []
+
+    project_url = _gitlab_project_url_from_mr_patch_url(patch_url)
+    if project_url is None:
+        return []
+
+    records: list[FetchedRecord] = []
+    recorded_urls = {patch_url, *skipped_urls}
+    for commit_sha in _patch_commit_shas(patch_body):
+        commit_patch_url = f"{project_url}/-/commit/{commit_sha}.patch"
+        if commit_patch_url in recorded_urls:
+            continue
+        try:
+            commit_patch_body = _fetch_bytes(
+                commit_patch_url,
+                headers={"Accept": "*/*"},
+                request=request,
+                result=result,
+            )
+        except CollectCaseError as exc:
+            result.warnings.append(f"skipped GitLab commit patch URL {commit_patch_url}: {exc}")
+            continue
+        if not _looks_like_patch(commit_patch_body):
+            result.warnings.append(
+                f"skipped GitLab commit patch URL {commit_patch_url}: fetched content is not a patch"
+            )
+            continue
+
+        records.append(
+            FetchedRecord(
+                url=commit_patch_url,
+                relative_path=f"gitlab/commit_patches/{commit_sha}.patch",
+                body=commit_patch_body,
+            )
+        )
+        recorded_urls.add(commit_patch_url)
+
+        format_url = f"{project_url}/-/commit/{commit_sha}?format=.patch"
+        if format_url not in recorded_urls:
+            records.append(
+                FetchedRecord(
+                    url=format_url,
+                    relative_path=f"gitlab/commit_patches/{commit_sha}-format.patch",
+                    body=commit_patch_body,
+                )
+            )
+            recorded_urls.add(format_url)
+
+    return records
+
+
+def _gitlab_project_url_from_mr_patch_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    marker = "/-/merge_requests/"
+    if not parsed.scheme or not parsed.netloc or marker not in parsed.path:
+        return None
+    project_path = parsed.path.split(marker, 1)[0]
+    if not project_path:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}{project_path}"
+
+
+def _patch_commit_shas(body: bytes) -> list[str]:
+    text = body[:1_000_000].decode("utf-8", errors="ignore")
+    shas = [match.group(1).lower() for match in re.finditer(r"(?m)^From ([0-9a-fA-F]{40}) ", text)]
+    return list(dict.fromkeys(shas))
 
 
 def _json_object_from_body(body: bytes, url: str) -> Mapping[str, Any]:
