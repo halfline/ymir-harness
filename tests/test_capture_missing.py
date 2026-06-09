@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import urllib.request
 from pathlib import Path
 from urllib.error import HTTPError
@@ -475,6 +476,53 @@ def test_capture_missing_records_jira_issue_miss(
         }
     ]
     assert linked_starting["fields"]["status"] == {"name": "New"}
+
+
+def test_capture_missing_mirrors_blocked_git_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    url = "https://github.com/example/project"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}\n",
+    )
+
+    def fake_run(command, cwd, check, stdout, stderr, text):
+        assert command[:4] == ["git", "clone", "--mirror", "--quiet"]
+        assert command[4] == f"{url}.git"
+        destination = Path(command[5])
+        destination.mkdir(parents=True)
+        (destination / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (destination / "config").write_text(
+            f'[remote "origin"]\n\turl = {url}.git\n',
+            encoding="utf-8",
+        )
+        assert cwd == destination.parent
+        assert check is False
+        assert stdout == subprocess.PIPE
+        assert stderr == subprocess.PIPE
+        assert text is True
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+        )
+    )
+
+    assert [capture.kind for capture in result.captured_source] == ["git_mirror"]
+    captured = cases_dir / result.captured_source[0].relative_path
+    assert (captured / "HEAD").is_file()
+    assert (captured / "config").is_file()
+
 
 class _Response:
     def __init__(self, body: bytes, content_type: str):
