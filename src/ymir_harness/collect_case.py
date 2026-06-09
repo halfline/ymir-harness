@@ -1448,7 +1448,7 @@ def _write_expected(
             expected[name] = value
     for name, values in (
         ("cve_ids", request.cve_ids),
-        ("patch_urls", _effective_patch_urls(request, fetched)),
+        ("patch_urls", _expected_patch_urls(request, fetched)),
         ("fix_sources", _effective_fix_sources(request, fetched)),
     ):
         if values:
@@ -1950,6 +1950,38 @@ def _effective_patch_urls(
     if fetched.gitlab_patch_url:
         urls.append(fetched.gitlab_patch_url)
     return tuple(dict.fromkeys(urls))
+
+
+def _expected_patch_urls(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> tuple[str, ...]:
+    if request.patch_urls:
+        return tuple(dict.fromkeys(request.patch_urls))
+
+    historical_urls = _historical_result_patch_urls(_evidence_comments(request, fetched))
+    if historical_urls:
+        valid_evidence_urls = set(fetched.jira_patch_urls)
+        if valid_evidence_urls:
+            filtered = [url for url in historical_urls if url in valid_evidence_urls]
+            if filtered:
+                return tuple(filtered)
+        return tuple(historical_urls)
+
+    return _effective_patch_urls(request, fetched)
+
+
+def _historical_result_patch_urls(comments: Any) -> list[str]:
+    urls: list[str] = []
+    for comment in _comment_values(comments):
+        if not _is_result_comment(comment):
+            continue
+        body = comment.get("body")
+        if body is None:
+            continue
+        body_text = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
+        urls.extend(_patch_urls_from_jira_evidence(body_text))
+    return list(dict.fromkeys(urls))
 
 
 def _effective_fix_sources(
