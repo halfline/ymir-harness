@@ -133,7 +133,6 @@ class CaseValidationResult:
 @dataclass
 class ValidationReport:
     cases_dir: Path
-    phase: int
     cases: list[CaseValidationResult] = field(default_factory=list)
     global_issues: list[ValidationIssue] = field(default_factory=list)
 
@@ -161,7 +160,6 @@ class ValidationReport:
     def to_json(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
-            "phase": self.phase,
             "cases_dir": str(self.cases_dir),
             "summary": self.summary(),
             "global_issues": [issue.to_json() for issue in self.global_issues],

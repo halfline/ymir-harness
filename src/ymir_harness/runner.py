@@ -192,7 +192,6 @@ def append_global_issues(
         return report
     return ValidationReport(
         cases_dir=report.cases_dir,
-        phase=report.phase,
         cases=report.cases,
         global_issues=[*report.global_issues, *issues],
     )
@@ -225,7 +224,6 @@ def select_validation_cases(
 
     return ValidationReport(
         cases_dir=report.cases_dir,
-        phase=report.phase,
         cases=selected_cases,
         global_issues=global_issues,
     )

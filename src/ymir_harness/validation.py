@@ -58,15 +58,10 @@ class ReferencePatchTarget:
 def validate_case_directory(
     cases_dir: Path,
     *,
-    phase: int = 1,
     workflow: str | None = None,
 ) -> ValidationReport:
-    if phase not in {1, 2}:
-        msg = f"unsupported validation phase: {phase}"
-        raise ValueError(msg)
-
     cases_dir = cases_dir.resolve()
-    report = ValidationReport(cases_dir=cases_dir, phase=phase)
+    report = ValidationReport(cases_dir=cases_dir)
     if not cases_dir.is_dir():
         report.global_issues.append(
             ValidationIssue(
@@ -91,7 +86,7 @@ def validate_case_directory(
         return report
 
     for case_id in case_ids:
-        case_result = _validate_case(cases_dir, case_id, phase, workflow)
+        case_result = _validate_case(cases_dir, case_id, workflow)
         case_result.finalize()
         report.cases.append(case_result)
 
@@ -101,7 +96,6 @@ def validate_case_directory(
 def _validate_case(
     cases_dir: Path,
     case_id: str,
-    phase: int,
     workflow: str | None,
 ) -> CaseValidationResult:
     result = CaseValidationResult(case_id=case_id)
@@ -110,20 +104,19 @@ def _validate_case(
     mock_paths = sorted((cases_dir / "mock_data").glob(f"*/{case_id}.json"))
 
     if expected is not None:
-        _validate_expected_metadata(expected, expected_path, result, phase)
+        _validate_expected_metadata(expected, expected_path, result)
         result.case_type = _string_or_none(expected.get("case_type"))
         result.case_status = _string_or_none(expected.get("case_status"))
-        _validate_network_policy(cases_dir, expected, result, phase)
-        _validate_source_cache(cases_dir, expected, expected_path, result, phase, workflow)
+        _validate_network_policy(cases_dir, expected, result)
+        _validate_source_cache(cases_dir, expected, expected_path, result, workflow)
 
-    reference_patch_targets = _validate_mock_fixtures(mock_paths, expected, result, phase)
+    reference_patch_targets = _validate_mock_fixtures(mock_paths, expected, result)
 
     if expected is not None:
         _validate_reference_patch(
             cases_dir,
             expected,
             result,
-            phase,
             reference_patch_targets,
             workflow,
         )
@@ -207,7 +200,6 @@ def _validate_expected_metadata(
     expected: Mapping[str, Any],
     expected_path: Path,
     result: CaseValidationResult,
-    phase: int,
 ) -> None:
     _require_schema_metadata(expected, expected_path, result, strict=True)
     _require_equal(expected.get("case_id"), result.case_id, "case_id", expected_path, result)
@@ -299,15 +291,13 @@ def _validate_expected_metadata(
         required=True,
     )
 
-    answer_leakage_required = phase >= 2
     _validate_allowed_value(
         expected.get("answer_leakage"),
         ALLOWED_ANSWER_LEAKAGE,
         "answer_leakage",
         expected_path,
         result,
-        required=answer_leakage_required,
-        missing_severity="error" if answer_leakage_required else "warning",
+        required=True,
     )
     if expected.get("answer_leakage") == "explicit" and expected.get("case_status") == "active":
         result.issues.append(
@@ -320,23 +310,21 @@ def _validate_expected_metadata(
             )
         )
 
-    if phase >= 2:
-        reference_patch_mode_required = _implementation_case_requires_reference_patch(expected)
-        _validate_allowed_value(
-            expected.get("reference_patch_mode"),
-            ALLOWED_REFERENCE_PATCH_MODES,
-            "reference_patch_mode",
-            expected_path,
-            result,
-            required=reference_patch_mode_required,
-        )
+    reference_patch_mode_required = _implementation_case_requires_reference_patch(expected)
+    _validate_allowed_value(
+        expected.get("reference_patch_mode"),
+        ALLOWED_REFERENCE_PATCH_MODES,
+        "reference_patch_mode",
+        expected_path,
+        result,
+        required=reference_patch_mode_required,
+    )
 
 
 def _validate_network_policy(
     cases_dir: Path,
     expected: Mapping[str, Any],
     result: CaseValidationResult,
-    phase: int,
 ) -> None:
     network_mode = expected.get("network_mode")
     case_status = expected.get("case_status")
@@ -353,7 +341,7 @@ def _validate_network_policy(
 
     if network_mode == "replay_only":
         _validate_web_cache_manifest(cases_dir, expected, result)
-    elif phase >= 2 and network_mode == "network_denied":
+    elif network_mode == "network_denied":
         patch_urls = _expected_patch_urls(expected)
         if patch_urls:
             result.issues.append(
@@ -530,10 +518,9 @@ def _validate_source_cache(
     expected: Mapping[str, Any],
     expected_path: Path,
     result: CaseValidationResult,
-    phase: int,
     workflow: str | None,
 ) -> None:
-    if phase < 2 or not _workflow_requires_source_cache(workflow, expected):
+    if not _workflow_requires_source_cache(workflow, expected):
         return
 
     source_cache_dir = cases_dir / "source_cache" / result.case_id
@@ -941,11 +928,10 @@ def _validate_reference_patch(
     cases_dir: Path,
     expected: Mapping[str, Any],
     result: CaseValidationResult,
-    phase: int,
     _source_targets: list[ReferencePatchTarget],
     workflow: str | None,
 ) -> None:
-    if phase < 2 or not _workflow_requires_reference_patch(workflow, expected):
+    if not _workflow_requires_reference_patch(workflow, expected):
         return
 
     patch_paths = sorted(
@@ -1142,7 +1128,6 @@ def _validate_mock_fixtures(
     mock_paths: list[Path],
     expected: Mapping[str, Any] | None,
     result: CaseValidationResult,
-    phase: int,
 ) -> list[ReferencePatchTarget]:
     expected_package = expected.get("package") if expected else None
     expected_case_type = expected.get("case_type") if expected else None
@@ -1169,7 +1154,7 @@ def _validate_mock_fixtures(
         if config is None:
             continue
 
-        _require_schema_metadata(config, mock_path, result, strict=phase >= 2)
+        _require_schema_metadata(config, mock_path, result, strict=True)
         if config.get("case_id") is not None:
             _require_equal(config.get("case_id"), result.case_id, "case_id", mock_path, result)
         if expected_case_type is not None and config.get("case_type") is not None:
@@ -1224,12 +1209,7 @@ def _validate_mock_fixtures(
             )
         )
 
-    if (
-        phase >= 2
-        and expected_target_branch
-        and branches_seen
-        and expected_target_branch not in branches_seen
-    ):
+    if expected_target_branch and branches_seen and expected_target_branch not in branches_seen:
         result.issues.append(
             ValidationIssue(
                 severity="error",

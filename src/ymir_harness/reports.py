@@ -29,7 +29,6 @@ def render_validation_markdown(report: ValidationReport) -> str:
         "# Fixture Validation",
         "",
         f"- Cases directory: `{report.cases_dir}`",
-        f"- Validation phase: `{report.phase}`",
         f"- Valid: `{summary['valid']}`",
         f"- Warning-only: `{summary['warning-only']}`",
         f"- Invalid: `{summary['invalid']}`",

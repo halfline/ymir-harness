@@ -67,7 +67,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate a benchmark_cases directory before running agents",
     )
     validate.add_argument("cases_dir", type=Path)
-    validate.add_argument("--phase", type=int, choices=(1, 2), default=1)
     validate.add_argument(
         "--workflow",
         choices=WORKFLOW_CHOICES,
@@ -325,7 +324,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="record an enabled feature flag; may be provided more than once",
     )
-    run.add_argument("--phase", type=int, choices=(1, 2), default=1)
     run.add_argument("--results-dir", type=Path, help="directory for run artifacts")
     run.add_argument("--output", type=Path, help="write run report JSON to this path")
     run.add_argument("--json", action="store_true", help="print the run report JSON to stdout")
@@ -375,7 +373,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _cmd_validate_cases(args: argparse.Namespace) -> int:
     report = validate_case_directory(
         args.cases_dir,
-        phase=args.phase,
         workflow=_validation_workflow(args.workflow),
     )
     reports_dir = args.reports_dir or args.cases_dir / "reports"
@@ -541,7 +538,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
     results_dir = args.results_dir or default_results_dir(args.cases, run_id)
     validation_report = validate_case_directory(
         args.cases,
-        phase=args.phase,
         workflow=_validation_workflow(args.workflow),
     )
     manifest_case_ids, manifest_issues = load_case_manifest(args.cases)
