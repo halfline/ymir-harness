@@ -36,6 +36,7 @@ from ymir_harness.safety import detect_replay_violations, detect_unsafe_operatio
 from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
 
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
+DEFAULT_CHAT_MODEL = "gemini:gemini-2.5-pro"
 MAX_ITERATIONS_OVERRIDE_ENV = "BENCHMARK_MAX_ITERATIONS_OVERRIDE"
 MAX_COST_PER_RUN_ENV = "BENCHMARK_MAX_COST_PER_RUN"
 COST_ALERT_THRESHOLD_ENV = "BENCHMARK_COST_ALERT_THRESHOLD"
@@ -133,6 +134,7 @@ def build_no_write_environment(
         env.pop(name, None)
 
     env.update(NO_WRITE_ENVIRONMENT)
+    env.setdefault("CHAT_MODEL", DEFAULT_CHAT_MODEL)
     env["JIRA_MOCK_FILES"] = str((jira_mock_dir or cases_dir / "jiras").resolve())
     env["MOCK_REPOS_DIR"] = str((cases_dir / "mock_data").resolve())
     env.setdefault("GIT_REPO_BASEPATH", str(results_dir.resolve()))
