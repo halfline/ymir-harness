@@ -31,6 +31,7 @@ from ymir_harness.scoring import load_json_file
 DEFAULT_ALLOWED_HOSTS = (
     "gitlab.com",
     "gitlab.gnome.org",
+    "github.com",
     "issues.redhat.com",
     "redhat.atlassian.net",
     "src.fedoraproject.org",
@@ -55,6 +56,10 @@ MISSING_URL_PATTERNS = (
     (
         "external network access blocked",
         re.compile(r"external network access blocked:\s*(https?://[^\s\"'<>]+)"),
+    ),
+    (
+        "tool HTTP 404",
+        re.compile(r"Failed to fetch patch from\s+(https?://[^\s\"'<>]+):\s*HTTP 404"),
     ),
     ("unrecorded URL", re.compile(r"unrecorded URL:\s*(https?://[^\s\"'<>]+)")),
 )
