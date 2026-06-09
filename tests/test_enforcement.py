@@ -36,6 +36,23 @@ def test_enforcement_blocks_unrecorded_urllib_response(tmp_path: Path) -> None:
             urllib.request.urlopen("https://example.invalid/missing")
 
 
+def test_enforcement_serves_recorded_requests_json_response(tmp_path: Path) -> None:
+    requests = pytest.importorskip("requests")
+    url = "https://gitlab.example/api/v4/projects/group%2Fpkg"
+    manifest_path = _write_replay_manifest(tmp_path, {url: "gitlab/project.json"})
+    (manifest_path.parent / "gitlab").mkdir()
+    (manifest_path.parent / "gitlab" / "project.json").write_text(
+        json.dumps({"id": 42, "path_with_namespace": "group/pkg"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        response = requests.get(url)
+
+    assert response.headers["Content-Type"] == "application/json"
+    assert response.json() == {"id": 42, "path_with_namespace": "group/pkg"}
+
+
 def test_enforcement_allows_configured_model_provider_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
