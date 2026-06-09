@@ -49,6 +49,16 @@ To turn a completed Jira into a repeatable triage experiment, use
 workflow, captures any missing Jira searches or web requests, and repeats until
 the run succeeds or reaches the iteration limit.
 
+Collected replay fixtures live in the `ymir-harness-cases` submodule. Use the
+workflow directory as the cases root:
+
+```bash
+uv run ymir-harness run \
+  --cases ymir-harness-cases/ymir-triage \
+  --workflow ymir-triage \
+  --variant baseline
+```
+
 ```bash
 uv run ymir-harness prepare-case \
   --cases examples/benchmark_cases \

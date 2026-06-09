@@ -1,3 +1,6 @@
 [submodule "ui-workflows"]
 	path = ui-workflows
 	url = git@github.com:packit/ai-workflows.git
+[submodule "ymir-harness-cases"]
+	path = ymir-harness-cases
+	url = git@github.com:halfline/ymir-harness-cases.git
