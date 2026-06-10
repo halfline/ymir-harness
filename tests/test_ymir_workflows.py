@@ -14,6 +14,7 @@ import pytest
 import ymir_harness.ymir_workflows as workflow_module
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseRequest
 from ymir_harness.ymir_workflows import (
+    _fixture_search_results,
     _instrument_agent_factory,
     _is_package_prep_command,
     _materialize_replay_unpacked_sources,
@@ -23,6 +24,122 @@ from ymir_harness.ymir_workflows import (
     make_ymir_rebase_executor,
     make_ymir_triage_executor,
 )
+
+
+def test_fixture_search_results_returns_known_jira_links(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    jira_dir = cases_dir / "jiras" / "RHEL-12345"
+    jira_dir.mkdir(parents=True)
+    (jira_dir / "links.json").write_text(
+        json.dumps(
+            {
+                "links": [
+                    {
+                        "object": {
+                            "title": "Redis security advisory",
+                            "url": "https://github.com/redis/redis/security/advisories/GHSA-c8h9-259x-jff4",
+                        }
+                    },
+                    {
+                        "object": {
+                            "title": "Unrelated link",
+                            "url": "https://example.invalid/unrelated",
+                        }
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (jira_dir / "comments.json").write_text(
+        json.dumps(
+            [
+                {
+                    "body": (
+                        "MR: [https://gitlab.example/pkg/-/merge_requests/7|"
+                        "https://gitlab.example/pkg/-/merge_requests/7|smart-link]"
+                    )
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    results = _fixture_search_results(
+        _request(tmp_path),
+        "CVE-2026-25243 redis security advisory merge request",
+        max_results=10,
+    )
+
+    assert [result["url"] for result in results] == [
+        "https://github.com/redis/redis/security/advisories/GHSA-c8h9-259x-jff4",
+        "https://gitlab.example/pkg/-/merge_requests/7",
+    ]
+
+
+def test_fixture_search_results_includes_recorded_urls_and_source_remotes(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    web_cache = cases_dir / "web_cache" / "RHEL-12345"
+    web_cache.mkdir(parents=True)
+    (web_cache / "manifest.json").write_text(
+        json.dumps(
+            {
+                "recorded_files": {
+                    "https://gitlab.com/redhat/rhel/rpms/redis/-/commit/abc.patch": "patches/abc.patch"
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_repo = cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "redis.git"
+    source_repo.mkdir(parents=True)
+    (source_repo / "config").write_text(
+        '[remote "origin"]\n\turl = https://github.com/redis/redis.git\n',
+        encoding="utf-8",
+    )
+
+    results = _fixture_search_results(
+        _request(tmp_path),
+        "redis upstream commit fix",
+        max_results=10,
+    )
+
+    assert [result["url"] for result in results] == [
+        "https://gitlab.com/redhat/rhel/rpms/redis/-/commit/abc.patch",
+        "https://github.com/redis/redis.git",
+    ]
+
+
+def test_fixture_search_results_returns_empty_for_unknown_query(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    jira_dir = cases_dir / "jiras" / "RHEL-12345"
+    jira_dir.mkdir(parents=True)
+    (jira_dir / "links.json").write_text(
+        json.dumps(
+            {
+                "links": [
+                    {
+                        "object": {
+                            "title": "Redis security advisory",
+                            "url": "https://github.com/redis/redis/security/advisories/GHSA-c8h9-259x-jff4",
+                        }
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        _fixture_search_results(
+            _request(tmp_path),
+            "postgres kerberos regression",
+            max_results=10,
+        )
+        == []
+    )
 
 
 def test_ymir_triage_executor_runs_workflow_with_no_write_environment(
@@ -576,9 +693,7 @@ def test_patch_no_write_candidate_build_lookup_replays_brewhub(
 
     _patch_no_write_candidate_build_lookup()
 
-    evr, source_ref = asyncio.run(
-        specfile_module.get_latest_candidate_build("redis", "rhel-9.6.0")
-    )
+    evr, source_ref = asyncio.run(specfile_module.get_latest_candidate_build("redis", "rhel-9.6.0"))
 
     assert evr.epoch == 1
     assert evr.version == "6.2.20"
