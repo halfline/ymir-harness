@@ -121,6 +121,27 @@ def test_patch_no_write_gateway_tools_replays_zstream_branch(
     assert result.result == "Z-Stream branch rhel-9.6.z already exists, no need to create it"
 
 
+def test_patch_no_write_gateway_tools_replays_fork_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("ymir")
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("FORK_NAMESPACE", "redhat/rhel/bot-branches")
+
+    _patch_no_write_gateway_tools()
+
+    from ymir.tools.privileged.gitlab import ForkRepositoryTool
+
+    async def run_tool():
+        return await ForkRepositoryTool().run(
+            input={"repository": "https://gitlab.com/redhat/rhel/rpms/redis"}
+        )
+
+    result = asyncio.run(run_tool())
+
+    assert result.result == "https://gitlab.com/redhat/rhel/bot-branches/redis.git"
+
+
 def test_patch_no_write_gateway_tools_replays_lookaside(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
