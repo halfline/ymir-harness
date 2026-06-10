@@ -485,9 +485,109 @@ def _instrument_agent_factory(
     async def factory(*args: Any, **kwargs: Any) -> Any:
         result = agent_factory(*args, **kwargs)
         agent = await result if inspect.isawaitable(result) else result
+        _instrument_agent_llm(agent, request=request, agent_name=agent_name)
         return _InstrumentedAgent(agent, request=request, agent_name=agent_name)
 
     return factory
+
+
+def _instrument_agent_llm(agent: Any, *, request: RunCaseRequest, agent_name: str) -> None:
+    llm = getattr(agent, "_llm", None)
+    if llm is None or isinstance(llm, _InstrumentedChatModel):
+        return
+    try:
+        setattr(agent, "_llm", _InstrumentedChatModel(llm, request=request, agent_name=agent_name))
+    except (AttributeError, TypeError):
+        _workflow_debug(
+            request,
+            "chat_model_instrumentation_skipped",
+            agent=agent_name,
+            agent_type=type(agent).__name__,
+            chat_model_type=type(llm).__name__,
+        )
+
+
+class _InstrumentedChatModel:
+    def __init__(self, model: Any, *, request: RunCaseRequest, agent_name: str) -> None:
+        self._model = model
+        self._request = request
+        self._agent_name = agent_name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model, name)
+
+    def run(self, messages: Any, **options: Any) -> Any:
+        _workflow_debug(
+            self._request,
+            "chat_model_run_start",
+            agent=self._agent_name,
+            chat_model_type=type(self._model).__name__,
+            message_count=_safe_len(messages),
+            option_keys=sorted(options),
+        )
+        run = self._model.run(messages, **options)
+        _workflow_debug(
+            self._request,
+            "chat_model_run_created",
+            agent=self._agent_name,
+            run_type=type(run).__name__,
+        )
+        return _InstrumentedChatModelRun(run, request=self._request, agent_name=self._agent_name)
+
+
+class _InstrumentedChatModelRun:
+    def __init__(self, run: Any, *, request: RunCaseRequest, agent_name: str) -> None:
+        self._run = run
+        self._request = request
+        self._agent_name = agent_name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._run, name)
+
+    def middleware(self, *args: Any, **kwargs: Any) -> Awaitable[Any]:
+        _workflow_debug(
+            self._request,
+            "chat_model_middleware_start",
+            agent=self._agent_name,
+            middleware_count=len(args) + len(kwargs),
+        )
+        awaitable = self._run.middleware(*args, **kwargs)
+        _workflow_debug(
+            self._request,
+            "chat_model_awaitable_created",
+            agent=self._agent_name,
+            awaitable_type=type(awaitable).__name__,
+        )
+        return self._log_awaitable(awaitable)
+
+    async def _log_awaitable(self, awaitable: Awaitable[Any]) -> Any:
+        started_at = time.monotonic()
+        _workflow_debug(
+            self._request,
+            "chat_model_await_start",
+            agent=self._agent_name,
+        )
+        try:
+            result = await awaitable
+        except BaseException as exc:
+            _workflow_debug(
+                self._request,
+                "chat_model_await_errored",
+                agent=self._agent_name,
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                error_detail="".join(traceback.format_exception(exc)),
+            )
+            raise
+        _workflow_debug(
+            self._request,
+            "chat_model_await_finished",
+            agent=self._agent_name,
+            elapsed_seconds=round(time.monotonic() - started_at, 3),
+            result_type=type(result).__name__,
+        )
+        return result
 
 
 class _InstrumentedAgent:
@@ -535,6 +635,13 @@ class _InstrumentedAgent:
             result_type=type(result).__name__,
         )
         return result
+
+
+def _safe_len(value: Any) -> int | None:
+    try:
+        return len(value)
+    except TypeError:
+        return None
 
 
 def _workflow_debug(
