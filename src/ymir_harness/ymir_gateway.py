@@ -172,6 +172,33 @@ def _patch_no_write_gateway_tools() -> None:
                 )
             return StringToolOutput(result=text)
 
+    class HarnessForkRepositoryTool(
+        Tool[gitlab_module.ForkRepositoryToolInput, ToolRunOptions, StringToolOutput]
+    ):
+        name = "fork_repository"
+        description = "Replays GitLab fork creation without GitLab API writes."
+        input_schema = gitlab_module.ForkRepositoryToolInput
+
+        def _create_emitter(self) -> Emitter:
+            return Emitter.root().child(
+                namespace=["tool", "gitlab", self.name],
+                creator=self,
+            )
+
+        async def _run(
+            self,
+            tool_input: gitlab_module.ForkRepositoryToolInput,
+            options: ToolRunOptions | None,
+            context: RunContext,
+        ) -> StringToolOutput:
+            del options, context
+            fork_namespace = os.getenv("FORK_NAMESPACE", "ymir-harness")
+            repository = tool_input.repository.rstrip("/")
+            name = repository.rsplit("/", 1)[-1].removesuffix(".git")
+            return StringToolOutput(
+                result=f"https://gitlab.com/{fork_namespace}/{name}.git"
+            )
+
     class HarnessBuildPackageTool(
         Tool[
             copr_module.BuildPackageToolInput,
@@ -212,6 +239,7 @@ def _patch_no_write_gateway_tools() -> None:
 
     distgit_module.CreateZstreamBranchTool = HarnessCreateZstreamBranchTool
     copr_module.BuildPackageTool = HarnessBuildPackageTool
+    gitlab_module.ForkRepositoryTool = HarnessForkRepositoryTool
     gitlab_module.GetPatchFromUrlTool = HarnessGetPatchFromUrlTool
     lookaside_module.DownloadSourcesTool = HarnessDownloadSourcesTool
     lookaside_module.PrepSourcesTool = HarnessPrepSourcesTool
