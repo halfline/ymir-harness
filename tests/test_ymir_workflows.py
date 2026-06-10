@@ -17,6 +17,7 @@ from ymir_harness.ymir_workflows import (
     _instrument_agent_factory,
     _is_package_prep_command,
     _materialize_replay_unpacked_sources,
+    _patch_no_write_candidate_build_lookup,
     make_ymir_backport_executor,
     make_ymir_rebuild_executor,
     make_ymir_rebase_executor,
@@ -534,6 +535,55 @@ def test_materialize_replay_unpacked_sources_uses_sources_file_fallback(
 
     assert source_dir == tmp_path / "custom-source"
     assert (tmp_path / "custom-source" / "source.c").read_text(encoding="utf-8") == "real source\n"
+
+
+def test_patch_no_write_candidate_build_lookup_replays_brewhub(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("ymir")
+    from ymir.common import utils as utils_module
+    from ymir.tools.unprivileged import specfile as specfile_module
+
+    async def fail_lookup(_package: str, _dist_git_branch: str):
+        raise AssertionError("live candidate build lookup should not run")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "recorded_files": {},
+                "koji_candidate_builds": {
+                    "redis|rhel-9.6.0": {
+                        "evr": {
+                            "epoch": 1,
+                            "version": "6.2.20",
+                            "release": "3.el9",
+                        },
+                        "source_ref": "real-source-ref",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("YMIR_BENCHMARK_REPLAY_MANIFEST", str(manifest_path))
+    monkeypatch.delattr(specfile_module, "_ymir_harness_candidate_build_patched", raising=False)
+    monkeypatch.setattr(specfile_module, "get_latest_candidate_build", fail_lookup)
+    monkeypatch.setattr(utils_module, "get_latest_candidate_build", fail_lookup)
+
+    _patch_no_write_candidate_build_lookup()
+
+    evr, source_ref = asyncio.run(
+        specfile_module.get_latest_candidate_build("redis", "rhel-9.6.0")
+    )
+
+    assert evr.epoch == 1
+    assert evr.version == "6.2.20"
+    assert evr.release == "3.el9"
+    assert source_ref == "real-source-ref"
 
 
 def test_materialize_replay_unpacked_sources_reports_missing_archive(tmp_path: Path) -> None:

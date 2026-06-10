@@ -21,6 +21,23 @@ import ymir_harness.collect_case as collect_case_module
 from ymir_harness.validation import validate_case_directory
 
 
+@pytest.fixture(autouse=True)
+def _stub_koji_candidate_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_fetch_candidate_build(package: str, branch: str):
+        return {
+            "package": package,
+            "dist_git_branch": branch,
+            "evr": {
+                "epoch": 0,
+                "version": "1.0",
+                "release": "1.el9",
+            },
+            "source_ref": f"{package}-{branch}-ref",
+        }
+
+    monkeypatch.setattr(collect_case_module, "fetch_candidate_build", fake_fetch_candidate_build)
+
+
 def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     issue_json = _write_json(
@@ -407,6 +424,94 @@ def test_collect_case_refuses_to_overwrite_existing_files(tmp_path: Path) -> Non
 
     with pytest.raises(CollectCaseError, match="refusing to overwrite"):
         collect_case(request)
+
+
+def test_collect_case_records_koji_candidate_builds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    mr_url = "https://gitlab.com/redhat/rhel/rpms/redis/-/merge_requests/1"
+    patch_url = f"{mr_url}.patch"
+    calls: list[tuple[str, str]] = []
+
+    def fake_fetch_gitlab_mr_evidence(_gitlab_mr_url, _request, _result):
+        return (
+            {"target_branch": "rhel-9.6.0", "source_branch": "fix"},
+            [],
+            patch_url,
+            b"diff --git a/source.c b/source.c\n",
+            [
+                collect_case_module.FetchedRecord(
+                    url=patch_url,
+                    relative_path="gitlab/merge_request.patch",
+                    body=b"diff --git a/source.c b/source.c\n",
+                )
+            ],
+        )
+
+    def fake_maintainer_rules(package, _request, _result):
+        return collect_case_module.FetchedRecord(
+            url=f"https://rules.example/{package}/AGENTS.md",
+            relative_path=f"gitlab/maintainer_rules/{package}/AGENTS.md",
+            body=b"",
+        )
+
+    def fake_fetch_candidate_build(package: str, branch: str):
+        calls.append((package, branch))
+        return {
+            "package": package,
+            "dist_git_branch": branch,
+            "evr": {
+                "epoch": 0,
+                "version": "6.2.20",
+                "release": "3.el9" if branch == "rhel-9.6.0" else "2.el9",
+            },
+            "source_ref": f"{package}-{branch}-ref",
+        }
+
+    monkeypatch.setattr(
+        collect_case_module,
+        "_fetch_gitlab_mr_evidence",
+        fake_fetch_gitlab_mr_evidence,
+    )
+    monkeypatch.setattr(
+        collect_case_module,
+        "_fetch_maintainer_rules_record",
+        fake_maintainer_rules,
+    )
+    monkeypatch.setattr(collect_case_module, "fetch_candidate_build", fake_fetch_candidate_build)
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.0",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            cve_ids=("CVE-2026-0001",),
+            gitlab_mr_url=mr_url,
+            overwrite=True,
+        )
+    )
+
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert calls == [("redis", "rhel-9.6.0"), ("redis", "rhel-9.7.0")]
+    assert manifest["koji_candidate_builds"]["redis|rhel-9.6.0"]["evr"] == {
+        "epoch": 0,
+        "version": "6.2.20",
+        "release": "3.el9",
+    }
+    assert (
+        manifest["koji_candidate_builds"]["redis|rhel-9.7.0"]["source_ref"]
+        == "redis-rhel-9.7.0-ref"
+    )
 
 
 def test_collect_case_auto_caches_package_distgit_when_cache_is_requested(
