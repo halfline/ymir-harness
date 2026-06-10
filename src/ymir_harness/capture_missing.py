@@ -264,6 +264,11 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
         except OSError as exc:
             result.failed.append(CaptureFailure(url=url, reason=str(exc)))
             continue
+        if url in recorded_files and fetched.status >= 400:
+            result.skipped.append(
+                CaptureFailure(url=url, reason="URL is already recorded with successful content")
+            )
+            continue
 
         relative_path = _relative_capture_path(url)
         destination = manifest_path.parent / relative_path
