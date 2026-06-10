@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import traceback
+from configparser import ConfigParser
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
@@ -667,7 +668,9 @@ def _agent_args_summary(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dic
             summary["first_arg_type"] = type(first).__name__
     expected_output = kwargs.get("expected_output")
     if expected_output is not None:
-        summary["expected_output"] = getattr(expected_output, "__name__", type(expected_output).__name__)
+        summary["expected_output"] = getattr(
+            expected_output, "__name__", type(expected_output).__name__
+        )
     return summary
 
 
@@ -733,9 +736,7 @@ def _workflow_state_snapshot(state: Any) -> dict[str, Any]:
         "used_cherry_pick_workflow",
     )
     snapshot = {
-        name: _json_safe_value(getattr(state, name))
-        for name in names
-        if hasattr(state, name)
+        name: _json_safe_value(getattr(state, name)) for name in names if hasattr(state, name)
     }
     backport_result = getattr(state, "backport_result", None)
     if backport_result is not None:
@@ -891,9 +892,13 @@ def _backport_dependencies(
 
     _patch_backport_no_write_subprocesses(backport_module)
     _patch_backport_workflow_step_logging(backport_module)
+    _patch_fixture_duckduckgo_search(backport_module)
     _patch_no_write_candidate_build_lookup()
 
-    return workflow or backport_module.run_workflow, agent_factory or backport_module.create_backport_agent
+    return (
+        workflow or backport_module.run_workflow,
+        agent_factory or backport_module.create_backport_agent,
+    )
 
 
 def _patch_backport_no_write_subprocesses(backport_module: Any) -> None:
@@ -986,6 +991,207 @@ def _patch_backport_workflow_step_logging(backport_module: Any) -> None:
 
     workflow_class.add_step = harness_add_step
     backport_module._ymir_harness_workflow_step_logging_patched = True
+
+
+def _patch_fixture_duckduckgo_search(agent_module: Any) -> None:
+    if getattr(agent_module, "_ymir_harness_duckduckgo_patched", False):
+        return
+
+    original_tool = getattr(agent_module, "DuckDuckGoSearchTool", None)
+    if original_tool is None:
+        return
+
+    try:
+        from beeai_framework.tools.search.duckduckgo.duckduckgo import (
+            DuckDuckGoSearchToolOutput,
+            DuckDuckGoSearchToolResult,
+        )
+    except ImportError:
+        return
+
+    class HarnessDuckDuckGoSearchTool(original_tool):  # type: ignore[misc, valid-type]
+        async def _run(self, input: Any, options: Any, context: Any) -> Any:
+            if os.getenv("DRY_RUN", "False").lower() != "true":
+                return await super()._run(input, options, context)
+
+            request = _request_from_environment()
+            query = str(getattr(input, "query", ""))
+            results = [
+                DuckDuckGoSearchToolResult(
+                    title=result["title"],
+                    description=result["description"],
+                    url=result["url"],
+                )
+                for result in _fixture_search_results(request, query, max_results=self.max_results)
+            ]
+            _workflow_debug(
+                request,
+                "duckduckgo_replay",
+                query=query,
+                result_count=len(results),
+                urls=[result.url for result in results],
+            )
+            return DuckDuckGoSearchToolOutput(results)
+
+    agent_module.DuckDuckGoSearchTool = HarnessDuckDuckGoSearchTool
+    agent_module._ymir_harness_duckduckgo_patched = True
+
+
+def _fixture_search_results(
+    request: RunCaseRequest,
+    query: str,
+    *,
+    max_results: int,
+) -> list[dict[str, str]]:
+    query_terms = _search_terms(query)
+    candidates = _fixture_search_candidates(request)
+    scored: list[tuple[int, int, dict[str, str]]] = []
+    for index, candidate in enumerate(candidates):
+        haystack = " ".join(
+            (candidate.get("title", ""), candidate.get("description", ""), candidate.get("url", ""))
+        )
+        score = _search_score(query_terms, haystack)
+        if score > 0:
+            scored.append((score, -index, candidate))
+    scored.sort(reverse=True)
+    return [candidate for _score, _index, candidate in scored[:max_results]]
+
+
+def _fixture_search_candidates(request: RunCaseRequest) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    def add(url: str, title: str, description: str) -> None:
+        url = _normalize_fixture_url(url)
+        if not url or url in seen_urls:
+            return
+        seen_urls.add(url)
+        candidates.append({"url": url, "title": title or url, "description": description})
+
+    jira_dir = request.cases_dir / "jiras" / request.case_id
+    for link in _json_list(jira_dir / "links.json", "links"):
+        obj = link.get("object") if isinstance(link, Mapping) else None
+        if not isinstance(obj, Mapping):
+            continue
+        url = _string_value(obj.get("url"))
+        title = _string_value(obj.get("title")) or url
+        add(url, title, "Known Jira remote link.")
+
+    for path in (
+        jira_dir / "starting-issue.json",
+        jira_dir / "issue.json",
+        jira_dir / "comments.json",
+    ):
+        _add_urls_from_json(path, add, "Known Jira issue content.")
+    for path in sorted((jira_dir / "linked").glob("*/starting-issue.json")):
+        _add_urls_from_json(path, add, "Known linked Jira issue content.")
+
+    manifest_path = request.cases_dir / "web_cache" / request.case_id / "manifest.json"
+    manifest = _read_json_object(manifest_path)
+    recorded_files = manifest.get("recorded_files")
+    if isinstance(recorded_files, Mapping):
+        for url in recorded_files:
+            add(str(url), str(url), "Recorded fixture URL.")
+    required_urls = manifest.get("required_urls")
+    if isinstance(required_urls, Sequence) and not isinstance(required_urls, str | bytes):
+        for url in required_urls:
+            add(str(url), str(url), "Required fixture URL.")
+
+    source_cache = request.cases_dir / "source_cache" / request.case_id / "upstream"
+    for config_path in sorted(source_cache.glob("**/config")):
+        url = _git_remote_url(config_path)
+        if url:
+            add(url, url, "Cached source repository.")
+
+    return candidates
+
+
+def _add_urls_from_json(path: Path, add: Callable[[str, str, str], None], description: str) -> None:
+    data = _read_json_value(path)
+    for url in _urls_from_value(data):
+        add(url, url, description)
+
+
+def _json_list(path: Path, key: str) -> list[Any]:
+    data = _read_json_object(path)
+    value = data.get(key)
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    data = _read_json_value(path)
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _read_json_value(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _urls_from_value(value: Any) -> list[str]:
+    urls: list[str] = []
+    if isinstance(value, str):
+        urls.extend(
+            _normalize_fixture_url(match.group(0))
+            for match in re.finditer(r"https?://[^\s\"'<>]+", value)
+        )
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            urls.extend(_urls_from_value(item))
+    elif isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        for item in value:
+            urls.extend(_urls_from_value(item))
+    return list(dict.fromkeys(urls))
+
+
+def _normalize_fixture_url(url: str) -> str:
+    return url.split("|", 1)[0].rstrip(").,|]")
+
+
+def _git_remote_url(config_path: Path) -> str | None:
+    parser = ConfigParser()
+    try:
+        parser.read(config_path, encoding="utf-8")
+    except OSError:
+        return None
+    for section in parser.sections():
+        if section.startswith('remote "') and parser.has_option(section, "url"):
+            return parser.get(section, "url")
+    return None
+
+
+def _search_score(query_terms: set[str], text: str) -> int:
+    if not query_terms:
+        return 0
+    text_terms = _search_terms(text)
+    return len(query_terms & text_terms)
+
+
+def _search_terms(text: str) -> set[str]:
+    stop_words = {
+        "and",
+        "for",
+        "from",
+        "https",
+        "http",
+        "the",
+        "www",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) >= 3 and token not in stop_words
+    }
+
+
+def _string_value(value: Any) -> str:
+    return value if isinstance(value, str) else ""
 
 
 async def _maybe_await(value: Any) -> Any:
