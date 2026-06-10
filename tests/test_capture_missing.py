@@ -134,6 +134,63 @@ def test_capture_missing_records_tool_http_404_url(
     assert manifest["response_metadata"][url]["status"] == 404
 
 
+def test_capture_missing_keeps_existing_recording_on_http_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    url = "https://gitlab.example/group/pkg/-/commit/abc123.patch"
+    web_cache = cases_dir / "web_cache" / "RHEL-12345"
+    patch_path = web_cache / "jira" / "patches" / "001.patch"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        f"ToolError('Failed to fetch patch from {url}: HTTP 404')\n",
+    )
+    patch_path.parent.mkdir(parents=True)
+    patch_path.write_text("diff --git a/source.c b/source.c\n", encoding="utf-8")
+    (web_cache / "manifest.json").write_text(
+        json.dumps(
+            {
+            "case_id": "RHEL-12345",
+            "required_urls": [url],
+            "recorded_files": {url: "jira/patches/001.patch"},
+            "response_metadata": {url: {"status": 200}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(_request, timeout: float):
+        assert timeout == 30.0
+        raise HTTPError(
+            url,
+            403,
+            "Forbidden",
+            {"Content-Type": "text/html"},
+            io.BytesIO(b"<html>forbidden</html>\n"),
+        )
+
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            allowed_hosts=("gitlab.example",),
+            overwrite=True,
+        )
+    )
+
+    manifest = json.loads((web_cache / "manifest.json").read_text(encoding="utf-8"))
+    assert result.captured == []
+    assert result.skipped[0].reason == "URL is already recorded with successful content"
+    assert manifest["recorded_files"][url] == "jira/patches/001.patch"
+    assert patch_path.read_text(encoding="utf-8") == "diff --git a/source.c b/source.c\n"
+
+
 def test_capture_missing_canonicalizes_escaped_newline_urls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

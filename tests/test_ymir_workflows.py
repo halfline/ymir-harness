@@ -12,6 +12,8 @@ import pytest
 import ymir_harness.ymir_workflows as workflow_module
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseRequest
 from ymir_harness.ymir_workflows import (
+    _ensure_mock_unpacked_sources,
+    _is_package_prep_command,
     make_ymir_backport_executor,
     make_ymir_rebuild_executor,
     make_ymir_rebase_executor,
@@ -485,6 +487,37 @@ def test_ymir_backport_executor_reports_missing_backport_result(tmp_path: Path) 
     assert execution.status == "failed"
     assert execution.actual_result is None
     assert execution.reason == "ymir backport workflow returned no backport result"
+
+
+def test_is_package_prep_command_detects_rhpkg_and_centpkg() -> None:
+    assert _is_package_prep_command(["rhpkg", "--release=rhel-9.6.0", "prep"])
+    assert _is_package_prep_command("centpkg --release=c9s prep")
+    assert not _is_package_prep_command(["git", "status"])
+    assert not _is_package_prep_command(["rhpkg", "sources"])
+
+
+def test_ensure_mock_unpacked_sources_creates_spec_builddir(tmp_path: Path) -> None:
+    (tmp_path / "redis.spec").write_text(
+        "Name: redis\nVersion: 6.2.20\n%prep\n%autosetup -p1\n",
+        encoding="utf-8",
+    )
+
+    source_dir = _ensure_mock_unpacked_sources(tmp_path)
+
+    assert source_dir == tmp_path / "redis-6.2.20"
+    assert (tmp_path / "redis-6.2.20").is_dir()
+
+
+def test_ensure_mock_unpacked_sources_honors_setup_name(tmp_path: Path) -> None:
+    (tmp_path / "pkg.spec").write_text(
+        "Name: pkg\nVersion: 1.0\n%prep\n%autosetup -n custom-source -p1\n",
+        encoding="utf-8",
+    )
+
+    source_dir = _ensure_mock_unpacked_sources(tmp_path)
+
+    assert source_dir == tmp_path / "custom-source"
+    assert (tmp_path / "custom-source").is_dir()
 
 
 def test_ymir_backport_executor_collects_artifacts_and_scope(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ import pytest
 from ymir_harness.jira_replay import parse_jira_replay_misses, write_jira_search_fixture
 from ymir_harness.ymir_gateway import (
     _install_optional_gateway_shims,
+    _patch_no_write_gateway_tools,
     _patch_ymir_jira_mock_remote_links,
 )
 
@@ -98,6 +99,85 @@ def test_patch_ymir_jira_mock_remote_links_returns_link_list(
     assert asyncio.run(read_remote_links()) == [
         {"object": {"url": "https://gitlab.example/group/pkg/-/merge_requests/7"}}
     ]
+
+
+def test_patch_no_write_gateway_tools_replays_zstream_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("ymir")
+    monkeypatch.setenv("DRY_RUN", "true")
+
+    _patch_no_write_gateway_tools()
+
+    from ymir.tools.privileged.distgit import CreateZstreamBranchTool
+
+    async def run_tool():
+        return await CreateZstreamBranchTool().run(
+            input={"package": "redis", "branch": "rhel-9.6.z"},
+        )
+
+    result = asyncio.run(run_tool())
+
+    assert result.result == "Z-Stream branch rhel-9.6.z already exists, no need to create it"
+
+
+def test_patch_no_write_gateway_tools_replays_lookaside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("ymir")
+    monkeypatch.setenv("DRY_RUN", "true")
+
+    _patch_no_write_gateway_tools()
+
+    from ymir.tools.privileged.lookaside import DownloadSourcesTool, PrepSourcesTool
+
+    async def run_tools():
+        input_data = {
+            "dist_git_path": tmp_path,
+            "package": "redis",
+            "dist_git_branch": "rhel-9.6.0",
+        }
+        download = await DownloadSourcesTool().run(input=input_data)
+        prep = await PrepSourcesTool().run(input=input_data)
+        return download.result, prep.result
+
+    assert asyncio.run(run_tools()) == (
+        "Successfully downloaded sources from replay cache",
+        "Successfully prepped sources from replay cache",
+    )
+
+
+def test_patch_no_write_gateway_tools_replays_patch_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("ymir")
+    patch_url = "https://gitlab.example/group/pkg/-/commit/abc123.patch"
+    cache_dir = tmp_path / "web_cache"
+    patch_path = cache_dir / "jira" / "patches" / "001.patch"
+    patch_path.parent.mkdir(parents=True)
+    patch_path.write_text("diff --git a/source.c b/source.c\n", encoding="utf-8")
+    (cache_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "recorded_files": {patch_url: "jira/patches/001.patch"},
+                "required_urls": [patch_url],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("YMIR_BENCHMARK_REPLAY_MANIFEST", str(cache_dir / "manifest.json"))
+
+    _patch_no_write_gateway_tools()
+
+    from ymir.tools.privileged.gitlab import GetPatchFromUrlTool
+
+    async def run_tool():
+        return await GetPatchFromUrlTool().run(input={"patch_url": patch_url})
+
+    assert asyncio.run(run_tool()).result == "diff --git a/source.c b/source.c\n"
 
 
 def test_patch_ymir_jira_mock_replays_cached_search(

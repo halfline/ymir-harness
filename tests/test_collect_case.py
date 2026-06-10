@@ -262,6 +262,135 @@ def test_collect_case_fails_when_explicit_gitlab_mr_is_private(
     assert seen_urls == [api_url]
 
 
+def test_collect_case_uses_gitlab_api_diff_when_mr_patch_is_forbidden(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    mr_url = "https://gitlab.com/redhat/rhel/rpms/redis/-/merge_requests/6"
+    commit_sha = "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
+    diff_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis"
+        f"/repository/commits/{commit_sha}/diff"
+    )
+    responses = {
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis/merge_requests/6": {
+            "iid": 6,
+            "target_branch": "rhel-9.6.0",
+            "web_url": mr_url,
+            "diff_refs": {
+                "base_sha": "4549b5e1d58b86ef6c81f4089684034c1d3b302d",
+                "head_sha": commit_sha,
+                "start_sha": "4549b5e1d58b86ef6c81f4089684034c1d3b302d",
+            },
+        },
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis/merge_requests/6/commits": [
+            {"id": commit_sha, "title": "rebase to 6.2.22"}
+        ],
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis/merge_requests/6/changes": {
+            "changes": [{"old_path": "redis.spec", "new_path": "redis.spec"}]
+        },
+        f"{mr_url}.patch": HTTPError(f"{mr_url}.patch", 403, "Forbidden", None, None),
+        diff_url: [
+            {
+                "old_path": "redis.spec",
+                "new_path": "redis.spec",
+                "diff": "@@ -1 +1 @@\n-Version: 6.2.20\n+Version: 6.2.22\n",
+                "new_file": False,
+                "deleted_file": False,
+            }
+        ],
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: "token")
+    monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            gitlab_mr_url=mr_url,
+        )
+    )
+
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    recorded = cases_dir / "web_cache" / "RHEL-12345" / manifest["recorded_files"][f"{mr_url}.patch"]
+    assert recorded.read_text(encoding="utf-8").startswith("diff --git a/redis.spec")
+    assert any("used GitLab API diff" in warning for warning in result.warnings)
+    assert diff_url in seen_urls
+
+
+def test_collect_case_uses_gitlab_api_diff_for_jira_commit_patch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    commit_sha = "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
+    patch_url = f"https://gitlab.com/redhat/rhel/rpms/redis/-/commit/{commit_sha}.patch"
+    diff_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis"
+        f"/repository/commits/{commit_sha}/diff"
+    )
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": (
+                        "Output from Ymir Backport Agent\n"
+                        f"*Resolution*: backport\n*Patch URL*: {patch_url}\n"
+                    )
+                }
+            ]
+        },
+    )
+    responses = {
+        patch_url: HTTPError(patch_url, 403, "Forbidden", None, None),
+        diff_url: [
+            {
+                "old_path": ".gitignore",
+                "new_path": ".gitignore",
+                "diff": "@@ -1 +1,2 @@\n old\n+new\n",
+                "new_file": False,
+                "deleted_file": False,
+            }
+        ],
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: "token")
+    monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            jira_comments_json=comments_json,
+        )
+    )
+
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    recorded = cases_dir / "web_cache" / "RHEL-12345" / manifest["recorded_files"][patch_url]
+    assert recorded.read_text(encoding="utf-8").startswith("diff --git a/.gitignore")
+    assert any("used GitLab API diff" in warning for warning in result.warnings)
+    assert diff_url in seen_urls
+
+
 def test_collect_case_refuses_to_overwrite_existing_files(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     request = CollectCaseRequest(
@@ -697,6 +826,7 @@ def test_collect_case_imports_completed_jira_without_repeated_metadata(
     assert expected["case_type"] == "cve_backport"
     assert expected["resolution"] == "backport"
     assert expected["package"] == "dnsmasq"
+    assert expected["target_branch"] == "c8s"
     assert expected["fix_version"] == "rhel-8.10.z"
     assert expected["cve_ids"] == ["CVE-2026-0001"]
     assert expected["expected_basis"] == "historical_jira_state"
@@ -818,7 +948,13 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [],
         "https://gitlab.example/api/v4/projects/redhat%2Frpms%2Fglib2/merge_requests/64": {
             "iid": 64,
+            "target_branch": "rhel-9.7.0",
             "web_url": mr_url,
+            "diff_refs": {
+                "base_sha": "base123",
+                "head_sha": "head123",
+                "start_sha": "start123",
+            },
         },
         "https://gitlab.example/api/v4/projects/redhat%2Frpms%2Fglib2/merge_requests/64/commits": [
             {"id": "abc123", "title": "Fix CVE"}
@@ -855,6 +991,7 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
     assert expected["case_type"] == "cve_backport"
     assert expected["resolution"] == "backport"
     assert expected["package"] == "glib2"
+    assert expected["target_branch"] == "rhel-9.7.0"
     assert expected["fix_version"] == "rhel-9.7.z"
     assert expected["network_mode"] == "replay_only"
     assert expected["patch_urls"] == [upstream_patch_url]

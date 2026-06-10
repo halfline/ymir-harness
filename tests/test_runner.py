@@ -52,7 +52,7 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["GOOGLE_VERTEX_LOCATION"] == "global"
     assert env["BENCHMARK_MAX_ITERATIONS_OVERRIDE"] == "50"
     assert env["BEEAI_MAX_ITERATIONS"] == "50"
-    assert "GITLAB_TOKEN" not in env
+    assert env["GITLAB_TOKEN"] == "prod-token"
     assert "JIRA_PASSWORD" not in env
     assert "KEYTAB_FILE" not in env
     assert "KRB5CCNAME" not in env
@@ -908,12 +908,21 @@ def test_build_run_report_clones_mock_repo_source_url(tmp_path: Path) -> None:
     repos = json.loads(env["YMIR_BENCHMARK_MOCK_REPOS"])
     local_path = Path(repos[0]["local_path"])
     gitconfig_text = Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
+    gateway_gitconfig = results_dir / ".mock_gitconfig_RHEL-12345"
     assert report.entries[0].status == "passed"
     assert (local_path / "source.c").read_text(encoding="utf-8") == "pre-fix\n"
+    branch_ref = subprocess.run(
+        ["git", "-C", str(local_path), "rev-parse", "c9s"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    assert branch_ref == pre_fix_ref
     assert repos[0]["original_url"] == original_url
     assert original_url in gitconfig_text
     assert original_url.removesuffix(".git") in gitconfig_text
     assert str(source_repo) not in gitconfig_text
+    assert gateway_gitconfig.read_text(encoding="utf-8") == gitconfig_text
     assert env["MOCK_BLOCKED_URLS"].splitlines() == [
         original_url,
         original_url.removesuffix(".git"),
@@ -988,12 +997,14 @@ def test_build_run_report_rewrites_source_cache_git_remotes(tmp_path: Path) -> N
 
     env = requests[0].environment
     gitconfig_text = Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
+    gateway_gitconfig = results_dir / ".mock_gitconfig_RHEL-12345"
     blocked_urls = env["MOCK_BLOCKED_URLS"].splitlines()
     assert report.entries[0].status == "passed"
     assert original_url in gitconfig_text
     assert original_url.removesuffix(".git") in gitconfig_text
     assert fedora_url in gitconfig_text
     assert fedora_url.removesuffix(".git") in gitconfig_text
+    assert gateway_gitconfig.read_text(encoding="utf-8") == gitconfig_text
     assert original_url in blocked_urls
     assert fedora_url in blocked_urls
 
