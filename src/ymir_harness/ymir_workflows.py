@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
@@ -524,6 +524,7 @@ class _InstrumentedChatModel:
             agent=self._agent_name,
             chat_model_type=type(self._model).__name__,
             message_count=_safe_len(messages),
+            message_summary=_message_summary(messages),
             option_keys=sorted(options),
         )
         run = self._model.run(messages, **options)
@@ -613,6 +614,13 @@ class _InstrumentedAgent:
         )
         try:
             awaitable = self._agent.run(*args, **kwargs)
+            _workflow_debug(
+                self._request,
+                "agent_run_awaitable_created",
+                agent=self._agent_name,
+                awaitable_type=type(awaitable).__name__,
+                args_summary=_agent_args_summary(args, kwargs),
+            )
             if timeout is None:
                 result = await awaitable
             else:
@@ -643,6 +651,129 @@ def _safe_len(value: Any) -> int | None:
         return len(value)
     except TypeError:
         return None
+
+
+def _agent_args_summary(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "arg_count": len(args),
+        "kwarg_keys": sorted(str(key) for key in kwargs),
+    }
+    if args:
+        first = args[0]
+        if isinstance(first, str):
+            summary["first_arg_chars"] = len(first)
+            summary["first_arg_head"] = first[:200]
+        else:
+            summary["first_arg_type"] = type(first).__name__
+    expected_output = kwargs.get("expected_output")
+    if expected_output is not None:
+        summary["expected_output"] = getattr(expected_output, "__name__", type(expected_output).__name__)
+    return summary
+
+
+def _message_summary(messages: Any) -> dict[str, Any]:
+    if not isinstance(messages, Sequence) or isinstance(messages, str | bytes):
+        return {"type": type(messages).__name__}
+    total_chars = 0
+    summaries: list[dict[str, Any]] = []
+    for message in messages[-3:]:
+        text = _message_text(message)
+        total_chars += len(text)
+        summaries.append(
+            {
+                "type": type(message).__name__,
+                "chars": len(text),
+                "head": text[:160],
+            }
+        )
+    return {
+        "recent": summaries,
+        "recent_total_chars": total_chars,
+    }
+
+
+def _message_text(message: Any) -> str:
+    if isinstance(message, str):
+        return message
+    text = getattr(message, "text", None)
+    if isinstance(text, str):
+        return text
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Sequence) and not isinstance(content, str | bytes):
+        return "\n".join(_message_text(item) for item in content)
+    return str(message)
+
+
+def _request_from_environment() -> RunCaseRequest:
+    return RunCaseRequest(
+        case_id=os.getenv("YMIR_BENCHMARK_CASE_ID", "unknown"),
+        case_type=None,
+        expected_path=Path(os.devnull),
+        actual_path=Path(os.devnull),
+        cases_dir=Path(os.getenv("YMIR_BENCHMARK_CASES_DIR", ".")),
+        results_dir=Path(os.getenv("YMIR_BENCHMARK_RESULTS_DIR", ".")),
+        repetition=_environment_int("YMIR_BENCHMARK_REPETITION", default=0),
+        variant="debug",
+        features=(),
+        environment=dict(os.environ),
+    )
+
+
+def _workflow_state_snapshot(state: Any) -> dict[str, Any]:
+    names = (
+        "package",
+        "dist_git_branch",
+        "jira_issue",
+        "attempts_remaining",
+        "incremental_fix_attempts_remaining",
+        "build_error",
+        "abandon_autorelease",
+        "used_cherry_pick_workflow",
+    )
+    snapshot = {
+        name: _json_safe_value(getattr(state, name))
+        for name in names
+        if hasattr(state, name)
+    }
+    backport_result = getattr(state, "backport_result", None)
+    if backport_result is not None:
+        payload = _model_payload(backport_result)
+        snapshot["backport_result"] = {
+            key: _json_safe_value(payload.get(key))
+            for key in ("success", "status", "error", "srpm_path")
+            if key in payload
+        }
+    upstream_patches = getattr(state, "upstream_patches", None)
+    if upstream_patches is not None:
+        snapshot["upstream_patch_count"] = _safe_len(upstream_patches)
+    local_clone = getattr(state, "local_clone", None)
+    if local_clone is not None:
+        snapshot["local_clone"] = str(local_clone)
+    unpacked_sources = getattr(state, "unpacked_sources", None)
+    if unpacked_sources is not None:
+        snapshot["unpacked_sources"] = str(unpacked_sources)
+    return snapshot
+
+
+def _environment_int(name: str, *, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return [_json_safe_value(item) for item in value[:10]]
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_value(item) for key, item in list(value.items())[:10]}
+    return str(value)
 
 
 def _workflow_debug(
@@ -759,6 +890,7 @@ def _backport_dependencies(
     from ymir.agents import backport_agent as backport_module  # type: ignore[import-not-found]
 
     _patch_backport_no_write_subprocesses(backport_module)
+    _patch_backport_workflow_step_logging(backport_module)
     _patch_no_write_candidate_build_lookup()
 
     return workflow or backport_module.run_workflow, agent_factory or backport_module.create_backport_agent
@@ -798,6 +930,68 @@ def _patch_backport_no_write_subprocesses(backport_module: Any) -> None:
     backport_module.check_subprocess = harness_check_subprocess
     backport_module.tasks.get_unpacked_sources = harness_get_unpacked_sources
     backport_module._ymir_harness_check_subprocess_patched = True
+
+
+def _patch_backport_workflow_step_logging(backport_module: Any) -> None:
+    if getattr(backport_module, "_ymir_harness_workflow_step_logging_patched", False):
+        return
+
+    workflow_class = getattr(backport_module, "Workflow", None)
+    if workflow_class is None:
+        return
+
+    original_add_step = workflow_class.add_step
+
+    def harness_add_step(self: Any, step_name: Any, runnable: Any) -> Any:
+        if os.getenv("DRY_RUN", "False").lower() != "true":
+            return original_add_step(self, step_name, runnable)
+
+        async def logged_step(state: Any) -> Any:
+            request = _request_from_environment()
+            started_at = time.monotonic()
+            _workflow_debug(
+                request,
+                "ymir_step_start",
+                workflow="backport",
+                step=str(step_name),
+                state=_workflow_state_snapshot(state),
+            )
+            try:
+                result = await _maybe_await(runnable(state))
+            except BaseException as exc:
+                _workflow_debug(
+                    request,
+                    "ymir_step_errored",
+                    workflow="backport",
+                    step=str(step_name),
+                    elapsed_seconds=round(time.monotonic() - started_at, 3),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    error_detail="".join(traceback.format_exception(exc)),
+                    state=_workflow_state_snapshot(state),
+                )
+                raise
+            _workflow_debug(
+                request,
+                "ymir_step_finished",
+                workflow="backport",
+                step=str(step_name),
+                next_step=str(result),
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                state=_workflow_state_snapshot(state),
+            )
+            return result
+
+        return original_add_step(self, step_name, logged_step)
+
+    workflow_class.add_step = harness_add_step
+    backport_module._ymir_harness_workflow_step_logging_patched = True
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def _patch_no_write_candidate_build_lookup() -> None:

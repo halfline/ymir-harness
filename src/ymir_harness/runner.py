@@ -528,6 +528,7 @@ def _run_case_result(
             replay_manifest_path=replay_policy.manifest_path,
             recorded_urls=replay_policy.recorded_urls,
         )
+        environment["YMIR_BENCHMARK_REPETITION"] = str(repetition)
         environment.update(artifact_environment(actual_path))
         environment.update(mock_repo_env)
         _apply_source_cache_git_rewrites(environment, cases_dir, results_dir, case_id, repetition)
