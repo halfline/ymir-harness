@@ -407,8 +407,16 @@ def _fetch_evidence(
                 result=result,
             )
         except CollectCaseError as exc:
-            result.warnings.append(f"skipped Jira patch URL {patch_url}: {exc}")
-            continue
+            try:
+                patch_body = _gitlab_commit_api_diff_patch_body_for_url(
+                    patch_url,
+                    request=request,
+                    result=result,
+                )
+            except CollectCaseError:
+                result.warnings.append(f"skipped Jira patch URL {patch_url}: {exc}")
+                continue
+            result.warnings.append(f"used GitLab API diff for {patch_url}: {exc}")
         if not _looks_like_patch(patch_body):
             result.warnings.append(
                 f"skipped Jira patch URL {patch_url}: fetched content is not a patch"
@@ -503,12 +511,21 @@ def _fetch_gitlab_mr_evidence(
         raise CollectCaseError(f"failed to fetch GitLab MR metadata: {gitlab_mr_url}")
 
     gitlab_patch_url = gitlab_urls["patch"]
-    gitlab_patch_body = _fetch_bytes(
-        gitlab_patch_url,
-        headers=gitlab_headers,
-        request=request,
-        result=result,
-    )
+    try:
+        gitlab_patch_body = _fetch_bytes(
+            gitlab_patch_url,
+            headers=gitlab_headers,
+            request=request,
+            result=result,
+        )
+    except CollectCaseError as exc:
+        gitlab_patch_body = _gitlab_mr_api_diff_patch_body(
+            gitlab_mr_url,
+            gitlab_commits,
+            request=request,
+            result=result,
+        )
+        result.warnings.append(f"used GitLab API diff for {gitlab_patch_url}: {exc}")
     gitlab_records.append(
         FetchedRecord(
             url=gitlab_patch_url,
@@ -828,6 +845,105 @@ def _gitlab_project_url_from_mr_patch_url(url: str) -> str | None:
     if not project_path:
         return None
     return f"{parsed.scheme}://{parsed.netloc}{project_path}"
+
+
+def _gitlab_mr_api_diff_patch_body(
+    mr_url: str,
+    commits: Any,
+    *,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> bytes:
+    parsed = urlparse(mr_url)
+    marker = "/-/merge_requests/"
+    if marker not in parsed.path:
+        raise CollectCaseError(f"GitLab MR URL must contain {marker}: {mr_url}")
+    project_path = parsed.path.strip("/").split(marker, 1)[0]
+    commit_ids = [
+        commit.get("id")
+        for commit in commits
+        if isinstance(commit, Mapping) and isinstance(commit.get("id"), str)
+    ] if isinstance(commits, list) else []
+    if not commit_ids:
+        raise CollectCaseError(f"GitLab MR has no commits for API diff fallback: {mr_url}")
+    return b"".join(
+        _gitlab_commit_api_diff_patch_body(
+            project_path,
+            commit_id,
+            request=request,
+            result=result,
+        )
+        for commit_id in commit_ids
+    )
+
+
+def _gitlab_commit_api_diff_patch_body_for_url(
+    patch_url: str,
+    *,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> bytes:
+    parsed = urlparse(patch_url)
+    marker = "/-/commit/"
+    if parsed.hostname != "gitlab.com" or marker not in parsed.path:
+        raise CollectCaseError(f"not a GitLab commit patch URL: {patch_url}")
+    project_path, commit_part = parsed.path.strip("/").split(marker, 1)
+    commit_id = commit_part.split("/", 1)[0].removesuffix(".patch")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit_id):
+        raise CollectCaseError(f"GitLab commit patch URL lacks a commit SHA: {patch_url}")
+    return _gitlab_commit_api_diff_patch_body(
+        project_path,
+        commit_id,
+        request=request,
+        result=result,
+    )
+
+
+def _gitlab_commit_api_diff_patch_body(
+    project_path: str,
+    commit_id: str,
+    *,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> bytes:
+    project = quote(unquote(project_path), safe="")
+    url = f"https://gitlab.com/api/v4/projects/{project}/repository/commits/{commit_id}/diff"
+    body = _fetch_bytes(
+        url,
+        headers=_gitlab_headers(request.gitlab_token_env),
+        request=request,
+        result=result,
+    )
+    diffs = _json_value_from_body(body, url)
+    if not isinstance(diffs, list):
+        raise CollectCaseError(f"GitLab commit diff API returned non-list JSON: {url}")
+    return _gitlab_api_diffs_to_patch(diffs)
+
+
+def _gitlab_api_diffs_to_patch(diffs: Sequence[Any]) -> bytes:
+    parts: list[str] = []
+    for item in diffs:
+        if not isinstance(item, Mapping):
+            continue
+        old_path = _nonempty_string(item.get("old_path"))
+        new_path = _nonempty_string(item.get("new_path"))
+        diff = item.get("diff")
+        if old_path is None or new_path is None or not isinstance(diff, str):
+            continue
+        a_path = "/dev/null" if item.get("new_file") else f"a/{old_path}"
+        b_path = "/dev/null" if item.get("deleted_file") else f"b/{new_path}"
+        parts.extend(
+            [
+                f"diff --git a/{old_path} b/{new_path}\n",
+                f"--- {a_path}\n",
+                f"+++ {b_path}\n",
+                diff if diff.endswith("\n") else diff + "\n",
+            ]
+        )
+    body = "".join(parts).encode("utf-8")
+    if not _looks_like_patch(body):
+        raise CollectCaseError("GitLab commit diff API returned no patch content")
+    return body
 
 
 def _patch_commit_shas(body: bytes) -> list[str]:
@@ -1201,6 +1317,8 @@ def _complete_request(
         target_branch=target_branch,
         fix_version=fix_version,
     )
+    if target_branch is None and mock_repo is not None:
+        target_branch = mock_repo.branch
 
     return replace(
         request,
@@ -1210,6 +1328,7 @@ def _complete_request(
         expected_basis=request.expected_basis
         or ("historical_jira_state" if issue is not None else "manual_review"),
         network_mode=request.network_mode or _derive_network_mode(request, fetched),
+        target_branch=target_branch,
         fix_version=fix_version,
         cve_ids=request.cve_ids or tuple(_derive_cve_ids(issue, comments)),
         mock_repo=mock_repo,
@@ -1229,7 +1348,7 @@ def _localize_mock_repo_cache(request: CollectCaseRequest) -> CollectCaseRequest
     if destination.exists():
         _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
     else:
-        _run_git(["clone", "--mirror", "--quiet", source, str(destination)], destination)
+        _run_git(_git_clone_command(source, str(destination), request.gitlab_token_env), destination)
 
     _run_git(
         ["-C", str(destination), "cat-file", "-e", f"{mock_repo.pre_fix_ref}^{{commit}}"],
@@ -1259,7 +1378,35 @@ def _run_git(command: Sequence[str], cwd: Path) -> None:
     if completed.returncode != 0:
         stderr = completed.stderr.strip()
         detail = f": {stderr}" if stderr else ""
-        raise CollectCaseError(f"git {' '.join(command)} failed{detail}")
+        raise CollectCaseError(f"git {' '.join(_redacted_git_command(command))} failed{detail}")
+
+
+def _git_clone_command(source: str, destination: str, gitlab_token_env: str) -> list[str]:
+    command = ["clone", "--mirror", "--quiet", source, destination]
+    token = _gitlab_token(gitlab_token_env)
+    if token and _is_gitlab_https_url(source):
+        authorization = base64.b64encode(f"oauth2:{token}".encode("utf-8")).decode("ascii")
+        return [
+            "-c",
+            f"http.https://gitlab.com/.extraHeader=Authorization: Basic {authorization}",
+            *command,
+        ]
+    return command
+
+
+def _is_gitlab_https_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and parsed.hostname == "gitlab.com"
+
+
+def _redacted_git_command(command: Sequence[str]) -> list[str]:
+    redacted = []
+    for part in command:
+        if part.startswith("http.https://gitlab.com/.extraHeader=Authorization:"):
+            redacted.append("http.https://gitlab.com/.extraHeader=Authorization: <redacted>")
+        else:
+            redacted.append(part)
+    return redacted
 
 
 def _evidence_issue(
@@ -2226,7 +2373,7 @@ def _cache_upstream_source_repo(
                 return
             _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
         else:
-            _run_git(["clone", "--mirror", "--quiet", remote_url, str(destination)], destination)
+            _run_git(_git_clone_command(remote_url, str(destination), request.gitlab_token_env), destination)
     except CollectCaseError as exc:
         if not destination.exists():
             result.warnings.append(f"skipped upstream source cache for {project_url}: {exc}")

@@ -54,8 +54,6 @@ NO_WRITE_ENVIRONMENT = {
 }
 SENSITIVE_ENVIRONMENT_NAMES = frozenset(
     {
-        "GITLAB_PRIVATE_TOKEN",
-        "GITLAB_TOKEN",
         "JIRA_API_TOKEN",
         "JIRA_PASSWORD",
         "JIRA_TOKEN",
@@ -405,6 +403,7 @@ def _run_case_result(
         environment.update(artifact_environment(actual_path))
         environment.update(mock_repo_env)
         _apply_source_cache_git_rewrites(environment, cases_dir, results_dir, case_id, repetition)
+        _write_gateway_gitconfig(environment, results_dir, case_id)
         request = RunCaseRequest(
             case_id=case_id,
             case_type=case_type,
@@ -590,6 +589,23 @@ def _apply_source_cache_git_rewrites(
     ]
     blocked_urls.extend(canonicalize_replay_url(original) for original, _local in rewrites)
     environment["MOCK_BLOCKED_URLS"] = "\n".join(dict.fromkeys(url for url in blocked_urls if url))
+
+
+def _write_gateway_gitconfig(environment: dict[str, str], results_dir: Path, case_id: str) -> None:
+    gitconfig_value = environment.get("GIT_CONFIG_GLOBAL")
+    if not gitconfig_value:
+        return
+
+    source = Path(gitconfig_value)
+    if not source.is_file():
+        return
+
+    base = Path(environment.get("GIT_REPO_BASEPATH", str(results_dir.resolve())))
+    destination = base / f".mock_gitconfig_{case_id}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.resolve(strict=False) == source.resolve(strict=False):
+        return
+    destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def _source_cache_git_rewrites(cases_dir: Path, case_id: str) -> tuple[tuple[str, str], ...]:

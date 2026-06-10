@@ -158,6 +158,7 @@ def _materialize_repo(
     destination = workdir / _repo_dir_name(package, index)
     _run_git(["clone", "--quiet", source, str(destination)], mock_path)
     _run_git(["-C", str(destination), "checkout", "--quiet", "--detach", pre_fix_ref], mock_path)
+    _run_git(["-C", str(destination), "branch", "--force", branch, pre_fix_ref], mock_path)
 
     return MaterializedRepo(
         package=package,
