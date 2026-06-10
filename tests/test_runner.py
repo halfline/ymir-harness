@@ -343,6 +343,7 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     )
     assert requests[0].environment["DRY_RUN"] == "true"
     assert requests[0].environment["YMIR_BENCHMARK_CASE_ID"] == "RHEL-12345"
+    assert requests[0].environment["YMIR_BENCHMARK_REPETITION"] == "1"
     assert requests[0].environment["JIRA_TOKEN"] == "ymir-harness-token"
     assert requests[0].environment["CHAT_MODEL"] == DEFAULT_CHAT_MODEL
     assert requests[0].environment["JIRA_MOCK_FILES"] == str(
@@ -351,6 +352,7 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     assert requests[1].environment["JIRA_MOCK_FILES"] == str(
         results_dir.resolve() / "repeat-2" / "jira-mock"
     )
+    assert requests[1].environment["YMIR_BENCHMARK_REPETITION"] == "2"
     jira_payload = json.loads(
         (results_dir.resolve() / "repeat-1" / "jira-mock" / "RHEL-12345").read_text(
             encoding="utf-8"
