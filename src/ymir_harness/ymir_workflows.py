@@ -759,6 +759,7 @@ def _backport_dependencies(
     from ymir.agents import backport_agent as backport_module  # type: ignore[import-not-found]
 
     _patch_backport_no_write_subprocesses(backport_module)
+    _patch_no_write_candidate_build_lookup()
 
     return workflow or backport_module.run_workflow, agent_factory or backport_module.create_backport_agent
 
@@ -797,6 +798,37 @@ def _patch_backport_no_write_subprocesses(backport_module: Any) -> None:
     backport_module.check_subprocess = harness_check_subprocess
     backport_module.tasks.get_unpacked_sources = harness_get_unpacked_sources
     backport_module._ymir_harness_check_subprocess_patched = True
+
+
+def _patch_no_write_candidate_build_lookup() -> None:
+    try:
+        from ymir.common import utils as utils_module  # type: ignore[import-not-found]
+        from ymir.tools.unprivileged import specfile as specfile_module  # type: ignore[import-not-found]
+        from ymir_harness.koji_replay import recorded_candidate_build_from_environment
+    except ImportError:
+        return
+
+    if getattr(specfile_module, "_ymir_harness_candidate_build_patched", False):
+        return
+
+    original_specfile_get_latest_candidate_build = specfile_module.get_latest_candidate_build
+    original_utils_get_latest_candidate_build = utils_module.get_latest_candidate_build
+
+    async def harness_get_latest_candidate_build(
+        package: str,
+        dist_git_branch: str,
+    ) -> tuple[Any, str]:
+        if os.getenv("DRY_RUN", "False").lower() != "true":
+            return await original_utils_get_latest_candidate_build(package, dist_git_branch)
+
+        return recorded_candidate_build_from_environment(package, dist_git_branch)
+
+    specfile_module.get_latest_candidate_build = harness_get_latest_candidate_build
+    utils_module.get_latest_candidate_build = harness_get_latest_candidate_build
+    specfile_module._ymir_harness_candidate_build_patched = True
+    specfile_module._ymir_harness_original_get_latest_candidate_build = (
+        original_specfile_get_latest_candidate_build
+    )
 
 
 def _is_package_prep_command(cmd: str | list[str]) -> bool:
@@ -984,6 +1016,7 @@ def _agent_class_workflow(
 ) -> AsyncWorkflow:
     ensure_ymir_source_path()
     module = importlib.import_module(module_name)
+    _patch_no_write_candidate_build_lookup()
 
     for class_name in class_names:
         workflow_class = getattr(module, class_name, None)

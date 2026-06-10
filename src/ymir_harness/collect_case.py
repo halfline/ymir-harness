@@ -23,6 +23,12 @@ from urllib.request import Request, urlopen
 import yaml
 
 from ymir_harness.jira_replay import derive_as_of_from_comments, filter_comments_as_of
+from ymir_harness.koji_replay import (
+    KOJI_CANDIDATE_BUILDS_MANIFEST_KEY,
+    candidate_build_branches,
+    candidate_build_key,
+    fetch_candidate_build,
+)
 from ymir_harness.models import (
     ALLOWED_ANSWER_LEAKAGE,
     ALLOWED_CASE_STATUSES,
@@ -161,6 +167,7 @@ class FetchedEvidence:
     gitlab_patch_url: str | None = None
     gitlab_patch_body: bytes | None = None
     web_records: tuple[FetchedRecord, ...] = ()
+    koji_candidate_builds: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -232,6 +239,7 @@ def collect_case(request: CollectCaseRequest) -> CollectCaseResult:
     fetched = _fetch_evidence(request, result)
     request = _complete_request(request, fetched)
     request = _localize_mock_repo_cache(request)
+    fetched = replace(fetched, koji_candidate_builds=_fetch_koji_candidate_builds(request, result))
     _validate_request(request, require_metadata=True)
     cases_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1344,6 +1352,33 @@ def _complete_request(
     )
 
 
+def _fetch_koji_candidate_builds(
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> dict[str, Any]:
+    if request.network_mode == "network_denied":
+        return {}
+    if request.resolution not in {"backport", "rebase", "rebuild"}:
+        return {}
+    if not request.package or not request.target_branch:
+        return {}
+    if not (request.jira_url or request.jira_base_url or request.gitlab_mr_url):
+        return {}
+
+    records: dict[str, Any] = {}
+    for branch in candidate_build_branches(request.target_branch):
+        try:
+            record = fetch_candidate_build(request.package, branch)
+        except Exception as exc:
+            result.warnings.append(
+                "skipped Koji candidate build "
+                f"for {request.package} {branch}: {exc}"
+            )
+            continue
+        records[candidate_build_key(request.package, branch)] = record
+    return records
+
+
 def _localize_mock_repo_cache(request: CollectCaseRequest) -> CollectCaseRequest:
     if request.mock_repo_cache is None or request.mock_repo is None:
         return request
@@ -2278,7 +2313,7 @@ def _write_web_cache(
         _write_bytes(destination, record.body, overwrite=request.overwrite, result=result)
         recorded_files[record.url] = record.relative_path
 
-    if required_urls or request.network_mode == "replay_only":
+    if required_urls or fetched.koji_candidate_builds or request.network_mode == "replay_only":
         _write_json(
             cache_dir / "manifest.json",
             {
@@ -2287,6 +2322,7 @@ def _write_web_cache(
                 "case_type": request.case_type,
                 "required_urls": required_urls,
                 "recorded_files": recorded_files,
+                KOJI_CANDIDATE_BUILDS_MANIFEST_KEY: dict(fetched.koji_candidate_builds),
             },
             overwrite=request.overwrite,
             result=result,
