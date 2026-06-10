@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from urllib.error import HTTPError
@@ -1519,6 +1521,67 @@ def test_collect_case_caches_mock_repo_source(tmp_path: Path) -> None:
 
     report = validate_case_directory(cases_dir, workflow="ymir-triage")
     assert not report.has_blocking_errors
+
+
+def test_collect_case_caches_lookaside_sources_from_prefixed_mock_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_body = b"source archive\n"
+    archive_hash = hashlib.sha512(archive_body).hexdigest()
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    (source_repo / "redis.spec").write_text(
+        "Name: redis\nVersion: 6.2.20\nSource0: redis-6.2.20.tar.gz\n",
+        encoding="utf-8",
+    )
+    (source_repo / "sources").write_text(
+        f"SHA512 (redis-6.2.20.tar.gz) = {archive_hash}\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source_repo), "add", "redis.spec", "sources"], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-q", "-m", "add sources"], check=True)
+    pre_fix_ref = subprocess.check_output(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    rhpkg = bin_dir / "rhpkg"
+    rhpkg.write_text(
+        "#!/bin/sh\n"
+        "printf 'source archive\\n' > redis-6.2.20.tar.gz\n",
+        encoding="utf-8",
+    )
+    rhpkg.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.0",
+            mock_repo=MockRepoInput(
+                remote_url="https://gitlab.example/group/redis.git",
+                source_url=str(source_repo),
+                pre_fix_ref=pre_fix_ref,
+                branch="rhel-9.6.0",
+            ),
+        )
+    )
+
+    cached_archive = (
+        tmp_path
+        / "benchmark_cases"
+        / "source_cache"
+        / "RHEL-12345"
+        / "lookaside"
+        / "redis-6.2.20.tar.gz"
+    )
+    assert cached_archive.read_bytes() == archive_body
+    assert result.warnings == []
 
 
 def test_collect_case_caches_gitlab_project_source_by_default(

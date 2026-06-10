@@ -126,7 +126,12 @@ def test_patch_no_write_gateway_tools_replays_lookaside(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pytest.importorskip("ymir")
+    source_cache = tmp_path / "source_cache"
+    lookaside = source_cache / "lookaside"
+    lookaside.mkdir(parents=True)
+    (lookaside / "redis-6.2.20.tar.gz").write_text("archive\n", encoding="utf-8")
     monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("YMIR_BENCHMARK_SOURCE_CACHE_DIR", str(source_cache))
 
     _patch_no_write_gateway_tools()
 
@@ -143,9 +148,10 @@ def test_patch_no_write_gateway_tools_replays_lookaside(
         return download.result, prep.result
 
     assert asyncio.run(run_tools()) == (
-        "Successfully downloaded sources from replay cache",
+        "Successfully downloaded sources from replay cache (1 file(s))",
         "Successfully prepped sources from replay cache",
     )
+    assert (tmp_path / "redis-6.2.20.tar.gz").read_text(encoding="utf-8") == "archive\n"
 
 
 def test_patch_no_write_gateway_tools_replays_patch_url(

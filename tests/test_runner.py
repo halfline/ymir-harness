@@ -48,6 +48,10 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["AUTO_CHAIN"] == "false"
     assert env["SILENT_RUN"] == "true"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_AUTHOR_NAME"] == "Ymir Harness"
+    assert env["GIT_AUTHOR_EMAIL"] == "ymir-harness@example.invalid"
+    assert env["GIT_COMMITTER_NAME"] == "Ymir Harness"
+    assert env["GIT_COMMITTER_EMAIL"] == "ymir-harness@example.invalid"
     assert env["CHAT_MODEL"] == DEFAULT_CHAT_MODEL
     assert env["GOOGLE_VERTEX_LOCATION"] == "global"
     assert env["BENCHMARK_MAX_ITERATIONS_OVERRIDE"] == "50"

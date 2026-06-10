@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import tarfile
 import types
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,9 +14,9 @@ import pytest
 import ymir_harness.ymir_workflows as workflow_module
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseRequest
 from ymir_harness.ymir_workflows import (
-    _ensure_mock_unpacked_sources,
     _instrument_agent_factory,
     _is_package_prep_command,
+    _materialize_replay_unpacked_sources,
     make_ymir_backport_executor,
     make_ymir_rebuild_executor,
     make_ymir_rebase_executor,
@@ -498,28 +499,51 @@ def test_is_package_prep_command_detects_rhpkg_and_centpkg() -> None:
     assert not _is_package_prep_command(["rhpkg", "sources"])
 
 
-def test_ensure_mock_unpacked_sources_creates_spec_builddir(tmp_path: Path) -> None:
+def test_materialize_replay_unpacked_sources_extracts_source0_archive(tmp_path: Path) -> None:
     (tmp_path / "redis.spec").write_text(
-        "Name: redis\nVersion: 6.2.20\n%prep\n%autosetup -p1\n",
+        "Name: redis\nVersion: 6.2.20\nSource0: %{name}-%{version}.tar.gz\n%prep\n%autosetup -p1\n",
         encoding="utf-8",
     )
+    source_tree = tmp_path / "archive" / "redis-6.2.20"
+    source_tree.mkdir(parents=True)
+    (source_tree / "README").write_text("real source\n", encoding="utf-8")
+    with tarfile.open(tmp_path / "redis-6.2.20.tar.gz", "w:gz") as archive:
+        archive.add(source_tree, arcname="redis-6.2.20")
 
-    source_dir = _ensure_mock_unpacked_sources(tmp_path)
+    source_dir = _materialize_replay_unpacked_sources(tmp_path)
 
     assert source_dir == tmp_path / "redis-6.2.20"
-    assert (tmp_path / "redis-6.2.20").is_dir()
+    assert (tmp_path / "redis-6.2.20" / "README").read_text(encoding="utf-8") == "real source\n"
 
 
-def test_ensure_mock_unpacked_sources_honors_setup_name(tmp_path: Path) -> None:
+def test_materialize_replay_unpacked_sources_uses_sources_file_fallback(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "pkg.spec").write_text(
         "Name: pkg\nVersion: 1.0\n%prep\n%autosetup -n custom-source -p1\n",
         encoding="utf-8",
     )
+    (tmp_path / "sources").write_text("SHA512 (custom.tar.gz) = abc123\n", encoding="utf-8")
+    source_tree = tmp_path / "archive" / "upstream-name"
+    source_tree.mkdir(parents=True)
+    (source_tree / "source.c").write_text("real source\n", encoding="utf-8")
+    with tarfile.open(tmp_path / "custom.tar.gz", "w:gz") as archive:
+        archive.add(source_tree, arcname="upstream-name")
 
-    source_dir = _ensure_mock_unpacked_sources(tmp_path)
+    source_dir = _materialize_replay_unpacked_sources(tmp_path)
 
     assert source_dir == tmp_path / "custom-source"
-    assert (tmp_path / "custom-source").is_dir()
+    assert (tmp_path / "custom-source" / "source.c").read_text(encoding="utf-8") == "real source\n"
+
+
+def test_materialize_replay_unpacked_sources_reports_missing_archive(tmp_path: Path) -> None:
+    (tmp_path / "redis.spec").write_text(
+        "Name: redis\nVersion: 6.2.20\nSource0: %{name}-%{version}.tar.gz\n",
+        encoding="utf-8",
+    )
+
+    assert _materialize_replay_unpacked_sources(tmp_path) is None
+    assert not (tmp_path / "redis-6.2.20").exists()
 
 
 def test_instrument_agent_factory_logs_agent_run(
