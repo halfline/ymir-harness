@@ -140,6 +140,8 @@ def build_no_write_environment(
     env.setdefault("GIT_REPO_BASEPATH", str(results_dir.resolve()))
     env["YMIR_BENCHMARK_CASES_DIR"] = str(cases_dir.resolve())
     env["YMIR_BENCHMARK_RESULTS_DIR"] = str(results_dir.resolve())
+    if case_id:
+        _install_dry_run_command_shims(env, results_dir, case_id)
     env.setdefault("GIT_AUTHOR_NAME", "Ymir Harness")
     env.setdefault("GIT_AUTHOR_EMAIL", "ymir-harness@example.invalid")
     env.setdefault("GIT_COMMITTER_NAME", "Ymir Harness")
@@ -170,6 +172,128 @@ def build_no_write_environment(
         env.pop("YMIR_BENCHMARK_WEB_CACHE_DIR", None)
         env.pop("YMIR_BENCHMARK_SOURCE_CACHE_DIR", None)
     return env
+
+
+def _install_dry_run_command_shims(
+    environment: dict[str, str],
+    results_dir: Path,
+    case_id: str,
+) -> None:
+    shim_dir = results_dir.resolve() / f".ymir-harness-shims-{case_id}"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    scripts = {
+        "rhpkg": _PACKAGE_TOOL_SHIM,
+        "centpkg": _PACKAGE_TOOL_SHIM,
+        "rpmbuild": _RPMBUILD_SHIM,
+        "patch": _PATCH_SHIM,
+    }
+    for name, script in scripts.items():
+        path = shim_dir / name
+        path.write_text(script, encoding="utf-8")
+        path.chmod(0o755)
+
+    existing_path = environment.get("PATH", "")
+    environment["PATH"] = (
+        f"{shim_dir}{os.pathsep}{existing_path}" if existing_path else str(shim_dir)
+    )
+    environment["YMIR_BENCHMARK_COMMAND_SHIMS"] = str(shim_dir)
+
+
+_PACKAGE_TOOL_SHIM = """#!/bin/sh
+set -eu
+
+last=
+for arg in "$@"; do
+    last=$arg
+done
+
+case "$last" in
+    prep|sources)
+        exit 0
+        ;;
+    srpm)
+        spec=$(find . -maxdepth 1 -name '*.spec' -print | head -n 1)
+        name=${spec#./}
+        name=${name%.spec}
+        if [ -z "$name" ]; then
+            name=ymir-harness
+        fi
+        artifact="$(pwd)/${name}-dry-run.src.rpm"
+        printf 'ymir-harness dry-run SRPM for %s\\n' "$name" > "$artifact"
+        printf 'Wrote: %s\\n' "$artifact"
+        exit 0
+        ;;
+esac
+
+printf 'ymir-harness dry-run %s' "$(basename "$0")" >&2
+for arg in "$@"; do
+    printf ' %s' "$arg" >&2
+done
+printf '\\n' >&2
+exit 0
+"""
+
+
+_RPMBUILD_SHIM = """#!/bin/sh
+set -eu
+
+spec=
+for arg in "$@"; do
+    case "$arg" in
+        *.spec)
+            spec=$arg
+            ;;
+    esac
+done
+
+name=${spec##*/}
+name=${name%.spec}
+if [ -z "$name" ]; then
+    name=ymir-harness
+fi
+artifact="$(pwd)/${name}-dry-run.src.rpm"
+printf 'ymir-harness dry-run SRPM for %s\\n' "$name" > "$artifact"
+printf 'Wrote: %s\\n' "$artifact"
+exit 0
+"""
+
+
+_PATCH_SHIM = """#!/bin/sh
+set -eu
+
+strip=1
+check_only=false
+patch_file=
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run|--check)
+            check_only=true
+            ;;
+        -p*)
+            strip=${arg#-p}
+            ;;
+        -*)
+            ;;
+        *)
+            patch_file=$arg
+            ;;
+    esac
+done
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+if [ -n "$patch_file" ]; then
+    cp "$patch_file" "$tmp"
+else
+    cat > "$tmp"
+fi
+
+if [ "$check_only" = true ]; then
+    git apply --check "-p${strip}" "$tmp"
+else
+    git apply "-p${strip}" "$tmp"
+fi
+"""
 
 
 def _normalize_model_environment(env: dict[str, str]) -> None:

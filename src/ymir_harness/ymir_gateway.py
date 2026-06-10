@@ -46,6 +46,7 @@ def _patch_no_write_gateway_tools() -> None:
         from ymir.tools.privileged import distgit as distgit_module
         from ymir.tools.privileged import gitlab as gitlab_module
         from ymir.tools.privileged import lookaside as lookaside_module
+        from ymir.tools.privileged import copr as copr_module
         from ymir_harness.replay import ReplayCache, ReplayCacheError
     except ImportError:
         return
@@ -171,7 +172,46 @@ def _patch_no_write_gateway_tools() -> None:
                 )
             return StringToolOutput(result=text)
 
+    class HarnessBuildPackageTool(
+        Tool[
+            copr_module.BuildPackageToolInput,
+            ToolRunOptions,
+            copr_module.BuildPackageToolOutput,
+        ]
+    ):
+        name = "build_package"
+        description = "Replays package build submission without Copr."
+        input_schema = copr_module.BuildPackageToolInput
+
+        def _create_emitter(self) -> Emitter:
+            return Emitter.root().child(
+                namespace=["tool", "copr", self.name],
+                creator=self,
+            )
+
+        async def _run(
+            self,
+            tool_input: copr_module.BuildPackageToolInput,
+            options: ToolRunOptions | None,
+            context: RunContext,
+        ) -> copr_module.BuildPackageToolOutput:
+            del options, context
+            if not tool_input.srpm_path.is_file():
+                raise ToolError(f"SRPM does not exist: {tool_input.srpm_path}")
+            artifact_url = (
+                "ymir-harness://build/"
+                f"{tool_input.jira_issue}/{tool_input.dist_git_branch}/"
+                f"{tool_input.srpm_path.name}"
+            )
+            return copr_module.BuildPackageToolOutput(
+                result=copr_module.BuildResult(
+                    success=True,
+                    artifacts_urls=[artifact_url],
+                )
+            )
+
     distgit_module.CreateZstreamBranchTool = HarnessCreateZstreamBranchTool
+    copr_module.BuildPackageTool = HarnessBuildPackageTool
     gitlab_module.GetPatchFromUrlTool = HarnessGetPatchFromUrlTool
     lookaside_module.DownloadSourcesTool = HarnessDownloadSourcesTool
     lookaside_module.PrepSourcesTool = HarnessPrepSourcesTool

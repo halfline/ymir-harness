@@ -85,6 +85,7 @@ def canonicalize_replay_url(value: Any) -> str:
     if not url:
         return url
 
+    url = re.split(r"\\+[nrt]", url, maxsplit=1, flags=re.IGNORECASE)[0]
     split = re.split(r"[\s\"'<>]", url, maxsplit=1)
     url = split[0] if split else url
     previous = None
