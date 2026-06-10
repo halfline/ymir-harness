@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -13,6 +14,7 @@ import ymir_harness.ymir_workflows as workflow_module
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseRequest
 from ymir_harness.ymir_workflows import (
     _ensure_mock_unpacked_sources,
+    _instrument_agent_factory,
     _is_package_prep_command,
     make_ymir_backport_executor,
     make_ymir_rebuild_executor,
@@ -518,6 +520,62 @@ def test_ensure_mock_unpacked_sources_honors_setup_name(tmp_path: Path) -> None:
 
     assert source_dir == tmp_path / "custom-source"
     assert (tmp_path / "custom-source").is_dir()
+
+
+def test_instrument_agent_factory_logs_agent_run(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _request(
+        tmp_path,
+        environment={
+            "CHAT_MODEL": "vertexai:claude-sonnet-4-6",
+        },
+    )
+
+    class Agent:
+        async def run(self) -> str:
+            return "done"
+
+    async def run_agent() -> str:
+        factory = _instrument_agent_factory(lambda *_args: Agent(), request=request, agent_name="x")
+        agent = await factory([], {})
+        return await agent.run()
+
+    assert asyncio.run(run_agent()) == "done"
+    stderr = capsys.readouterr().err
+    assert '"event": "agent_run_start"' in stderr
+    assert '"event": "agent_run_finished"' in stderr
+    assert '"chat_model": "vertexai:claude-sonnet-4-6"' in stderr
+
+
+def test_instrument_agent_factory_times_out_agent_run(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _request(
+        tmp_path,
+        environment={
+            "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "0.01",
+        },
+    )
+
+    class Agent:
+        async def run(self) -> str:
+            await asyncio.sleep(1)
+            return "done"
+
+    async def run_agent() -> None:
+        factory = _instrument_agent_factory(lambda *_args: Agent(), request=request, agent_name="x")
+        agent = await factory([], {})
+        await agent.run()
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(run_agent())
+
+    stderr = capsys.readouterr().err
+    assert '"event": "agent_run_errored"' in stderr
+    assert '"error_type": "TimeoutError"' in stderr
 
 
 def test_ymir_backport_executor_collects_artifacts_and_scope(tmp_path: Path) -> None:
