@@ -186,6 +186,36 @@ def test_patch_no_write_gateway_tools_replays_patch_url(
     assert asyncio.run(run_tool()).result == "diff --git a/source.c b/source.c\n"
 
 
+def test_patch_no_write_gateway_tools_replays_build_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("ymir")
+    srpm_path = tmp_path / "redis-dry-run.src.rpm"
+    srpm_path.write_text("dry-run srpm\n", encoding="utf-8")
+    monkeypatch.setenv("DRY_RUN", "true")
+
+    _patch_no_write_gateway_tools()
+
+    from ymir.tools.privileged.copr import BuildPackageTool
+
+    async def run_tool():
+        return await BuildPackageTool().run(
+            input={
+                "srpm_path": srpm_path,
+                "dist_git_branch": "rhel-9.6.0",
+                "jira_issue": "RHEL-178386",
+            }
+        )
+
+    result = asyncio.run(run_tool()).result
+
+    assert result.success is True
+    assert result.artifacts_urls == [
+        "ymir-harness://build/RHEL-178386/rhel-9.6.0/redis-dry-run.src.rpm"
+    ]
+
+
 def test_patch_ymir_jira_mock_replays_cached_search(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

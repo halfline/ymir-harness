@@ -100,6 +100,82 @@ def test_build_no_write_environment_records_case_id(tmp_path: Path) -> None:
     )
 
     assert env["YMIR_BENCHMARK_CASE_ID"] == "RHEL-12345"
+    shim_dir = Path(env["YMIR_BENCHMARK_COMMAND_SHIMS"])
+    assert env["PATH"].split(":")[0] == str(shim_dir)
+    assert (shim_dir / "rhpkg").is_file()
+    assert (shim_dir / "centpkg").is_file()
+    assert (shim_dir / "rpmbuild").is_file()
+    assert (shim_dir / "patch").is_file()
+
+
+def test_dry_run_patch_shim_does_not_apply_changes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "file.txt").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True, capture_output=True, text=True)
+
+    patch = tmp_path / "change.patch"
+    patch.write_text(
+        "diff --git a/file.txt b/file.txt\n"
+        "index 3303b7b..4f40e8d 100644\n"
+        "--- a/file.txt\n"
+        "+++ b/file.txt\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n",
+        encoding="utf-8",
+    )
+    env = build_no_write_environment(
+        tmp_path / "cases",
+        tmp_path / "results",
+        base_env={"PATH": "/usr/bin:/bin"},
+        case_id="RHEL-12345",
+    )
+    shim = Path(env["YMIR_BENCHMARK_COMMAND_SHIMS"]) / "patch"
+
+    subprocess.run(
+        [str(shim), "--dry-run", "-p1", str(patch)],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (repo / "file.txt").read_text(encoding="utf-8") == "before\n"
+
+    subprocess.run(
+        [str(shim), "-p1", str(patch)],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (repo / "file.txt").read_text(encoding="utf-8") == "after\n"
+
+
+def test_dry_run_package_shim_writes_non_empty_srpm(tmp_path: Path) -> None:
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "redis.spec").write_text("Name: redis\n", encoding="utf-8")
+    env = build_no_write_environment(
+        tmp_path / "cases",
+        tmp_path / "results",
+        base_env={"PATH": "/usr/bin:/bin"},
+        case_id="RHEL-12345",
+    )
+    rhpkg = Path(env["YMIR_BENCHMARK_COMMAND_SHIMS"]) / "rhpkg"
+
+    completed = subprocess.run(
+        [str(rhpkg), "--offline", "--released", "srpm"],
+        cwd=workdir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    srpm_path = workdir / "redis-dry-run.src.rpm"
+    assert completed.stdout == f"Wrote: {srpm_path}\n"
+    assert srpm_path.read_text(encoding="utf-8") == "ymir-harness dry-run SRPM for redis\n"
 
 
 def test_load_case_manifest_reads_case_ids(tmp_path: Path) -> None:
@@ -261,7 +337,10 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     )
     assert requests[0].variant == "baseline"
     assert requests[0].features == ("YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK",)
-    assert requests[0].environment["PATH"] == "/usr/bin"
+    assert requests[0].environment["PATH"].endswith(":/usr/bin")
+    assert requests[0].environment["YMIR_BENCHMARK_COMMAND_SHIMS"] == str(
+        results_dir.resolve() / ".ymir-harness-shims-RHEL-12345"
+    )
     assert requests[0].environment["DRY_RUN"] == "true"
     assert requests[0].environment["YMIR_BENCHMARK_CASE_ID"] == "RHEL-12345"
     assert requests[0].environment["JIRA_TOKEN"] == "ymir-harness-token"

@@ -222,6 +222,44 @@ def test_capture_missing_canonicalizes_escaped_newline_urls(
     assert [capture.url for capture in result.captured] == [clean_url]
 
 
+def test_capture_missing_canonicalizes_escaped_newline_context_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.json"
+    clean_url = "https://github.com/redis/redis.git"
+    escaped_url = clean_url + r"\\nContext"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(run_file, f'{{"reason": "external subprocess URL blocked: {escaped_url}"}}\n')
+
+    def fake_run(command, *args, **kwargs):
+        destination = Path(command[-1])
+        destination.mkdir(parents=True)
+        (destination / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (destination / "config").write_text(
+            '[remote "origin"]\n\turl = https://github.com/redis/redis.git\n',
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+        )
+    )
+
+    assert result.candidate_urls == [clean_url]
+    assert [capture.url for capture in result.captured_source] == [
+        "https://github.com/redis/redis"
+    ]
+    assert result.captured_git_failures == []
+
+
 def test_capture_missing_skips_disallowed_hosts(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     run_file = tmp_path / "run.json"
