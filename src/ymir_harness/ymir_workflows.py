@@ -188,6 +188,12 @@ async def _run_ymir_backport(
         return missing_dependency
 
     workflow_runner, default_agent_factory = _backport_dependencies(workflow, agent_factory)
+    if workflow is None:
+        default_agent_factory = _instrument_agent_factory(
+            default_agent_factory,
+            request=request,
+            agent_name="backport",
+        )
 
     with _workflow_environment(request, workflow=workflow):
         state = await _await_workflow(
@@ -457,6 +463,78 @@ def _workflow_progress_interval(request: RunCaseRequest) -> float:
         return float(raw_value)
     except ValueError:
         return WORKFLOW_PROGRESS_INTERVAL_SECONDS
+
+
+def _agent_timeout_seconds(request: RunCaseRequest) -> float | None:
+    raw_value = request.environment.get("YMIR_HARNESS_AGENT_TIMEOUT_SECONDS")
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _instrument_agent_factory(
+    agent_factory: AgentFactory,
+    *,
+    request: RunCaseRequest,
+    agent_name: str,
+) -> AgentFactory:
+    async def factory(*args: Any, **kwargs: Any) -> Any:
+        result = agent_factory(*args, **kwargs)
+        agent = await result if inspect.isawaitable(result) else result
+        return _InstrumentedAgent(agent, request=request, agent_name=agent_name)
+
+    return factory
+
+
+class _InstrumentedAgent:
+    def __init__(self, agent: Any, *, request: RunCaseRequest, agent_name: str) -> None:
+        self._agent = agent
+        self._request = request
+        self._agent_name = agent_name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._agent, name)
+
+    async def run(self, *args: Any, **kwargs: Any) -> Any:
+        started_at = time.monotonic()
+        timeout = _agent_timeout_seconds(self._request)
+        _workflow_debug(
+            self._request,
+            "agent_run_start",
+            agent=self._agent_name,
+            agent_type=type(self._agent).__name__,
+            timeout_seconds=timeout,
+            chat_model=self._request.environment.get(CHAT_MODEL_ENV),
+        )
+        try:
+            awaitable = self._agent.run(*args, **kwargs)
+            if timeout is None:
+                result = await awaitable
+            else:
+                result = await asyncio.wait_for(awaitable, timeout=timeout)
+        except BaseException as exc:
+            _workflow_debug(
+                self._request,
+                "agent_run_errored",
+                agent=self._agent_name,
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                error_detail="".join(traceback.format_exception(exc)),
+            )
+            raise
+        _workflow_debug(
+            self._request,
+            "agent_run_finished",
+            agent=self._agent_name,
+            elapsed_seconds=round(time.monotonic() - started_at, 3),
+            result_type=type(result).__name__,
+        )
+        return result
 
 
 def _workflow_debug(
