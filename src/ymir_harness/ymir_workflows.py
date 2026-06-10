@@ -5,10 +5,12 @@ import importlib
 import inspect
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
@@ -433,6 +435,7 @@ async def _await_workflow(
             elapsed_seconds=round(time.monotonic() - started_at, 3),
             error_type=type(exc).__name__,
             error=str(exc),
+            error_detail="".join(traceback.format_exception(exc)),
         )
         raise
 
@@ -567,12 +570,87 @@ def _backport_dependencies(
         return workflow, agent_factory
 
     ensure_ymir_source_path()
-    from ymir.agents.backport_agent import (  # type: ignore[import-not-found]
-        create_backport_agent,
-        run_workflow,
-    )
+    from ymir.agents import backport_agent as backport_module  # type: ignore[import-not-found]
 
-    return workflow or run_workflow, agent_factory or create_backport_agent
+    _patch_backport_no_write_subprocesses(backport_module)
+
+    return workflow or backport_module.run_workflow, agent_factory or backport_module.create_backport_agent
+
+
+def _patch_backport_no_write_subprocesses(backport_module: Any) -> None:
+    if getattr(backport_module, "_ymir_harness_check_subprocess_patched", False):
+        return
+
+    original_check_subprocess = backport_module.check_subprocess
+    original_get_unpacked_sources = backport_module.tasks.get_unpacked_sources
+
+    async def harness_check_subprocess(
+        cmd: str | list[str],
+        shell: bool = False,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> tuple[str | None, str | None]:
+        if (
+            os.getenv("DRY_RUN", "False").lower() == "true"
+            and cwd is not None
+            and _is_package_prep_command(cmd)
+        ):
+            _ensure_mock_unpacked_sources(cwd)
+            return "", ""
+        return await original_check_subprocess(cmd, shell=shell, cwd=cwd, env=env)
+
+    def harness_get_unpacked_sources(local_clone: Path, package: str) -> Path:
+        if os.getenv("DRY_RUN", "False").lower() == "true":
+            source_dir = _ensure_mock_unpacked_sources(local_clone)
+            if source_dir is not None:
+                return source_dir
+        return original_get_unpacked_sources(local_clone, package)
+
+    backport_module.check_subprocess = harness_check_subprocess
+    backport_module.tasks.get_unpacked_sources = harness_get_unpacked_sources
+    backport_module._ymir_harness_check_subprocess_patched = True
+
+
+def _is_package_prep_command(cmd: str | list[str]) -> bool:
+    if isinstance(cmd, str):
+        parts = cmd.split()
+    else:
+        parts = [str(part) for part in cmd]
+    if not parts or parts[-1] != "prep":
+        return False
+    program = Path(parts[0]).name
+    return program in {"rhpkg", "centpkg"}
+
+
+def _ensure_mock_unpacked_sources(cwd: Path) -> Path | None:
+    spec_path = next(cwd.glob("*.spec"), None)
+    if spec_path is None:
+        return None
+
+    text = spec_path.read_text(encoding="utf-8", errors="replace")
+    explicit_setup = re.search(r"^%(?:auto)?setup\b[^\n]*\s-n\s+(\S+)", text, re.MULTILINE)
+    if explicit_setup is not None:
+        source_dir = cwd / explicit_setup.group(1)
+        source_dir.mkdir(parents=True, exist_ok=True)
+        return source_dir
+
+    name = _rpm_tag_value(text, "Name")
+    version = _rpm_tag_value(text, "Version")
+    if name is not None and version is not None:
+        source_dir = cwd / f"{name}-{version}"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        return source_dir
+    return None
+
+
+def _rpm_tag_value(text: str, tag: str) -> str | None:
+    match = re.search(rf"^{re.escape(tag)}:\s*(\S+)", text, re.MULTILINE | re.IGNORECASE)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    if not value or "%" in value:
+        return None
+    return value
 
 
 def _rebase_dependencies(workflow: AsyncWorkflow | None) -> AsyncWorkflow:

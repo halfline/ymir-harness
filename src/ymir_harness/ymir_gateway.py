@@ -23,11 +23,151 @@ from ymir_harness.ymir_source import ensure_ymir_source_path
 def main() -> None:
     ensure_ymir_source_path()
     _install_optional_gateway_shims()
+    _patch_no_write_gateway_tools()
     from ymir.tools.privileged.gateway import main as gateway_main  # type: ignore[import-not-found]
 
     _patch_ymir_jira_mock_remote_links()
     with enforce_benchmark_boundaries(os.environ):
         gateway_main()
+
+
+def _patch_no_write_gateway_tools() -> None:
+    if os.getenv("DRY_RUN", "False").lower() != "true":
+        return
+
+    try:
+        from beeai_framework.context import RunContext
+        from beeai_framework.emitter import Emitter
+        from beeai_framework.tools import StringToolOutput, ToolError, ToolRunOptions
+        from pydantic import BaseModel, Field
+        from ymir.tools.base import CloneableTool as Tool
+        from ymir.tools.privileged import distgit as distgit_module
+        from ymir.tools.privileged import gitlab as gitlab_module
+        from ymir.tools.privileged import lookaside as lookaside_module
+        from ymir_harness.replay import ReplayCache, ReplayCacheError
+    except ImportError:
+        return
+
+    class HarnessCreateZstreamBranchToolInput(BaseModel):
+        package: str = Field(description="Package name")
+        branch: str = Field(description="Name of the branch to create")
+
+    class HarnessCreateZstreamBranchTool(
+        Tool[HarnessCreateZstreamBranchToolInput, ToolRunOptions, StringToolOutput]
+    ):
+        name = "create_zstream_branch"
+        description = "Replays Z-Stream branch creation without mutating dist-git."
+        input_schema = HarnessCreateZstreamBranchToolInput
+
+        def _create_emitter(self) -> Emitter:
+            return Emitter.root().child(
+                namespace=["tool", "distgit", self.name],
+                creator=self,
+            )
+
+        async def _run(
+            self,
+            tool_input: HarnessCreateZstreamBranchToolInput,
+            options: ToolRunOptions | None,
+            context: RunContext,
+        ) -> StringToolOutput:
+            del options, context
+            return StringToolOutput(
+                result=(
+                    f"Z-Stream branch {tool_input.branch} already exists, "
+                    "no need to create it"
+                )
+            )
+
+    class HarnessLookasideToolInput(BaseModel):
+        dist_git_path: Path = Field(description="Absolute path to cloned dist-git repository")
+        package: str = Field(description="Package name")
+        dist_git_branch: str = Field(description="dist-git branch")
+
+    class HarnessDownloadSourcesTool(
+        Tool[HarnessLookasideToolInput, ToolRunOptions, StringToolOutput]
+    ):
+        name = "download_sources"
+        description = "Replays lookaside source download without Kerberos or rhpkg."
+        input_schema = HarnessLookasideToolInput
+
+        def _create_emitter(self) -> Emitter:
+            return Emitter.root().child(
+                namespace=["tool", "lookaside", self.name],
+                creator=self,
+            )
+
+        async def _run(
+            self,
+            tool_input: HarnessLookasideToolInput,
+            options: ToolRunOptions | None,
+            context: RunContext,
+        ) -> StringToolOutput:
+            del tool_input, options, context
+            return StringToolOutput(result="Successfully downloaded sources from replay cache")
+
+    class HarnessPrepSourcesTool(Tool[HarnessLookasideToolInput, ToolRunOptions, StringToolOutput]):
+        name = "prep_sources"
+        description = "Replays source prep without Kerberos or rhpkg."
+        input_schema = HarnessLookasideToolInput
+
+        def _create_emitter(self) -> Emitter:
+            return Emitter.root().child(
+                namespace=["tool", "lookaside", self.name],
+                creator=self,
+            )
+
+        async def _run(
+            self,
+            tool_input: HarnessLookasideToolInput,
+            options: ToolRunOptions | None,
+            context: RunContext,
+        ) -> StringToolOutput:
+            del tool_input, options, context
+            return StringToolOutput(result="Successfully prepped sources from replay cache")
+
+    class HarnessGetPatchFromUrlToolInput(BaseModel):
+        patch_url: str = Field(description="URL to a patch or diff file")
+
+    class HarnessGetPatchFromUrlTool(
+        Tool[HarnessGetPatchFromUrlToolInput, ToolRunOptions, StringToolOutput]
+    ):
+        name = "get_patch_from_url"
+        description = "Replays patch fetches from the harness web cache."
+        input_schema = HarnessGetPatchFromUrlToolInput
+
+        def _create_emitter(self) -> Emitter:
+            return Emitter.root().child(
+                namespace=["tool", "gitlab", self.name],
+                creator=self,
+            )
+
+        async def _run(
+            self,
+            tool_input: HarnessGetPatchFromUrlToolInput,
+            options: ToolRunOptions | None,
+            context: RunContext,
+        ) -> StringToolOutput:
+            del options, context
+            try:
+                cache = ReplayCache.from_environment(os.environ)
+                body = cache.read_bytes(tool_input.patch_url)
+            except ReplayCacheError as exc:
+                raise ToolError(
+                    f"Failed to fetch patch from {tool_input.patch_url}: {exc}"
+                ) from exc
+            text = body.decode("utf-8", errors="replace")
+            if len(text) > 2000:
+                text = (
+                    text[:2000]
+                    + f"\n\n[Content truncated - showing first 2000 characters of {len(text)} total]"
+                )
+            return StringToolOutput(result=text)
+
+    distgit_module.CreateZstreamBranchTool = HarnessCreateZstreamBranchTool
+    gitlab_module.GetPatchFromUrlTool = HarnessGetPatchFromUrlTool
+    lookaside_module.DownloadSourcesTool = HarnessDownloadSourcesTool
+    lookaside_module.PrepSourcesTool = HarnessPrepSourcesTool
 
 
 def _install_optional_gateway_shims() -> None:
