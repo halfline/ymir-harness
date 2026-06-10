@@ -140,6 +140,10 @@ def build_no_write_environment(
     env.setdefault("GIT_REPO_BASEPATH", str(results_dir.resolve()))
     env["YMIR_BENCHMARK_CASES_DIR"] = str(cases_dir.resolve())
     env["YMIR_BENCHMARK_RESULTS_DIR"] = str(results_dir.resolve())
+    env.setdefault("GIT_AUTHOR_NAME", "Ymir Harness")
+    env.setdefault("GIT_AUTHOR_EMAIL", "ymir-harness@example.invalid")
+    env.setdefault("GIT_COMMITTER_NAME", "Ymir Harness")
+    env.setdefault("GIT_COMMITTER_EMAIL", "ymir-harness@example.invalid")
     max_iterations = env.get(MAX_ITERATIONS_OVERRIDE_ENV)
     if max_iterations:
         env["BEEAI_MAX_ITERATIONS"] = max_iterations

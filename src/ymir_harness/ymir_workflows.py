@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -780,13 +781,15 @@ def _patch_backport_no_write_subprocesses(backport_module: Any) -> None:
             and cwd is not None
             and _is_package_prep_command(cmd)
         ):
-            _ensure_mock_unpacked_sources(cwd)
+            source_dir = _materialize_replay_unpacked_sources(cwd)
+            if source_dir is None:
+                raise RuntimeError(f"replay source archive is missing for {cwd}")
             return "", ""
         return await original_check_subprocess(cmd, shell=shell, cwd=cwd, env=env)
 
     def harness_get_unpacked_sources(local_clone: Path, package: str) -> Path:
         if os.getenv("DRY_RUN", "False").lower() == "true":
-            source_dir = _ensure_mock_unpacked_sources(local_clone)
+            source_dir = _materialize_replay_unpacked_sources(local_clone)
             if source_dir is not None:
                 return source_dir
         return original_get_unpacked_sources(local_clone, package)
@@ -807,7 +810,34 @@ def _is_package_prep_command(cmd: str | list[str]) -> bool:
     return program in {"rhpkg", "centpkg"}
 
 
-def _ensure_mock_unpacked_sources(cwd: Path) -> Path | None:
+def _materialize_replay_unpacked_sources(cwd: Path) -> Path | None:
+    source_dir = _expected_unpacked_sources_dir(cwd)
+    if source_dir is None:
+        return None
+    if _has_materialized_source_content(source_dir):
+        return source_dir
+
+    archive = _primary_source_archive(cwd)
+    if archive is None:
+        return None
+
+    if source_dir.exists() and not _has_materialized_source_content(source_dir):
+        shutil.rmtree(source_dir)
+
+    extracted = _extract_source_archive(archive, cwd)
+    if extracted is None:
+        return None
+    if extracted == source_dir:
+        return source_dir
+    if source_dir.exists():
+        shutil.rmtree(source_dir)
+    if extracted.exists():
+        extracted.rename(source_dir)
+        return source_dir
+    return None
+
+
+def _expected_unpacked_sources_dir(cwd: Path) -> Path | None:
     spec_path = next(cwd.glob("*.spec"), None)
     if spec_path is None:
         return None
@@ -815,16 +845,105 @@ def _ensure_mock_unpacked_sources(cwd: Path) -> Path | None:
     text = spec_path.read_text(encoding="utf-8", errors="replace")
     explicit_setup = re.search(r"^%(?:auto)?setup\b[^\n]*\s-n\s+(\S+)", text, re.MULTILINE)
     if explicit_setup is not None:
-        source_dir = cwd / explicit_setup.group(1)
-        source_dir.mkdir(parents=True, exist_ok=True)
-        return source_dir
+        return cwd / explicit_setup.group(1)
 
     name = _rpm_tag_value(text, "Name")
     version = _rpm_tag_value(text, "Version")
     if name is not None and version is not None:
-        source_dir = cwd / f"{name}-{version}"
-        source_dir.mkdir(parents=True, exist_ok=True)
-        return source_dir
+        return cwd / f"{name}-{version}"
+    return None
+
+
+def _has_materialized_source_content(source_dir: Path) -> bool:
+    if not source_dir.is_dir():
+        return False
+    return any(child.name != ".git" for child in source_dir.iterdir())
+
+
+def _primary_source_archive(cwd: Path) -> Path | None:
+    spec_path = next(cwd.glob("*.spec"), None)
+    if spec_path is None:
+        return None
+
+    text = spec_path.read_text(encoding="utf-8", errors="replace")
+    name = _rpm_tag_value(text, "Name")
+    version = _rpm_tag_value(text, "Version")
+    source_filename = _source0_filename(text, name=name, version=version)
+    if source_filename is not None:
+        candidate = cwd / source_filename
+        if candidate.is_file():
+            return candidate
+
+    for filename in _sources_file_filenames(cwd / "sources"):
+        candidate = cwd / filename
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _source0_filename(text: str, *, name: str | None, version: str | None) -> str | None:
+    source = _rpm_source_tag_value(text, "Source0") or _rpm_source_tag_value(text, "Source")
+    if source is None:
+        return None
+    if name is not None:
+        source = source.replace("%{name}", name).replace("%{?name}", name)
+    if version is not None:
+        source = source.replace("%{version}", version).replace("%{?version}", version)
+    return Path(source).name
+
+
+def _rpm_source_tag_value(text: str, tag: str) -> str | None:
+    match = re.search(rf"^{re.escape(tag)}:\s*(\S+)", text, re.MULTILINE | re.IGNORECASE)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def _sources_file_filenames(path: Path) -> tuple[str, ...]:
+    if not path.is_file():
+        return ()
+    filenames = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = re.search(r"\(([^)]+)\)", line)
+        if match is not None:
+            filenames.append(match.group(1).strip())
+            continue
+        parts = line.split()
+        if parts:
+            filenames.append(parts[-1])
+    return tuple(dict.fromkeys(filename for filename in filenames if filename))
+
+
+def _extract_source_archive(archive: Path, cwd: Path) -> Path | None:
+    before = {child.resolve() for child in cwd.iterdir()}
+    try:
+        shutil.unpack_archive(str(archive), str(cwd))
+        return _single_new_directory(cwd, before)
+    except (shutil.ReadError, ValueError, OSError):
+        pass
+
+    rpm_uncompress = Path("/usr/lib/rpm/rpmuncompress")
+    if rpm_uncompress.exists():
+        completed = subprocess.run(
+            [str(rpm_uncompress), "-x", str(archive)],
+            cwd=cwd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if completed.returncode == 0:
+            return _single_new_directory(cwd, before)
+    return None
+
+
+def _single_new_directory(cwd: Path, before: set[Path]) -> Path | None:
+    new_directories = [
+        child for child in cwd.iterdir() if child.resolve() not in before and child.is_dir()
+    ]
+    if len(new_directories) == 1:
+        return new_directories[0]
     return None
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import shutil
 import sys
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -12,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ymir_harness.enforcement import enforce_benchmark_boundaries
+from ymir_harness.replay import ReplayCacheError
 from ymir_harness.jira_replay import (
     jira_issue_replay_miss,
     jira_search_replay_miss,
@@ -103,8 +105,13 @@ def _patch_no_write_gateway_tools() -> None:
             options: ToolRunOptions | None,
             context: RunContext,
         ) -> StringToolOutput:
-            del tool_input, options, context
-            return StringToolOutput(result="Successfully downloaded sources from replay cache")
+            del options, context
+            try:
+                copied = _copy_replay_lookaside_sources(tool_input.dist_git_path)
+            except ReplayCacheError as exc:
+                raise ToolError(f"Failed to download sources from replay cache: {exc}") from exc
+            detail = f" ({copied} file(s))" if copied else ""
+            return StringToolOutput(result=f"Successfully downloaded sources from replay cache{detail}")
 
     class HarnessPrepSourcesTool(Tool[HarnessLookasideToolInput, ToolRunOptions, StringToolOutput]):
         name = "prep_sources"
@@ -168,6 +175,29 @@ def _patch_no_write_gateway_tools() -> None:
     gitlab_module.GetPatchFromUrlTool = HarnessGetPatchFromUrlTool
     lookaside_module.DownloadSourcesTool = HarnessDownloadSourcesTool
     lookaside_module.PrepSourcesTool = HarnessPrepSourcesTool
+
+
+def _copy_replay_lookaside_sources(dist_git_path: Path) -> int:
+    source_cache = os.environ.get("YMIR_BENCHMARK_SOURCE_CACHE_DIR")
+    if not source_cache:
+        raise ReplayCacheError("YMIR_BENCHMARK_SOURCE_CACHE_DIR is not set")
+
+    lookaside_dir = Path(source_cache) / "lookaside"
+    if not lookaside_dir.is_dir():
+        raise ReplayCacheError(f"lookaside source cache is missing: {lookaside_dir}")
+
+    copied = 0
+    for source in sorted(lookaside_dir.iterdir()):
+        if not source.is_file():
+            continue
+        destination = dist_git_path / source.name
+        if destination.exists():
+            continue
+        shutil.copy2(source, destination)
+        copied += 1
+    if copied == 0 and not any(child.is_file() for child in lookaside_dir.iterdir()):
+        raise ReplayCacheError(f"lookaside source cache is empty: {lookaside_dir}")
+    return copied
 
 
 def _install_optional_gateway_shims() -> None:
