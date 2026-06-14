@@ -1,4 +1,19 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
 import ymir_harness.runner as runner_module
+from ymir_harness.models import CaseValidationResult, ValidationReport
+from ymir_harness.runner import (
+    DEFAULT_CHAT_MODEL,
+    RunCaseExecution,
+    build_no_write_environment,
+    build_run_report,
+    load_case_manifest,
+    select_validation_cases,
+)
 
 
 def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
@@ -1181,6 +1196,121 @@ def test_build_run_report_rewrites_source_cache_git_remotes(tmp_path: Path) -> N
     assert fedora_url in blocked_urls
 
 
+def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+        },
+    )
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "package": "dnsmasq",
+                "resolution": "not_affected",
+                "total_cost_usd": 7.25,
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+        base_env={"BENCHMARK_MAX_COST_PER_RUN": "5"},
+    )
+
+    assert report.has_failures
+    assert report.summary()["timeout"] == 1
+    entry = report.entries[0]
+    assert entry.status == "timeout"
+    assert entry.reason == (
+        "budget guardrail exceeded: total_cost_usd 7.25 > BENCHMARK_MAX_COST_PER_RUN 5"
+    )
+    assert entry.score is not None
+    assert entry.score.passed
+    assert json.loads(entry.actual_path.read_text(encoding="utf-8"))["total_cost_usd"] == 7.25
+
+
+def test_build_run_report_warns_on_cost_alert_threshold(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+        },
+    )
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "package": "dnsmasq",
+                "resolution": "not_affected",
+                "total_cost_usd": 7.25,
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+        base_env={
+            "BENCHMARK_COST_ALERT_THRESHOLD": "5",
+            "BENCHMARK_MAX_COST_PER_RUN": "10",
+        },
+    )
+
+    assert not report.has_failures
+    assert report.summary()["warnings"] == 1
+    entry = report.entries[0]
+    assert entry.status == "passed"
+    assert entry.warnings == [
+        "budget alert threshold exceeded: total_cost_usd 7.25 > BENCHMARK_COST_ALERT_THRESHOLD 5"
+    ]
+    assert report.to_json()["cases"][0]["warnings"] == entry.warnings
+
+
 def test_build_run_report_records_provenance(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
@@ -1218,6 +1348,7 @@ def test_build_run_report_records_provenance(tmp_path: Path) -> None:
         "chat_model": "vertexai:claude-opus-4-6",
         "agentic_skills_sha": "def456",
     }
+
 
 def test_build_run_report_fails_executor_score_mismatches(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
