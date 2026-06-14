@@ -45,6 +45,16 @@ export GEMINI_API_KEY="..."
 ```
 
 
+To test a Ymir change, check out the desired revision in `ui-workflows`, run
+`uv sync`, and run the same case with a different `--variant` and `--run-id`.
+Then compare the run reports:
+
+```bash
+uv run ymir-harness compare-results \
+  examples/benchmark_cases/reports/runs/RHEL-12345-rerun/run.json \
+  examples/benchmark_cases/reports/runs/RHEL-12345-candidate/run.json \
+  --markdown-output examples/benchmark_cases/reports/RHEL-12345-comparison.md
+```
 
 Use `--provenance KEY=VALUE` with `run` or `score-results` to add explicit
 run metadata such as `agentic_skills_sha`, `container_image_digest`, or model
@@ -140,6 +150,19 @@ partial expected-result overrides. If the primary expected result fails,
 scoring tries each alternate and accepts the first deterministic pass while
 recording an `alternate_acceptable_outcome` metric.
 
+`compare-results` reads two aggregate score reports and emits a per-case delta
+table in JSON. Use `--markdown-output` to also write a human-readable comparison
+report. A headline regression or missing candidate case returns a nonzero exit
+status.
+Comparison output carries `headline_reason` for non-headline cases when the
+aggregate inputs provide it.
+When score reports carry `total_cost_usd` advisory metrics, comparison output
+adds baseline cost, candidate cost, and cost delta fields. Markdown comparison
+tables include matching cost columns only when cost data is present.
+When comparison inputs include repeated case entries, `compare-results` groups
+them by `case_id`, reports repetition counts and stable/flaky status, and uses
+per-case mean runtime, token count, tool-call count, and cost values for
+candidate-minus-baseline deltas.
 
 ## Development
 
