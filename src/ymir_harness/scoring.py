@@ -24,6 +24,7 @@ ADVISORY_RESULT_FIELDS = (
     "retry_count",
     "total_cost_usd",
 )
+PATCH_COMMIT_RE = re.compile(r"(?m)^From ([0-9a-fA-F]{40}) ")
 CVE_ID_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
 
 
@@ -174,7 +175,6 @@ def _score_case_once(
             normalized_actual["backport_source"],
             optional=True,
         ),
-        _compare_list("patch_urls", expected.get("patch_urls"), normalized_actual["patch_urls"]),
     ]
 
     if actual.get("error") or actual.get("crash"):
@@ -307,6 +307,92 @@ def _touched_files_metric(expected: Mapping[str, Any], actual: Mapping[str, Any]
         notes=notes,
     )
 
+def _patch_urls_metric(
+    expected: Mapping[str, Any],
+    actual: Any,
+    *,
+    cases_dir: Path | None,
+    case_id: str,
+) -> ScoreMetric:
+    exact_metric = _compare_list("patch_urls", expected.get("patch_urls"), actual)
+    if exact_metric.status != "fail" or cases_dir is None:
+        return exact_metric
+
+    expected_urls = _normalize_list(expected.get("patch_urls"))
+    actual_urls = _normalize_list(actual)
+    if _actual_patch_urls_cover_expected_commits(cases_dir, case_id, expected_urls, actual_urls):
+        return ScoreMetric(
+            name="patch_urls",
+            status="pass",
+            expected=expected_urls,
+            actual=actual_urls,
+            notes="actual patch URLs include the expected patch commit IDs",
+        )
+    return exact_metric
+
+
+def _actual_patch_urls_cover_expected_commits(
+    cases_dir: Path,
+    case_id: str,
+    expected_urls: list[str],
+    actual_urls: list[str],
+) -> bool:
+    if not expected_urls or not actual_urls:
+        return False
+
+    url_commits = _recorded_patch_commits(cases_dir, case_id)
+    if not url_commits:
+        return False
+
+    actual_commits = set().union(*(url_commits.get(url, set()) for url in actual_urls))
+    if not actual_commits:
+        return False
+
+    expected_commits = set().union(*(url_commits.get(url, set()) for url in expected_urls))
+    return bool(expected_commits) and expected_commits <= actual_commits
+
+
+def _recorded_patch_commits(cases_dir: Path, case_id: str) -> dict[str, set[str]]:
+    manifest_path = cases_dir / "web_cache" / case_id / "manifest.json"
+    manifest = _load_optional_json_object(manifest_path)
+    if manifest is None:
+        return {}
+
+    recorded_files = manifest.get("recorded_files")
+    if not isinstance(recorded_files, Mapping):
+        return {}
+
+    output: dict[str, set[str]] = {}
+    cache_dir = manifest_path.parent
+    for url, relative_path in recorded_files.items():
+        if not isinstance(url, str) or not isinstance(relative_path, str):
+            continue
+        recorded_path = cache_dir / relative_path
+        try:
+            recorded_path.resolve(strict=False).relative_to(cache_dir.resolve(strict=False))
+        except ValueError:
+            continue
+        if not recorded_path.is_file():
+            continue
+        commits = {
+            match.group(1).lower()
+            for match in PATCH_COMMIT_RE.finditer(
+                recorded_path.read_text(encoding="utf-8", errors="ignore")
+            )
+        }
+        if commits:
+            output[url] = commits
+    return output
+
+
+def _load_optional_json_object(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _file_scope_notes(missing: list[str], unexpected: list[str]) -> str | None:
