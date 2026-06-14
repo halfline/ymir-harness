@@ -45,6 +45,86 @@ export GEMINI_API_KEY="..."
 ```
 
 
+
+
+Scoring treats any `unsafe_operations` entries in an actual result as a hard
+failure gate. Use that field for blocked write attempts such as Jira mutation,
+GitLab push, or build-system submission calls captured during a run.
+
+Scoring also treats any `replay_violations` entries as a hard failure gate. Use
+that field for unrecorded external fetches or replay cache misses reported by
+the replay layer. Replay violation detection can derive those entries from HTTP
+tool events and shell `curl` or `wget` commands whose target URLs are absent
+from the recorded replay URL set.
+
+Expected results may declare `required_artifacts`. Scoring compares that list
+with `generated_artifacts` in the actual result and fails the case when any
+required artifact is missing.
+
+Expected results may declare `fix_sources`. Scoring compares that list with
+`fix_sources` in the actual result to check required upstream commits,
+advisories, or other declared fix origins.
+
+Expected backport results may declare `backport_source` as `upstream`,
+`distgit`, or `mixed`. Scoring compares it with the actual result when present,
+and can infer the actual value from patch URLs when the workflow does not emit
+the field explicitly.
+
+Expected results may declare `dependency_issues`. Scoring compares that list
+with `dependency_issues` in the actual result to check required dependency
+issue handling.
+
+Expected results may declare `sibling_issues`. Scoring compares that list with
+`sibling_issues` in the actual result to check required sibling issue
+handling.
+
+Expected results may declare `affectedness`. Scoring compares that value with
+`affectedness` in the actual result and accepts boolean or token values such as
+`affected` and `not_affected`.
+
+Expected results may declare `touched_files`. Scoring compares that file list
+with `touched_files` or `changed_files` in the actual result and fails on
+missing or unexpected paths.
+
+Scoring expects `unrelated_source_changes` in an actual result to be empty. Use
+that field for source paths changed outside the expected implementation scope.
+
+Expected results may declare `spec_patches`. Scoring compares that list with
+`spec_patches` in the actual result to check expected RPM spec patch
+declarations.
+
+Expected results may declare `changelog_entries`. Scoring compares that list
+with `changelog_entries` in the actual result to check Jira, CVE, or NVR
+references captured from the spec changelog.
+
+Expected results may declare `build_result`. Scoring compares that token with
+`build_result` in the actual result to check local prep or build outcomes for
+implementation cases.
+
+Expected results may declare `prep_result`. Scoring compares that token with
+`prep_result` in the actual result to check local preparation outcomes before
+implementation cases build.
+
+Expected results may declare `reference_patch_parse_status`. Scoring compares
+that token with `reference_patch_parse_status` in the actual result to check
+whether the reference patch parsed as expected.
+
+Expected results may declare `reference_patch_apply_status`. Scoring compares
+that token with `reference_patch_apply_status` in the actual result to check
+whether the reference patch applied as expected.
+
+Actual results may include advisory diagnostics such as `runtime_seconds`,
+`token_usage`, `iteration_count`, `tool_call_count`, `retry_count`,
+`total_cost_usd`, `diff_similarity`, `rationale_quality`, or
+`llm_judge_notes`. Scoring reports carry these as `advisory_metrics` without
+using them for pass/fail status.
+
+Expected results may declare `alternate_acceptable_outcomes` as a list of
+partial expected-result overrides. If the primary expected result fails,
+scoring tries each alternate and accepts the first deterministic pass while
+recording an `alternate_acceptable_outcome` metric.
+
+
 ## Development
 
 ```bash
