@@ -102,6 +102,107 @@ def test_validate_case_directory_reports_invalid_backport_source(tmp_path: Path)
     )
 
 
+
+def test_strict_validation_reports_web_cache_missing_expected_patch_url(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+    )
+    manifest_path = cases_dir / "web_cache" / "RHEL-12345" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["required_urls"] = []
+    _write_json(manifest_path, manifest)
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "web_cache_incomplete" and "expected patch URL" in issue.message
+        for issue in issues
+    )
+
+
+def test_strict_validation_reports_web_cache_recorded_file_escape(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+    )
+    manifest_path = cases_dir / "web_cache" / "RHEL-12345" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["recorded_files"] = {
+        "https://example.invalid/fix.patch": "../outside.patch",
+    }
+    _write_json(manifest_path, manifest)
+    (cases_dir / "web_cache" / "outside.patch").write_text(
+        "cached patch\n",
+        encoding="utf-8",
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "web_cache_incomplete"
+        and "escapes web_cache case directory" in issue.message
+        for issue in issues
+    )
+
+
+def test_strict_validation_reports_network_denied_patch_urls(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        network_mode="network_denied",
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "network_policy_invalid"
+        and "must not declare patch_urls" in issue.message
+        for issue in issues
+    )
+
+
+def test_strict_validation_reports_network_denied_web_cache_manifest(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        network_mode="network_denied",
+        patch_urls=[],
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "network_policy_invalid"
+        and "must not include web_cache manifest" in issue.message
+        for issue in issues
+    )
+
+
 def test_strict_validation_reports_missing_source_cache(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
