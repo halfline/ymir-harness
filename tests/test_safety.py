@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from ymir_harness.safety import (
-    detect_replay_violations,
-    detect_unsafe_operations,
-)
+from ymir_harness.safety import detect_replay_violations, detect_unsafe_operations
 
 
 def test_detect_replay_violations_reports_unrecorded_http_events() -> None:
@@ -128,6 +125,171 @@ def test_detect_unsafe_operations_reports_shell_string_git_push() -> None:
     assert operations[0].source == "run-shell-command"
     assert operations[0].detail == ("git push: git --git-dir=/tmp/repo/.git push origin HEAD")
 
+
+def test_detect_unsafe_operations_reports_jira_write_events() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://jira.example/rest/api/2/issue/RHEL-12345/comment",
+            },
+            {
+                "tool": "http",
+                "method": "PATCH",
+                "url": "https://issues.example/rest/api/2/issue/RHEL-12345",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "jira_write",
+        "jira_write",
+    ]
+    assert operations[0].detail == (
+        "Jira write: POST https://jira.example/rest/api/2/issue/RHEL-12345/comment"
+    )
+    assert operations[1].detail == (
+        "Jira write: PATCH https://issues.example/rest/api/2/issue/RHEL-12345"
+    )
+
+
+def test_detect_unsafe_operations_reports_gitlab_write_events() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://gitlab.com/api/v4/projects/1/merge_requests",
+            },
+            {
+                "tool": "http",
+                "method": "DELETE",
+                "url": "https://gitlab.example/api/v4/projects/1/labels/security",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "gitlab_write",
+        "gitlab_write",
+    ]
+    assert operations[0].detail == (
+        "GitLab write: POST https://gitlab.com/api/v4/projects/1/merge_requests"
+    )
+    assert operations[1].detail == (
+        "GitLab write: DELETE https://gitlab.example/api/v4/projects/1/labels/security"
+    )
+
+
+def test_detect_unsafe_operations_reports_errata_write_events() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": ("https://errata.engineering.redhat.com/api/v1/erratum/12345/change_state"),
+            },
+            {
+                "tool": "http",
+                "method": "PUT",
+                "url": "https://errata.example/api/v1/erratum/12345",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "errata_write",
+        "errata_write",
+    ]
+    assert operations[0].detail == (
+        "Errata write: POST https://errata.engineering.redhat.com/api/v1/erratum/12345/change_state"
+    )
+    assert operations[1].detail == ("Errata write: PUT https://errata.example/api/v1/erratum/12345")
+
+
+def test_detect_unsafe_operations_reports_testing_farm_submissions() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://api.testing-farm.io/v0.1/requests",
+            },
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://api.dev.testing-farm.io/v0.1/requests",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "testing_farm_submission",
+        "testing_farm_submission",
+    ]
+    assert operations[0].detail == (
+        "Testing Farm submission: POST https://api.testing-farm.io/v0.1/requests"
+    )
+    assert operations[1].detail == (
+        "Testing Farm submission: POST https://api.dev.testing-farm.io/v0.1/requests"
+    )
+
+
+def test_detect_unsafe_operations_reports_greenwave_mutations() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://gating-status.osci.redhat.com/api/v1.0/decision",
+            },
+            {
+                "tool": "http",
+                "method": "PATCH",
+                "url": "https://greenwave.example/api/v1.0/policies/rhel",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "greenwave_mutation",
+        "greenwave_mutation",
+    ]
+    assert operations[0].detail == (
+        "GreenWave mutation: POST https://gating-status.osci.redhat.com/api/v1.0/decision"
+    )
+    assert operations[1].detail == (
+        "GreenWave mutation: PATCH https://greenwave.example/api/v1.0/policies/rhel"
+    )
+
+
+def test_detect_unsafe_operations_reports_resultsdb_mutations() -> None:
+    operations = detect_unsafe_operations(
+        [
+            {
+                "tool": "http",
+                "method": "POST",
+                "url": "https://resultsdb-api.engineering.redhat.com/api/v2.0/results",
+            },
+            {
+                "tool": "http",
+                "method": "DELETE",
+                "url": "https://resultsdb.example/api/v2.0/results/12345",
+            },
+        ]
+    )
+
+    assert [operation.category for operation in operations] == [
+        "resultsdb_mutation",
+        "resultsdb_mutation",
+    ]
+    assert operations[0].detail == (
+        "ResultsDB mutation: POST https://resultsdb-api.engineering.redhat.com/api/v2.0/results"
+    )
+    assert operations[1].detail == (
+        "ResultsDB mutation: DELETE https://resultsdb.example/api/v2.0/results/12345"
+    )
 
 
 def test_detect_unsafe_operations_reports_rhpkg_lookaside_uploads() -> None:
