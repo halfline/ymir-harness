@@ -41,7 +41,25 @@ def score_case(
     *,
     cases_dir: Path | None = None,
 ) -> ScoreReport:
-    return _score_case_once(expected, actual, cases_dir=cases_dir)
+    primary = _score_case_once(expected, actual, cases_dir=cases_dir)
+    if primary.passed:
+        return primary
+
+    for index, alternate in enumerate(_alternate_expected_results(expected), start=1):
+        alternate_report = _score_case_once(alternate, actual, cases_dir=cases_dir)
+        if alternate_report.passed:
+            alternate_report.metrics.append(
+                ScoreMetric(
+                    name="alternate_acceptable_outcome",
+                    status="pass",
+                    expected=f"alternate #{index}",
+                    actual="matched",
+                    notes="actual result matched an alternate acceptable outcome",
+                )
+            )
+            return alternate_report
+
+    return primary
 
 
 def _score_case_once(
@@ -176,6 +194,21 @@ def _score_case_once(
         metrics=metrics,
         advisory_metrics=_advisory_metrics(actual),
     )
+def _alternate_expected_results(expected: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    alternates = expected.get("alternate_acceptable_outcomes")
+    if not isinstance(alternates, list):
+        return []
+
+    output = []
+    for alternate in alternates:
+        if not isinstance(alternate, Mapping):
+            continue
+        merged = dict(expected)
+        merged.pop("alternate_acceptable_outcomes", None)
+        merged.update(alternate)
+        output.append(merged)
+    return output
+
 
 
 
