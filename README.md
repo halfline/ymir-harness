@@ -44,6 +44,15 @@ export CHAT_MODEL="gemini:gemini-2.5-pro"
 export GEMINI_API_KEY="..."
 ```
 
+Collected replay fixtures live in the `ymir-harness-cases` submodule. Use the
+workflow directory as the cases root:
+
+```bash
+uv run ymir-harness run \
+  --cases ymir-harness-cases/ymir-triage \
+  --workflow ymir-triage \
+  --variant baseline
+```
 
 To test a Ymir change, check out the desired revision in `ai-workflows`, run
 `uv sync`, and run the same case with a different `--variant` and `--run-id`.
@@ -71,6 +80,7 @@ new users a checked-in fixture layout to validate before adding real cases:
 
 ```bash
 ymir-harness validate-cases examples/benchmark_cases/
+ymir-harness run --cases examples/benchmark_cases/ --variant example
 ```
 
 Validation writes:
@@ -114,6 +124,22 @@ When `reference_patch_mode` is `applies`, the reference patch must apply to a
 local mock repo at `pre_fix_ref`.
 It must not reverse-apply to `pre_fix_ref`, which indicates the fix is already
 present.
+When a runnable case has local or `file://` mock repos in `mock_data/*`, `run`
+materializes those repos under the run directory, checks out `pre_fix_ref`,
+writes a per-case gitconfig with `insteadOf` URL rewrites, exposes that
+gitconfig through `GIT_CONFIG_GLOBAL`, and exports `MOCK_BLOCKED_URLS` for the
+original URLs.
+When a runnable case has structured Jira evidence under `jiras/CASE_ID/`, `run`
+generates flat Ymir Jira mock files under `reports/runs/RUN_ID/repeat-N/jira-mock`
+and points `JIRA_MOCK_FILES` at that generated directory. If
+`starting-issue.json` is present, that redacted issue is what Ymir sees during
+triage replay; the completed Jira evidence remains available only as fixture
+ground truth.
+Live Ymir workflow adapters start a managed MCP gateway when `MCP_GATEWAY_URL`
+is not already set. The managed gateway inherits the generated Jira mock
+directory, mock gitconfig/repo workspace, and replay/cache policy for the case.
+If `MCP_GATEWAY_URL` is set, the harness uses that external gateway instead;
+start external gateways with access to the same fixture paths and policy.
 
 `score-results` reads every `benchmark_cases/expected/*.expected.json` file and
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
@@ -131,16 +157,37 @@ excludes them from headline correctness counts.
 Scoring treats any `unsafe_operations` entries in an actual result as a hard
 failure gate. Use that field for blocked write attempts such as Jira mutation,
 GitLab push, or build-system submission calls captured during a run.
+The `run` command also derives `unsafe_operations` from actual-result
+`events`, `tool_events`, `tool_calls`, or `trace` entries before scoring.
 
 Scoring also treats any `replay_violations` entries as a hard failure gate. Use
 that field for unrecorded external fetches or replay cache misses reported by
 the replay layer. Replay violation detection can derive those entries from HTTP
 tool events and shell `curl` or `wget` commands whose target URLs are absent
 from the recorded replay URL set.
+For `replay_only` cases, `run` reads `web_cache/CASE_ID/manifest.json`, exposes
+the manifest path and recorded URL list in the case environment, and derives
+`replay_violations` from actual-result event traces. For `network_denied`
+cases, any external HTTP URL in the event trace is reported as a replay
+violation.
+During `run`, executors are also wrapped in a runtime boundary guard. The guard
+blocks unsafe subprocess commands, blocks external subprocess URLs in
+`network_denied` and `replay_only` modes, blocks direct external socket
+connections, and serves recorded responses from `web_cache` to common Python
+HTTP clients (`urllib`, `requests`, and `aiohttp`) when the URL is declared in
+the replay manifest. Recorded shell `curl`/`wget` downloads made through
+`subprocess.run(..., stdout=PIPE)` are satisfied from cache; unsupported shell
+download forms are blocked instead of falling through to live network.
+Configured model-provider HTTPS calls are allowed so live agents can run while
+fixture and service data still comes from replay inputs.
 
 Expected results may declare `required_artifacts`. Scoring compares that list
 with `generated_artifacts` in the actual result and fails the case when any
 required artifact is missing.
+Workflow adapters also expose `YMIR_BENCHMARK_ARTIFACT_DIR` and merge generated
+artifacts, touched files, spec patch declarations, changelog entries, and
+unrelated source change diagnostics from returned workflow payloads, workflow
+state, and files written to that artifact directory.
 
 Expected results may declare `fix_sources`. Scoring compares that list with
 `fix_sources` in the actual result to check required upstream commits,
@@ -204,6 +251,78 @@ Expected results may declare `alternate_acceptable_outcomes` as a list of
 partial expected-result overrides. If the primary expected result fails,
 scoring tries each alternate and accepts the first deterministic pass while
 recording an `alternate_acceptable_outcome` metric.
+Runner reports use `run_id`, `variant`, optional `ymir_sha`,
+`harness_version`, `fixture_checksum`, `features`, and `repeat` metadata. Each
+case entry includes `case_id`, `case_type`, `status`, `repetition`, optional
+`expected_path`, optional `actual_path`, optional `score`, optional
+`runtime_seconds`, and optional `reason`. Case status values are `not_run`,
+`passed`, `failed`, `timeout`, `skipped`, and `unsupported`.
+The default `run` command writes validation reports first, then writes
+`benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
+Without `--workflow`, it does not invoke Ymir workflows, so each runnable case
+repetition is marked `not_run`.
+Use `--workflow ymir-triage` to call Ymir's triage `run_workflow()` directly for
+each runnable case. The runner applies the per-case no-write environment,
+writes the returned structured triage result to the reserved actual result
+path, scores it against the expected result, and records the score in the run
+entry. A deterministic score mismatch marks the run entry failed.
+Live workflow adapters install Ymir from the checked-out `ai-workflows`
+submodule during `uv sync`. To benchmark a different Ymir revision, check out
+that revision inside `ai-workflows`, run `uv sync`, and commit the updated
+submodule pointer.
+Use `--workflow ymir-backport` to call Ymir's backport `run_workflow()` for
+implementation cases. The executor reads expected-result fields for the
+package, target branch, patch sources, CVE, justification, and fix version,
+then writes a normalized backport actual result with build status, backport
+status, errors, and generated artifacts for scoring.
+Use `--workflow ymir-rebase` to call Ymir's rebase `run_workflow()` for
+implementation cases. The executor reads expected-result fields for the
+package, target branch, target version, Jira issue, and justification, then
+writes a normalized rebase actual result with build status, rebase status,
+errors, generated artifacts, and touched files for scoring.
+Use `--workflow ymir-rebuild` to call Ymir's rebuild `run_workflow()` for
+implementation cases. The executor reads expected-result fields for the
+package, target branch, Jira issue, justification, dependency issue,
+dependency component, sibling issues, and consolidation summary, then writes a
+normalized rebuild actual result with build status, rebuild status, errors,
+merge request URL, dependency fields, and sibling issue fields for scoring.
+Programmatic runner integrations can pass a case executor to receive resolved
+case metadata, the reserved actual result path, enabled feature flags, and the
+per-case no-write environment before returning a run status.
+Executors may return an `actual_result` payload for the runner to write as JSON
+at the reserved actual result path.
+If the executor raises, the runner records a failed case entry with the reserved
+actual result path and the exception reason.
+Workflow adapters start from a no-write environment profile that forces
+`DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
+known write credentials and Kerberos keytab paths from the process environment.
+Default live Ymir workflow adapters use `vertexai:claude-sonnet-4-6` when
+`CHAT_MODEL` is not set. Model provider credentials still need to come from
+the user environment. For the default Vertex Claude model, provide Google
+application-default credentials plus `GOOGLE_VERTEX_PROJECT` and
+`GOOGLE_VERTEX_LOCATION`. For Gemini models, provide `GEMINI_API_KEY`.
+Run reports include a `provenance` object populated from explicit
+`--provenance` entries and recognized environment variables such as
+`AGENTIC_SKILLS_SHA`, `AGENTIC_SKILLS_CHECKSUM`, `CONTAINER_IMAGE_DIGEST`,
+`CHAT_MODEL*`, `REASONING_EFFORT`, `BEEAI_MAX_ITERATIONS`,
+`BENCHMARK_PROMPT_CONFIG`, and `BENCHMARK_MODEL_SETTINGS`.
+Set `BENCHMARK_MAX_ITERATIONS_OVERRIDE` to pass a lower
+`BEEAI_MAX_ITERATIONS` value into each workflow environment. Set
+`BENCHMARK_MAX_COST_PER_RUN` to mark cases whose `total_cost_usd` exceeds the
+cap as `timeout`. Set `BENCHMARK_COST_ALERT_THRESHOLD` to record a run entry
+warning when a case exceeds an advisory cost threshold without exceeding the
+hard cap.
+Unsafe-operation detection currently classifies git push attempts, Jira write
+attempts, GitLab write attempts, Errata write attempts, Testing Farm
+submissions, GreenWave mutations, ResultsDB mutations, and `rhpkg` lookaside
+upload attempts from tool events. It also classifies `brew build`, `koji build`,
+`copr build`, and `konflux build` submissions.
+When `cases.yaml` is present, `run` uses it as the default case list. It accepts
+a top-level list of case ids or a `cases:` list containing case ids or objects
+with `case_id`.
+Use `--case CASE_ID` more than once to limit a run report to selected cases.
+Runnable entries reserve `actual_path` under
+`benchmark_cases/reports/runs/RUN_ID/repeat-N/actual-results/CASE_ID.actual.json`.
 
 `compare-results` reads two aggregate score reports and emits a per-case delta
 table in JSON. Use `--markdown-output` to also write a human-readable comparison
