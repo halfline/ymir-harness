@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from ymir_harness.jira_mock import (
+    JiraMockMaterializationError,
+    build_ymir_jira_mock_issue,
+    has_structured_jira_fixture,
+    structured_jira_fixture_dir,
+)
 from ymir_harness.models import (
     ALLOWED_ANSWER_LEAKAGE,
     ALLOWED_BACKPORT_SOURCES,
@@ -105,6 +111,7 @@ def _validate_case(
         _validate_network_policy(cases_dir, expected, result)
         _validate_source_cache(cases_dir, expected, expected_path, result, workflow)
 
+    reference_patch_targets = _validate_mock_fixtures(mock_paths, expected, result)
 
     if expected is not None:
         _validate_reference_patch(
@@ -115,6 +122,10 @@ def _validate_case(
             workflow,
         )
 
+    if expected is not None:
+        _validate_case_consistency(cases_dir, expected, result)
+
+    _validate_ymir_jira_mock(cases_dir, result)
 
     return result
 
@@ -327,6 +338,7 @@ def _validate_network_policy(
 ) -> None:
     network_mode = expected.get("network_mode")
     case_status = expected.get("case_status")
+
     if network_mode == "live_non_reproducible" and case_status == "active":
         result.issues.append(
             ValidationIssue(
@@ -560,6 +572,7 @@ def _validate_source_cache(
             )
         )
         return
+
     if not any(upstream_dir.iterdir()):
         result.issues.append(
             ValidationIssue(
@@ -922,6 +935,8 @@ def _workflow_requires_source_cache(workflow: str | None, expected: Mapping[str,
     if workflow == "ymir-triage":
         return False
     return _implementation_case_requires_source_cache(expected)
+
+
 def _validate_reference_patch(
     cases_dir: Path,
     expected: Mapping[str, Any],
@@ -1121,6 +1136,266 @@ def _reference_patch_applies_to_target(
         )
         return completed.returncode == 0
 
+
+def _validate_mock_fixtures(
+    mock_paths: list[Path],
+    expected: Mapping[str, Any] | None,
+    result: CaseValidationResult,
+) -> list[ReferencePatchTarget]:
+    expected_package = expected.get("package") if expected else None
+    expected_case_type = expected.get("case_type") if expected else None
+    expected_target_branch = None
+    if expected:
+        expected_target_branch = expected.get("target_branch") or expected.get("fix_version")
+    packages_seen: set[str] = set()
+    branches_seen: set[str] = set()
+    reference_patch_targets: list[ReferencePatchTarget] = []
+
+    if not mock_paths:
+        result.issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="mock_repo_mismatch",
+                message="no mock_data fixture found for case",
+                case_id=result.case_id,
+            )
+        )
+        return reference_patch_targets
+
+    for mock_path in mock_paths:
+        config = _load_json_object(mock_path, result, required=True)
+        if config is None:
+            continue
+
+        _require_schema_metadata(config, mock_path, result, strict=True)
+        if config.get("case_id") is not None:
+            _require_equal(config.get("case_id"), result.case_id, "case_id", mock_path, result)
+        if expected_case_type is not None and config.get("case_type") is not None:
+            _require_equal(
+                config.get("case_type"), expected_case_type, "case_type", mock_path, result
+            )
+        branches_seen.update(_zstream_override_branches(config))
+
+        repos = config.get("repos")
+        if not isinstance(repos, list) or not repos:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="mock_repo_mismatch",
+                    message="mock fixture must include a non-empty repos list",
+                    case_id=result.case_id,
+                    path=str(mock_path),
+                )
+            )
+            continue
+
+        for index, repo in enumerate(repos):
+            if not isinstance(repo, dict):
+                result.issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="mock_repo_mismatch",
+                        message=f"repos[{index}] must be an object",
+                        case_id=result.case_id,
+                        path=str(mock_path),
+                    )
+                )
+                continue
+            packages, branches, reference_patch_target = _validate_mock_repo_entry(
+                repo, index, mock_path, result
+            )
+            packages_seen.update(packages)
+            branches_seen.update(branches)
+            if reference_patch_target is not None:
+                reference_patch_targets.append(reference_patch_target)
+
+    if expected_package and packages_seen and expected_package not in packages_seen:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="mock_repo_mismatch",
+                message=(
+                    "expected.package does not match any mock repo package "
+                    f"({expected_package!r} not in {sorted(packages_seen)!r})"
+                ),
+                case_id=result.case_id,
+            )
+        )
+
+    if expected_target_branch and branches_seen and expected_target_branch not in branches_seen:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="mock_repo_mismatch",
+                message=(
+                    "expected target_branch or fix_version is not declared by any mock "
+                    f"repo branch ({expected_target_branch!r} not in {sorted(branches_seen)!r})"
+                ),
+                case_id=result.case_id,
+            )
+        )
+
+    return reference_patch_targets
+
+
+def _validate_mock_repo_entry(
+    repo: Mapping[str, Any],
+    index: int,
+    mock_path: Path,
+    result: CaseValidationResult,
+) -> tuple[set[str], set[str], ReferencePatchTarget | None]:
+    packages_seen: set[str] = set()
+    branches_seen: set[str] = set()
+    reference_patch_target = None
+    for field in ("package", "remote_url", "pre_fix_ref", "branch"):
+        _require_field(repo, field, mock_path, result, context=f"repos[{index}]")
+
+    package = repo.get("package")
+    if isinstance(package, str) and package:
+        packages_seen.add(package)
+
+    branch = repo.get("branch")
+    if isinstance(branch, str) and branch:
+        branches_seen.add(branch)
+
+    remote_url = repo.get("remote_url")
+    source_url = repo.get("source_url")
+    pre_fix_ref = repo.get("pre_fix_ref")
+    if isinstance(remote_url, str) and isinstance(pre_fix_ref, str):
+        repo_path = _validate_local_pre_fix_ref(
+            source_url if isinstance(source_url, str) else remote_url,
+            pre_fix_ref,
+            mock_path,
+            result,
+        )
+        if repo_path is not None:
+            reference_patch_target = ReferencePatchTarget(
+                repo_path=repo_path,
+                pre_fix_ref=pre_fix_ref,
+                mock_path=mock_path,
+            )
+
+    return packages_seen, branches_seen, reference_patch_target
+
+
+def _zstream_override_branches(config: Mapping[str, Any]) -> set[str]:
+    override = config.get("zstream_override")
+    if not isinstance(override, Mapping):
+        return set()
+    return {value for value in override.values() if isinstance(value, str) and value}
+
+
+def _validate_local_pre_fix_ref(
+    remote_url: str,
+    pre_fix_ref: str,
+    mock_path: Path,
+    result: CaseValidationResult,
+) -> Path | None:
+    repo_path = _local_repo_path(remote_url)
+    if repo_path is None:
+        result.issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="invalid_pre_fix_ref",
+                message="pre_fix_ref was not checked because remote_url is not local",
+                case_id=result.case_id,
+                path=str(mock_path),
+            )
+        )
+        return None
+
+    if not repo_path.exists():
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="invalid_pre_fix_ref",
+                message=f"local mock repo does not exist: {repo_path}",
+                case_id=result.case_id,
+                path=str(mock_path),
+            )
+        )
+        return None
+
+    command = ["git", "-C", str(repo_path), "cat-file", "-e", f"{pre_fix_ref}^{{commit}}"]
+    completed = subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="invalid_pre_fix_ref",
+                message=f"pre_fix_ref does not resolve in local repo: {pre_fix_ref}",
+                case_id=result.case_id,
+                path=str(mock_path),
+            )
+        )
+        return None
+
+    return repo_path
+
+
+def _local_repo_path(remote_url: str) -> Path | None:
+    parsed = urlparse(remote_url)
+    if parsed.scheme == "file":
+        return Path(parsed.path)
+    if parsed.scheme in {"http", "https", "ssh", "git"}:
+        return None
+
+    path = Path(remote_url)
+    if path.is_absolute() or path.exists():
+        return path
+    return None
+
+
+def _validate_case_consistency(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+) -> None:
+    for json_path in _case_json_paths(cases_dir, result.case_id):
+        if json_path.name.endswith(".expected.json"):
+            continue
+        data = _load_json_object(json_path, result, required=False)
+        if data is None:
+            continue
+        if data.get("case_id") is not None:
+            _require_equal(data.get("case_id"), result.case_id, "case_id", json_path, result)
+        if data.get("case_type") is not None and expected.get("case_type") is not None:
+            _require_equal(
+                data.get("case_type"), expected.get("case_type"), "case_type", json_path, result
+            )
+
+
+def _case_json_paths(cases_dir: Path, case_id: str) -> Iterable[Path]:
+    yield from (cases_dir / "mock_data").glob(f"*/{case_id}.json")
+    manifest = cases_dir / "web_cache" / case_id / "manifest.json"
+    if manifest.exists():
+        yield manifest
+    for jira_file in (cases_dir / "jiras" / case_id).glob("*.json"):
+        yield jira_file
+
+
+def _validate_ymir_jira_mock(cases_dir: Path, result: CaseValidationResult) -> None:
+    if not has_structured_jira_fixture(cases_dir, result.case_id):
+        return
+
+    try:
+        build_ymir_jira_mock_issue(cases_dir, result.case_id)
+    except JiraMockMaterializationError as exc:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="jira_mock_invalid",
+                message=str(exc),
+                case_id=result.case_id,
+                path=str(structured_jira_fixture_dir(cases_dir, result.case_id)),
+            )
+        )
 
 
 def _require_schema_metadata(
