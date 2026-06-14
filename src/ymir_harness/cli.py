@@ -8,8 +8,23 @@ from pathlib import Path
 
 from ymir_harness import __version__
 from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
+from ymir_harness.models import (
+    ALLOWED_ANSWER_LEAKAGE,
+    ALLOWED_BACKPORT_SOURCES,
+    ALLOWED_CASE_STATUSES,
+    ALLOWED_CASE_TYPES,
+    ALLOWED_EXPECTED_BASES,
+    ALLOWED_GROUND_TRUTH_CONFIDENCE,
+    ALLOWED_NETWORK_MODES,
+    ALLOWED_REFERENCE_PATCH_MODES,
+    ALLOWED_RESOLUTIONS,
+)
+from ymir_harness.reports import write_validation_reports
 from ymir_harness.provenance import parse_provenance_items
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
+from ymir_harness.validation import validate_case_directory
+
+WORKFLOW_CHOICES = ("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,6 +39,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    validate = subparsers.add_parser(
+        "validate-cases",
+        help="validate a benchmark_cases directory before running agents",
+    )
+    validate.add_argument("cases_dir", type=Path)
+    validate.add_argument(
+        "--workflow",
+        choices=WORKFLOW_CHOICES,
+        default="none",
+        help="validate requirements for a selected workflow; defaults to full case validation",
+    )
+    validate.add_argument(
+        "--reports-dir",
+        type=Path,
+        help="directory for fixture-validation reports; defaults to CASES_DIR/reports",
+    )
+    validate.add_argument(
+        "--json",
+        action="store_true",
+        help="print the validation report JSON to stdout",
+    )
+    validate.set_defaults(func=_cmd_validate_cases)
 
     score = subparsers.add_parser(
         "score-result",
@@ -102,6 +140,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     return args.func(args)
 
 
+def _cmd_validate_cases(args: argparse.Namespace) -> int:
+    report = validate_case_directory(
+        args.cases_dir,
+        workflow=_validation_workflow(args.workflow),
+    )
+    reports_dir = args.reports_dir or args.cases_dir / "reports"
+    write_validation_reports(report, reports_dir)
+
+    if args.json:
+        json.dump(report.to_json(), sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        summary = report.summary()
+        sys.stdout.write(
+            "fixture validation: "
+            f"{summary['valid']} valid, "
+            f"{summary['warning-only']} warning-only, "
+            f"{summary['invalid']} invalid, "
+            f"{summary['skipped']} skipped\n"
+        )
+        sys.stdout.write(f"reports written to {reports_dir}\n")
+
+    return 1 if report.has_blocking_errors else 0
 def _cmd_score_result(args: argparse.Namespace) -> int:
     expected = load_json_file(args.expected_json)
     actual = load_json_file(args.actual_json)
@@ -148,6 +209,10 @@ def _cmd_score_results(args: argparse.Namespace) -> int:
         sys.stdout.write(f"report written to {output_path}\n")
 
     return 1 if report.has_headline_failures else 0
+def _validation_workflow(workflow: str) -> str | None:
+    if workflow == "none":
+        return None
+    return workflow
 
 
 def _parse_provenance_or_exit(items: Sequence[str]) -> dict[str, str]:
