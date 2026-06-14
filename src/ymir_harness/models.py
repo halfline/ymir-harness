@@ -59,6 +59,7 @@ FAILURE_CATEGORIES = {
 IssueSeverity = Literal["error", "warning"]
 CaseValidationStatus = Literal["valid", "invalid", "warning-only", "skipped"]
 ScoreMetricStatus = Literal["pass", "fail", "skipped"]
+RunCaseStatus = Literal["not_run", "passed", "failed", "timeout", "skipped", "unsupported"]
 
 
 @dataclass(frozen=True)
@@ -216,4 +217,92 @@ class ScoreReport:
             "summary": self.summary(),
             "metrics": [metric.to_json() for metric in self.metrics],
             "advisory_metrics": [metric.to_json() for metric in self.advisory_metrics],
+        }
+
+
+@dataclass
+class RunCaseResult:
+    case_id: str
+    case_type: str | None
+    status: RunCaseStatus
+    repetition: int = 1
+    expected_path: Path | None = None
+    actual_path: Path | None = None
+    score: ScoreReport | None = None
+    runtime_seconds: float | None = None
+    reason: str | None = None
+    warnings: list[str] = field(default_factory=list)
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "case_id": self.case_id,
+            "case_type": self.case_type,
+            "status": self.status,
+            "repetition": self.repetition,
+            "expected_path": str(self.expected_path) if self.expected_path else None,
+            "actual_path": str(self.actual_path) if self.actual_path else None,
+        }
+        if self.score is not None:
+            payload["score"] = self.score.to_json()
+        if self.runtime_seconds is not None:
+            payload["runtime_seconds"] = self.runtime_seconds
+        if self.reason:
+            payload["reason"] = self.reason
+        if self.warnings:
+            payload["warnings"] = self.warnings
+        return payload
+
+
+@dataclass
+class RunReport:
+    cases_dir: Path
+    results_dir: Path
+    entries: list[RunCaseResult]
+    run_id: str
+    variant: str
+    ymir_sha: str | None = None
+    harness_version: str | None = None
+    fixture_checksum: str | None = None
+    features: list[str] = field(default_factory=list)
+    repeat: int = 1
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def has_failures(self) -> bool:
+        return any(entry.status in {"failed", "timeout"} for entry in self.entries)
+
+    def summary(self) -> dict[str, int | bool]:
+        counts: dict[str, int | bool] = {
+            "total": len(self.entries),
+            "not_run": 0,
+            "passed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "unsupported": 0,
+            "has_failures": self.has_failures,
+        }
+        for entry in self.entries:
+            if entry.status == "timeout":
+                counts["timeout"] = int(counts.get("timeout", 0)) + 1
+            else:
+                counts[entry.status] = int(counts[entry.status]) + 1
+            if entry.warnings:
+                counts["warnings"] = int(counts.get("warnings", 0)) + len(entry.warnings)
+        return counts
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "variant": self.variant,
+            "ymir_sha": self.ymir_sha,
+            "harness_version": self.harness_version,
+            "fixture_checksum": self.fixture_checksum,
+            "features": self.features,
+            "repeat": self.repeat,
+            "provenance": self.provenance,
+            "cases_dir": str(self.cases_dir),
+            "results_dir": str(self.results_dir),
+            "summary": self.summary(),
+            "cases": [entry.to_json() for entry in self.entries],
         }
