@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 GIT_OPTIONS_WITH_VALUES = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+WRITE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 CURL_URL_OPTIONS = {"--url"}
 CURL_OPTIONS_WITH_VALUES = {
     "-A",
@@ -100,6 +101,13 @@ def detect_unsafe_operations(events: Sequence[Mapping[str, Any]]) -> list[Unsafe
         for command in _event_commands(event):
             operations.extend(detect_unsafe_command(command, source=source))
 
+        method = _event_string(event, "method")
+        url = _event_string(event, "url")
+        if method and url:
+            operation = detect_unsafe_http_request(method, url, source=source)
+            if operation:
+                operations.append(operation)
+
     return _dedupe_operations(operations)
 
 
@@ -119,6 +127,8 @@ def detect_replay_violations(
                 if command_url not in recorded_url_set:
                     violations.append(f"unrecorded URL: {command_url}")
     return _dedupe_strings(violations)
+
+
 def detect_unsafe_command(
     command: str | Sequence[str], *, source: str | None = None
 ) -> list[UnsafeOperation]:
@@ -155,6 +165,38 @@ def detect_unsafe_command(
 
     return _dedupe_operations(operations)
 
+
+def detect_unsafe_http_request(
+    method: str,
+    url: str,
+    *,
+    source: str | None = None,
+) -> UnsafeOperation | None:
+    normalized_method = method.upper()
+    if normalized_method not in WRITE_HTTP_METHODS:
+        return None
+
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    detail = f"{normalized_method} {url}"
+    if "jira" in host or "/rest/api/" in path or "/rest/greenhopper/" in path:
+        return UnsafeOperation("jira_write", f"Jira write: {detail}", source)
+    if "gitlab" in host and any(
+        segment in path for segment in ("fork", "labels", "merge_requests")
+    ):
+        return UnsafeOperation("gitlab_write", f"GitLab write: {detail}", source)
+    if "errata" in host:
+        return UnsafeOperation("errata_write", f"Errata write: {detail}", source)
+    if "testing-farm" in host:
+        return UnsafeOperation(
+            "testing_farm_submission", f"Testing Farm submission: {detail}", source
+        )
+    if "greenwave" in host or host == "gating-status.osci.redhat.com":
+        return UnsafeOperation("greenwave_mutation", f"GreenWave mutation: {detail}", source)
+    if "resultsdb" in host:
+        return UnsafeOperation("resultsdb_mutation", f"ResultsDB mutation: {detail}", source)
+    return None
 
 
 def _event_commands(event: Mapping[str, Any]) -> list[str | Sequence[str]]:
@@ -226,6 +268,8 @@ def _command_replay_urls(command: str | Sequence[str]) -> list[str]:
             urls.append(token)
         index += 1
     return urls
+
+
 def _git_subcommand(tokens: Sequence[str]) -> str | None:
     if not tokens or _program_name(tokens[0]) != "git":
         return None
@@ -275,6 +319,8 @@ def _short_option_value(token: str) -> str | None:
     if not token.startswith("-") or token.startswith("--") or len(token) < 3:
         return None
     return token[:2]
+
+
 def _is_rhpkg_lookaside_upload_command(tokens: Sequence[str]) -> bool:
     if len(tokens) < 2 or _program_name(tokens[0]) != "rhpkg":
         return False
