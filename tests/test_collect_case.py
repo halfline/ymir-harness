@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from ymir_harness.collect_case import (
+    CollectCaseError,
+    CollectCaseRequest,
+    MockRepoInput,
+    WebRecord,
+    collect_case,
+)
+import ymir_harness.collect_case as collect_case_module
+from ymir_harness.validation import validate_case_directory
+
+
+@pytest.fixture(autouse=True)
+def _stub_koji_candidate_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_fetch_candidate_build(package: str, branch: str):
+        return {
+            "package": package,
+            "dist_git_branch": branch,
+            "evr": {
+                "epoch": 0,
+                "version": "1.0",
+                "release": "1.el9",
+            },
+            "source_ref": f"{package}-{branch}-ref",
+        }
+
+    monkeypatch.setattr(collect_case_module, "fetch_candidate_build", fake_fetch_candidate_build)
+
+
+def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    issue_json = _write_json(
+        tmp_path / "inputs" / "issue.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "key": "RHEL-12345",
+            "fields": {"summary": "Backport CVE fix"},
+        },
+    )
+    patch_path = _write_text(
+        tmp_path / "inputs" / "fix.patch",
+        "\n".join(
+            [
+                "diff --git a/source.c b/source.c",
+                "index e69de29..2c43c3c 100644",
+                "--- a/source.c",
+                "+++ b/source.c",
+                "@@ -0,0 +1 @@",
+                "+fixed",
+                "",
+            ]
+        ),
+    )
+    web_record = _write_text(tmp_path / "inputs" / "fix.response", "cached patch\n")
+    source_archive = _write_text(tmp_path / "inputs" / "source.tar.gz", "source\n")
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            cve_ids=("CVE-2026-0001",),
+            patch_urls=("https://example.invalid/fix.patch",),
+            reference_patch_mode="scope_only",
+            mock_repo=MockRepoInput(
+                remote_url="https://example.invalid/dnsmasq.git",
+                pre_fix_ref="abc123",
+                branch="c9s",
+                agent="backport",
+                zstream_override={"8": "rhel-8.10.z"},
+            ),
+            jira_issue_json=issue_json,
+            reference_patch=patch_path,
+            web_records=(
+                WebRecord(
+                    url="https://example.invalid/fix.patch",
+                    source_path=web_record,
+                ),
+            ),
+            source_upstream=(source_archive,),
+            source_lookaside=(source_archive,),
+            notes="Historical merged MR establishes the expected result.",
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["case_status"] == "quarantined"
+    assert expected["case_status_reason"] == "fixture scaffold requires ground-truth review"
+    assert expected["resolution"] == "backport"
+    assert expected["cve_ids"] == ["CVE-2026-0001"]
+    assert expected["patch_urls"] == ["https://example.invalid/fix.patch"]
+    assert expected["backport_source"] == "upstream"
+    assert expected["reference_patch_mode"] == "scope_only"
+    assert (cases_dir / "cases.yaml").read_text(encoding="utf-8") == "cases:\n  - RHEL-12345\n"
+
+    mock = json.loads(
+        (cases_dir / "mock_data" / "backport" / "RHEL-12345.json").read_text(encoding="utf-8")
+    )
+    assert mock["repos"][0]["remote_url"] == "https://example.invalid/dnsmasq.git"
+    assert mock["zstream_override"] == {"8": "rhel-8.10.z"}
+    assert (
+        cases_dir / "mock_data" / "backport" / "reference_patches" / "RHEL-12345.patch"
+    ).is_file()
+
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["required_urls"] == ["https://example.invalid/fix.patch"]
+    recorded_path = (
+        cases_dir
+        / "web_cache"
+        / "RHEL-12345"
+        / manifest["recorded_files"]["https://example.invalid/fix.patch"]
+    )
+    assert recorded_path.read_text(encoding="utf-8") == "cached patch\n"
+    assert (cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "source.tar.gz").is_file()
+    assert (cases_dir / "source_cache" / "RHEL-12345" / "lookaside" / "source.tar.gz").is_file()
+    assert result.warnings == []
+
+    report = validate_case_directory(cases_dir)
+    assert not report.has_blocking_errors
+
+
+def test_collect_case_infers_distgit_backport_source(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            patch_urls=(
+                "https://gitlab.com/redhat/rhel/rpms/redis/-/commit/"
+                "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1.patch",
+            ),
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["backport_source"] == "distgit"
+
+
+def test_collect_case_infers_mixed_backport_source(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="kea",
+            target_branch="rhel-10.0.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            patch_urls=(
+                "https://github.com/isc-projects/kea/commit/"
+                "1111111111111111111111111111111111111111.patch",
+                "https://gitlab.com/redhat/centos-stream/rpms/kea/-/commit/"
+                "2222222222222222222222222222222222222222.patch",
+            ),
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["backport_source"] == "mixed"
+
+
+
+def test_collect_case_refuses_to_overwrite_existing_files(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    request = CollectCaseRequest(
+        cases_dir=cases_dir,
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        resolution="not_affected",
+        package="dnsmasq",
+    )
+
+    collect_case(request)
+
+    with pytest.raises(CollectCaseError, match="refusing to overwrite"):
+        collect_case(request)
+
+
+def test_collect_case_rejects_network_denied_external_records(tmp_path: Path) -> None:
+    with pytest.raises(CollectCaseError, match="network_denied cases must not declare"):
+        collect_case(
+            CollectCaseRequest(
+                cases_dir=tmp_path / "benchmark_cases",
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                resolution="not_affected",
+                package="dnsmasq",
+                network_mode="network_denied",
+                patch_urls=("https://example.invalid/fix.patch",),
+            )
+        )
+
+
+def test_collect_case_overwrite_replaces_existing_files(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    request = CollectCaseRequest(
+        cases_dir=cases_dir,
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        resolution="not_affected",
+        package="dnsmasq",
+    )
+    collect_case(request)
+
+    updated = CollectCaseRequest(
+        cases_dir=cases_dir,
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        resolution="not_affected",
+        package="libtiff",
+        overwrite=True,
+    )
+    collect_case(updated)
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["package"] == "libtiff"
+
+
+def _write_json(path: Path, payload: object) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_text(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
