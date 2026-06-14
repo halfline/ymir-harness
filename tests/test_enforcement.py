@@ -14,6 +14,126 @@ import pytest
 from ymir_harness.enforcement import BenchmarkBoundaryViolation, enforce_benchmark_boundaries
 from ymir_harness.replay import ReplayCache
 
+
+def test_enforcement_serves_recorded_urllib_response(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(
+        tmp_path,
+        {"https://example.invalid/advisory": "advisories/advisory.txt"},
+    )
+    (manifest_path.parent / "advisories").mkdir()
+    (manifest_path.parent / "advisories" / "advisory.txt").write_text(
+        "cached advisory\n",
+        encoding="utf-8",
+    )
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        response = urllib.request.urlopen("https://example.invalid/advisory")
+
+    assert response.read() == b"cached advisory\n"
+
+
+def test_enforcement_returns_replay_miss_for_unrecorded_urllib_response(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen("https://example.invalid/missing")
+
+    assert exc_info.value.code == 404
+    assert exc_info.value.read() == (
+        b"replay miss: URL is not recorded in replay cache: https://example.invalid/missing\n"
+    )
+
+
+def test_enforcement_blocks_network_denied_urllib_response() -> None:
+    with enforce_benchmark_boundaries({"YMIR_BENCHMARK_NETWORK_MODE": "network_denied"}):
+        with pytest.raises(BenchmarkBoundaryViolation, match="external network access blocked"):
+            urllib.request.urlopen("https://example.invalid/missing")
+
+
+def test_enforcement_serves_recorded_requests_json_response(tmp_path: Path) -> None:
+    requests = pytest.importorskip("requests")
+    url = "https://gitlab.example/api/v4/projects/group%2Fpkg"
+    manifest_path = _write_replay_manifest(tmp_path, {url: "gitlab/project.json"})
+    (manifest_path.parent / "gitlab").mkdir()
+    (manifest_path.parent / "gitlab" / "project.json").write_text(
+        json.dumps({"id": 42, "path_with_namespace": "group/pkg"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        response = requests.get(url)
+
+    assert response.headers["Content-Type"] == "application/json"
+    assert response.json() == {"id": 42, "path_with_namespace": "group/pkg"}
+
+
+def test_enforcement_returns_replay_miss_for_unrecorded_requests_response(
+    tmp_path: Path,
+) -> None:
+    requests = pytest.importorskip("requests")
+    url = "https://gitlab.example/api/v4/projects/group%2Fmissing"
+    manifest_path = _write_replay_manifest(tmp_path, {})
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        response = requests.get(url)
+
+    assert response.status_code == 404
+    assert response.text == f"replay miss: URL is not recorded in replay cache: {url}\n"
+
+
+def test_enforcement_blocks_unsafe_requests_write(tmp_path: Path) -> None:
+    requests = pytest.importorskip("requests")
+    manifest_path = _write_replay_manifest(tmp_path, {})
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        with pytest.raises(BenchmarkBoundaryViolation, match="unsafe operation blocked"):
+            requests.post("https://redhat.atlassian.net/rest/api/3/issue", json={})
+
+
+def test_replay_cache_accepts_url_objects(tmp_path: Path) -> None:
+    yarl = pytest.importorskip("yarl")
+    manifest_path = _write_replay_manifest(tmp_path, {})
+
+    cache = ReplayCache(manifest_path)
+
+    assert not cache.has_url(yarl.URL("https://generativelanguage.googleapis.com/v1beta/models"))
+
+
+def test_enforcement_allows_configured_model_provider_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    calls = []
+
+    class Response:
+        def read(self) -> bytes:
+            return b"model response\n"
+
+    def fake_urlopen(url: str, *_args: Any, **_kwargs: Any) -> Response:
+        calls.append(url)
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    environment = {
+        **_environment(manifest_path),
+        "CHAT_MODEL": "gemini:gemini-2.5-pro",
+    }
+    with enforce_benchmark_boundaries(environment):
+        response = urllib.request.urlopen(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+        )
+
+    assert response.read() == b"model response\n"
+    assert calls == [
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+    ]
+
+
 def test_enforcement_blocks_unsafe_subprocess_command() -> None:
     with enforce_benchmark_boundaries({"YMIR_BENCHMARK_NETWORK_MODE": "network_denied"}):
         with pytest.raises(BenchmarkBoundaryViolation, match="unsafe operation blocked"):
