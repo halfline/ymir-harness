@@ -44,6 +44,11 @@ export CHAT_MODEL="gemini:gemini-2.5-pro"
 export GEMINI_API_KEY="..."
 ```
 
+To turn a completed Jira into a repeatable triage experiment, use
+`prepare-case`. It imports the Jira, writes replay fixtures, runs the selected
+workflow, captures any missing Jira searches or web requests, and repeats until
+the run succeeds or reaches the iteration limit.
+
 Collected replay fixtures live in the `ymir-harness-cases` submodule. Use the
 workflow directory as the cases root:
 
@@ -52,6 +57,51 @@ uv run ymir-harness run \
   --cases ymir-harness-cases/ymir-triage \
   --workflow ymir-triage \
   --variant baseline
+
+```bash
+uv run ymir-harness prepare-case \
+  --cases examples/benchmark_cases \
+  --case RHEL-12345 \
+  --jira-url https://redhat.atlassian.net/browse/RHEL-12345 \
+  --jira-token-file "$JIRA_TOKEN_FILE" \
+  --jira-email "$JIRA_EMAIL" \
+  --mock-repo-cache .cache/mock-repos \
+  --workflow ymir-triage \
+  --variant baseline \
+  --run-id RHEL-12345-baseline \
+  --max-iterations 3 \
+  --overwrite \
+  --json > prepare.json
+```
+
+Inspect `prepare.json` first. Its `status` shows whether preparation succeeded,
+hit the iteration limit, or stopped on a capture problem. The last iteration's
+`run.run_json` points at the final report.
+
+```bash
+python -m json.tool prepare.json
+RUN_DIR="$(
+  python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.load(open("prepare.json", encoding="utf-8"))
+print(Path(payload["iterations"][-1]["run"]["run_json"]).parent)
+PY
+)"
+python -m json.tool "$RUN_DIR/run.json"
+python -m json.tool "$RUN_DIR/repeat-1/actual-results/RHEL-12345.actual.json"
+```
+
+After the fixture is prepared, rerun it without collecting new inputs:
+
+```bash
+uv run ymir-harness run \
+  --cases examples/benchmark_cases \
+  --case RHEL-12345 \
+  --workflow ymir-triage \
+  --variant baseline \
+  --run-id RHEL-12345-rerun
 ```
 
 To test a Ymir change, check out the desired revision in `ui-workflows`, run
@@ -266,6 +316,12 @@ each runnable case. The runner applies the per-case no-write environment,
 writes the returned structured triage result to the reserved actual result
 path, scores it against the expected result, and records the score in the run
 entry. A deterministic score mismatch marks the run entry failed.
+Use `prepare-case` for fixture preparation loops. It optionally imports the
+case first when `--jira-url`, `--jira-base-url`, or `--gitlab-mr` is supplied,
+then runs the selected workflow, captures missing replay evidence from the run
+artifacts, and repeats until the run succeeds, no new evidence is captured, or
+`--max-iterations` is reached. Each iteration writes a normal run report under
+`benchmark_cases/reports/runs/RUN_ID-iter-N/`.
 Live workflow adapters install Ymir from the checked-out `ui-workflows`
 submodule during `uv sync`. To benchmark a different Ymir revision, check out
 that revision inside `ui-workflows`, run `uv sync`, and commit the updated
