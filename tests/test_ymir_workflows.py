@@ -23,6 +23,7 @@ from ymir_harness.ymir_workflows import (
     _patch_no_write_candidate_build_lookup,
     _recover_backport_stage_changes,
     make_ymir_backport_executor,
+    make_ymir_rebase_executor,
     make_ymir_triage_executor,
 )
 
@@ -186,6 +187,36 @@ def test_ymir_triage_executor_logs_workflow_progress(
             "cve_backport",
             None,
             "ymir triage workflow missing CHAT_MODEL; "
+            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
+        ),
+        (
+            make_ymir_backport_executor,
+            "cve_backport",
+            {
+                "schema_version": 1,
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+                "target_branch": "rhel-8.10.z",
+                "patch_urls": ["https://example.invalid/fix.patch"],
+            },
+            "ymir backport workflow missing CHAT_MODEL; "
+            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
+        ),
+        (
+            make_ymir_rebase_executor,
+            "rebase",
+            {
+                "schema_version": 1,
+                "case_id": "RHEL-12345",
+                "case_type": "rebase",
+                "resolution": "rebase",
+                "package": "dnsmasq",
+                "target_branch": "rhel-8.10.z",
+                "version": "2.91",
+            },
+            "ymir rebase workflow missing CHAT_MODEL; "
             f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
         ),
     ],
@@ -627,33 +658,6 @@ def test_fixture_search_results_returns_empty_for_unknown_query(tmp_path: Path) 
         == []
     )
 
-@pytest.mark.parametrize(
-    ("executor_factory", "case_type", "expected", "reason"),
-    [
-        (
-            make_ymir_triage_executor,
-            "cve_backport",
-            None,
-            "ymir triage workflow missing CHAT_MODEL; "
-            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
-        ),
-        (
-            make_ymir_backport_executor,
-            "cve_backport",
-            {
-                "schema_version": 1,
-                "case_id": "RHEL-12345",
-                "case_type": "cve_backport",
-                "resolution": "backport",
-                "package": "dnsmasq",
-                "target_branch": "rhel-8.10.z",
-                "patch_urls": ["https://example.invalid/fix.patch"],
-            },
-            "ymir backport workflow missing CHAT_MODEL; "
-            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
-        ),
-    ],
-)
 def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
     tmp_path: Path,
     monkeypatch,
@@ -1015,3 +1019,293 @@ class _BackportResult:
     def model_dump(self, *, mode: str):
         assert mode == "json"
         return self._payload
+
+
+class _RebaseResult:
+    def __init__(self, payload: dict[str, object]):
+        self._payload = payload
+
+    def model_dump(self, *, mode: str):
+        assert mode == "json"
+        return self._payload
+
+
+class _DiagnosticPayload:
+    def __init__(self, payload: dict[str, object]):
+        self._payload = payload
+
+    def model_dump(self, *, mode: str):
+        assert mode == "json"
+        return self._payload
+
+
+def test_ymir_rebase_executor_runs_workflow_with_expected_inputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OUTER_ONLY", "kept")
+    request = _request(
+        tmp_path,
+        case_type="rebase",
+        environment={
+            "PATH": "/usr/bin",
+            "DRY_RUN": "true",
+        },
+        features=("YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK",),
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "rebase",
+            "resolution": "rebase",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "version": "2.91",
+            "rationale": "Maintainer requested rebase",
+        },
+    )
+    calls = []
+
+    async def workflow(**kwargs):
+        calls.append(
+            {
+                **kwargs,
+                "dry_run_env": os.environ["DRY_RUN"],
+                "feature_env": os.environ["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"],
+                "outer_only": os.environ.get("OUTER_ONLY"),
+            }
+        )
+        return _State(
+            rebase_result=_RebaseResult(
+                {
+                    "success": True,
+                    "status": "rebased to 2.91",
+                    "error": None,
+                    "srpm_path": "/tmp/build/dnsmasq.src.rpm",
+                    "files_to_git_add": ["dnsmasq.spec", "dnsmasq-2.91.patch"],
+                }
+            ),
+            usage=_DiagnosticPayload(
+                {
+                    "input_tokens": 3200,
+                    "output_tokens": 700,
+                    "cache_read_tokens": 100,
+                }
+            ),
+            iteration=23,
+            tool_calls=[object(), object()],
+            cost=_DiagnosticPayload({"total_cost_usd": 12.5}),
+        )
+
+    executor = make_ymir_rebase_executor(workflow=workflow)
+
+    execution = executor(request)
+
+    assert os.environ["OUTER_ONLY"] == "kept"
+    assert execution.status == "passed"
+    assert execution.actual_result == {
+        "schema_version": 1,
+        "case_id": "RHEL-12345",
+        "case_type": "rebase",
+        "workflow": "ymir-rebase",
+        "resolution": "rebase",
+        "package": "dnsmasq",
+        "target_branch": "rhel-8.10.z",
+        "version": "2.91",
+        "build_result": "passed",
+        "rebase_status": "rebased to 2.91",
+        "rebase_error": None,
+        "data": {
+            "success": True,
+            "status": "rebased to 2.91",
+            "error": None,
+            "srpm_path": "/tmp/build/dnsmasq.src.rpm",
+            "files_to_git_add": ["dnsmasq.spec", "dnsmasq-2.91.patch"],
+        },
+        "generated_artifacts": ["/tmp/build/dnsmasq.src.rpm"],
+        "touched_files": ["dnsmasq.spec", "dnsmasq-2.91.patch"],
+        "token_usage": {
+            "input_tokens": 3200,
+            "output_tokens": 700,
+            "cache_read_tokens": 100,
+        },
+        "iteration_count": 23,
+        "tool_call_count": 2,
+        "total_cost_usd": 12.5,
+    }
+    assert calls == [
+        {
+            "package": "dnsmasq",
+            "dist_git_branch": "rhel-8.10.z",
+            "version": "2.91",
+            "jira_issue": "RHEL-12345",
+            "justification": "Maintainer requested rebase",
+            "redis_conn": None,
+            "dry_run_env": "true",
+            "feature_env": "true",
+            "outer_only": None,
+        }
+    ]
+
+
+def test_ymir_rebase_executor_reports_missing_expected_inputs(tmp_path: Path) -> None:
+    request = _request(tmp_path, case_type="rebase")
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "rebase",
+            "resolution": "rebase",
+            "package": "dnsmasq",
+        },
+    )
+    calls = []
+
+    async def workflow(**kwargs):
+        calls.append(kwargs)
+        return _State(rebase_result={})
+
+    executor = make_ymir_rebase_executor(workflow=workflow)
+
+    execution = executor(request)
+
+    assert execution.status == "failed"
+    assert execution.actual_result is None
+    assert execution.reason == "ymir rebase workflow missing expected dist_git_branch, version"
+    assert calls == []
+
+
+def test_ymir_rebase_executor_reports_missing_rebase_result(tmp_path: Path) -> None:
+    request = _request(tmp_path, case_type="rebase")
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "rebase",
+            "resolution": "rebase",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "version": "2.91",
+        },
+    )
+
+    async def workflow(**_kwargs):
+        return _State(rebase_result=None)
+
+    executor = make_ymir_rebase_executor(workflow=workflow)
+
+    execution = executor(request)
+
+    assert execution.status == "failed"
+    assert execution.actual_result is None
+    assert execution.reason == "ymir rebase workflow returned no rebase result"
+
+
+def test_ymir_rebase_executor_uses_class_workflow_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    request = _request(
+        tmp_path,
+        case_type="rebase",
+        environment={
+            "CHAT_MODEL": "gemini:gemini-2.5-pro",
+            "MCP_GATEWAY_URL": "http://gateway.example.invalid/sse",
+        },
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "rebase",
+            "resolution": "rebase",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "version": "2.91",
+        },
+    )
+    calls = []
+
+    async def stale_module_workflow(**_kwargs):
+        raise AssertionError("module-level run_workflow must not be used")
+
+    class RebaseWorkflow:
+        @classmethod
+        async def run_workflow(cls, **kwargs):
+            calls.append({"class": cls.__name__, **kwargs})
+            return _State(
+                rebase_result={
+                    "success": True,
+                    "status": "rebased",
+                    "error": None,
+                }
+            )
+
+    _install_fake_ymir_agent(
+        monkeypatch,
+        "rebase_agent",
+        workflow_class=RebaseWorkflow,
+        module_run_workflow=stale_module_workflow,
+    )
+
+    executor = make_ymir_rebase_executor()
+
+    execution = executor(request)
+
+    assert execution.status == "passed"
+    assert calls == [
+        {
+            "class": "RebaseWorkflow",
+            "package": "dnsmasq",
+            "dist_git_branch": "rhel-8.10.z",
+            "version": "2.91",
+            "jira_issue": "RHEL-12345",
+            "justification": None,
+            "redis_conn": None,
+        }
+    ]
+
+
+def test_ymir_rebase_executor_rejects_module_level_workflow_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    request = _request(
+        tmp_path,
+        case_type="rebase",
+        environment={
+            "CHAT_MODEL": "gemini:gemini-2.5-pro",
+            "MCP_GATEWAY_URL": "http://gateway.example.invalid/sse",
+        },
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "rebase",
+            "resolution": "rebase",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "version": "2.91",
+        },
+    )
+
+    async def stale_module_workflow(**_kwargs):
+        return _State(rebase_result={})
+
+    _install_fake_ymir_agent(
+        monkeypatch,
+        "rebase_agent",
+        module_run_workflow=stale_module_workflow,
+    )
+
+    executor = make_ymir_rebase_executor()
+
+    with pytest.raises(ImportError, match="agent class with run_workflow"):
+        executor(request)
