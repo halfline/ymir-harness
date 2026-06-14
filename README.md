@@ -57,6 +57,7 @@ uv run ymir-harness run \
   --cases ymir-harness-cases/ymir-triage \
   --workflow ymir-triage \
   --variant baseline
+```
 
 ```bash
 uv run ymir-harness prepare-case \
@@ -115,6 +116,20 @@ uv run ymir-harness compare-results \
   --markdown-output examples/benchmark_cases/reports/RHEL-12345-comparison.md
 ```
 
+Use `collect-case` directly when you only want to import fixture data and do
+not want to run Ymir yet:
+
+```bash
+uv run ymir-harness collect-case \
+  --cases examples/benchmark_cases \
+  --case-id RHEL-12345 \
+  --jira-url https://redhat.atlassian.net/browse/RHEL-12345 \
+  --jira-token-file "$JIRA_TOKEN_FILE" \
+  --jira-email "$JIRA_EMAIL" \
+  --mock-repo-cache .cache/mock-repos \
+  --overwrite
+```
+
 Validate fixture structure before relying on a case:
 
 ```bash
@@ -124,6 +139,59 @@ uv run ymir-harness validate-cases examples/benchmark_cases --workflow ymir-tria
 Use `--provenance KEY=VALUE` with `run` or `score-results` to add explicit
 run metadata such as `agentic_skills_sha`, `container_image_digest`, or model
 configuration.
+
+`collect-case` scaffolds replayable fixture files from either local evidence or
+read-only fetches. Pass `--jira-url` or `--jira-base-url` to import a completed
+Jira issue. When omitted, `case_type`, `resolution`, `package`, `fix_version`,
+CVEs, and `expected_basis` are derived from Jira fields, Ymir/Jotnar result
+labels, and agent result comments when possible. Patch URLs and GitLab MRs found
+in result comments are recorded into replay evidence but removed from
+`starting-issue.json`. Pass `--gitlab-mr` to fetch GitLab MR
+metadata, commits, changes, and patch content into `web_cache/CASE_ID/`; if no
+MR is passed, a GitLab MR remote link or comment URL in the fetched Jira is used
+automatically.
+When fetched GitLab MR metadata includes `diff_refs.base_sha` and
+`target_branch`, `collect-case` also derives `mock_data` from the MR: the repo
+URL comes from the MR project URL, `pre_fix_ref` comes from the MR base SHA, and
+the branch comes from the MR target branch. If the completed Jira fix version is
+a z-stream name such as `rhel-9.7.z` and the dist-git branch differs,
+`collect-case` writes the corresponding `zstream_override`.
+Supplying `--remote-url`, `--pre-fix-ref`, and `--branch` keeps using the
+manual mock repo metadata instead.
+Use `--mock-repo-cache DIR` to clone or refresh mock repos into a local bare
+repo cache during collection. Cached fixtures keep `remote_url` as the original
+URL for replay rewrites and blocked-network checks, and add `source_url` with
+the local cache path that `run` can clone offline.
+The MR patch is also copied to `mock_data/*/reference_patches/CASE_ID.patch`
+when mock repo metadata is provided and no local `--reference-patch` is
+supplied. Jira fetches use `JIRA_TOKEN` when it is set. Tokens are sent as
+bearer tokens by default; pass `--jira-email` or set `JIRA_EMAIL` /
+`ATLASSIAN_EMAIL` for Atlassian Basic auth, and use `--jira-token-file` when the
+token lives in a file. GitLab fetches use `GITLAB_TOKEN` as a private token when
+it is set. Override environment variable names with `--jira-token-env` or
+`--gitlab-token-env`.
+When `--network-mode` is omitted, `collect-case` keeps Jira-only cases
+`network_denied`, but switches to `replay_only` automatically for replay web
+evidence such as a GitLab MR, `--patch-url`, or `--web-record`.
+For backport cases, `collect-case` also records `backport_source` as
+`upstream`, `distgit`, or `mixed` based on the expected patch URLs. GitHub and
+other external project patches are treated as upstream source backports; Red Hat
+and CentOS Stream dist-git commit patches are treated as dist-git backports.
+
+`collect-case` still accepts pre-collected local files through
+`--jira-issue-json`, `--jira-comments-json`, `--jira-links-json`,
+`--reference-patch`, `--web-record`, and source-cache options. It writes
+`cases.yaml`, `expected/`, `jiras/`, optional `mock_data/`, optional
+`web_cache/`, and optional `source_cache/` entries. New cases default to
+`case_status=quarantined` so they do not enter headline results until reviewed.
+Use `--overwrite` when intentionally regenerating an existing case scaffold.
+Checked-in Jira fixtures stay structured under `jiras/CASE_ID/`; validation
+also verifies they can be materialized into the flat mock shape that Ymir reads.
+`issue.json`, `comments.json`, and `links.json` preserve the completed Jira
+evidence. `starting-issue.json` is a redacted triage starting point that removes
+obvious Ymir result labels, closed status, result comments, and final remote
+links so triage reruns must rederive the answer.
+
 The repository includes a synthetic offline seed fixture under
 `examples/benchmark_cases/`. It is not a historical benchmark case, but it gives
 new users a checked-in fixture layout to validate before adding real cases:
@@ -174,6 +242,7 @@ When `reference_patch_mode` is `applies`, the reference patch must apply to a
 local mock repo at `pre_fix_ref`.
 It must not reverse-apply to `pre_fix_ref`, which indicates the fix is already
 present.
+
 When a runnable case has local or `file://` mock repos in `mock_data/*`, `run`
 materializes those repos under the run directory, checks out `pre_fix_ref`,
 writes a per-case gitconfig with `insteadOf` URL rewrites, exposes that
@@ -301,6 +370,7 @@ Expected results may declare `alternate_acceptable_outcomes` as a list of
 partial expected-result overrides. If the primary expected result fails,
 scoring tries each alternate and accepts the first deterministic pass while
 recording an `alternate_acceptable_outcome` metric.
+
 Runner reports use `run_id`, `variant`, optional `ymir_sha`,
 `harness_version`, `fixture_checksum`, `features`, and `repeat` metadata. Each
 case entry includes `case_id`, `case_type`, `status`, `repetition`, optional
