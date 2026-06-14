@@ -5,18 +5,22 @@ import importlib
 import inspect
 import json
 import os
+import re
+import shutil
 import socket
 import subprocess
 import sys
 import time
+import traceback
+from configparser import ConfigParser
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from ymir_harness.artifacts import merge_artifact_fields
 from ymir_harness.models import SCHEMA_VERSION
-
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseRequest
 from ymir_harness.scoring import load_json_file
 from ymir_harness.ymir_source import ensure_ymir_source_path
@@ -900,3 +904,944 @@ def _request_environment(request: RunCaseRequest):
     finally:
         os.environ.clear()
         os.environ.update(original)
+
+
+@dataclass(frozen=True)
+class BackportInputs:
+    package: str
+    dist_git_branch: str
+    upstream_patches: tuple[str, ...]
+    jira_issue: str
+    cve_id: str | None
+    justification: str | None
+    fix_version: str | None
+
+def make_ymir_backport_executor(
+    *,
+    workflow: AsyncWorkflow | None = None,
+    agent_factory: AgentFactory | None = None,
+) -> Callable[[RunCaseRequest], RunCaseExecution]:
+    def executor(request: RunCaseRequest) -> RunCaseExecution:
+        return asyncio.run(
+            _run_ymir_backport(
+                request,
+                workflow=workflow,
+                agent_factory=agent_factory,
+            )
+        )
+
+    return executor
+
+async def _run_ymir_backport(
+    request: RunCaseRequest,
+    *,
+    workflow: AsyncWorkflow | None,
+    agent_factory: AgentFactory | None,
+) -> RunCaseExecution:
+    inputs = _backport_inputs(request)
+    if isinstance(inputs, RunCaseExecution):
+        return inputs
+
+    missing_dependency = _live_workflow_dependency_failure(
+        request,
+        workflow=workflow,
+        workflow_name="backport",
+    )
+    if missing_dependency is not None:
+        return missing_dependency
+
+    workflow_runner, default_agent_factory = _backport_dependencies(workflow, agent_factory)
+    if workflow is None:
+        default_agent_factory = _instrument_agent_factory(
+            default_agent_factory,
+            request=request,
+            agent_name="backport",
+        )
+
+    with _workflow_environment(request, workflow=workflow):
+        state = await _await_workflow(
+            request,
+            "backport",
+            workflow_runner(
+                package=inputs.package,
+                dist_git_branch=inputs.dist_git_branch,
+                upstream_patches=list(inputs.upstream_patches),
+                jira_issue=inputs.jira_issue,
+                cve_id=inputs.cve_id,
+                justification=inputs.justification,
+                fix_version=inputs.fix_version,
+                dry_run=True,
+                backport_agent_factory=default_agent_factory,
+            ),
+        )
+
+    backport_result = getattr(state, "backport_result", None)
+    if backport_result is None:
+        return RunCaseExecution(
+            status="failed",
+            reason="ymir backport workflow returned no backport result",
+        )
+
+    return RunCaseExecution(
+        status="passed",
+        actual_result=_backport_actual_result(request, inputs, state, backport_result),
+    )
+def _request_from_environment() -> RunCaseRequest:
+    return RunCaseRequest(
+        case_id=os.getenv("YMIR_BENCHMARK_CASE_ID", "unknown"),
+        case_type=None,
+        expected_path=Path(os.devnull),
+        actual_path=Path(os.devnull),
+        cases_dir=Path(os.getenv("YMIR_BENCHMARK_CASES_DIR", ".")),
+        results_dir=Path(os.getenv("YMIR_BENCHMARK_RESULTS_DIR", ".")),
+        repetition=_environment_int("YMIR_BENCHMARK_REPETITION", default=0),
+        variant="debug",
+        features=(),
+        environment=dict(os.environ),
+    )
+
+
+def _workflow_state_snapshot(state: Any) -> dict[str, Any]:
+    names = (
+        "package",
+        "dist_git_branch",
+        "jira_issue",
+        "attempts_remaining",
+        "incremental_fix_attempts_remaining",
+        "build_error",
+        "abandon_autorelease",
+        "used_cherry_pick_workflow",
+    )
+    snapshot = {
+        name: _json_safe_value(getattr(state, name)) for name in names if hasattr(state, name)
+    }
+    backport_result = getattr(state, "backport_result", None)
+    if backport_result is not None:
+        payload = _model_payload(backport_result)
+        snapshot["backport_result"] = {
+            key: _json_safe_value(payload.get(key))
+            for key in ("success", "status", "error", "srpm_path")
+            if key in payload
+        }
+    upstream_patches = getattr(state, "upstream_patches", None)
+    if upstream_patches is not None:
+        snapshot["upstream_patch_count"] = _safe_len(upstream_patches)
+    local_clone = getattr(state, "local_clone", None)
+    if local_clone is not None:
+        snapshot["local_clone"] = str(local_clone)
+    unpacked_sources = getattr(state, "unpacked_sources", None)
+    if unpacked_sources is not None:
+        snapshot["unpacked_sources"] = str(unpacked_sources)
+    return snapshot
+
+
+def _environment_int(name: str, *, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+def _backport_dependencies(
+    workflow: AsyncWorkflow | None,
+    agent_factory: AgentFactory | None,
+) -> tuple[AsyncWorkflow, AgentFactory]:
+    if workflow is not None and agent_factory is not None:
+        return workflow, agent_factory
+
+    ensure_ymir_source_path()
+    from ymir.agents import backport_agent as backport_module  # type: ignore[import-not-found]
+
+    _patch_backport_no_write_subprocesses(backport_module)
+    _patch_backport_workflow_step_logging(backport_module)
+    _patch_fixture_duckduckgo_search(backport_module)
+    _patch_no_write_candidate_build_lookup()
+
+    return (
+        workflow or backport_module.run_workflow,
+        agent_factory or backport_module.create_backport_agent,
+    )
+
+
+def _patch_backport_no_write_subprocesses(backport_module: Any) -> None:
+    if getattr(backport_module, "_ymir_harness_check_subprocess_patched", False):
+        return
+
+    original_check_subprocess = backport_module.check_subprocess
+    original_get_unpacked_sources = backport_module.tasks.get_unpacked_sources
+
+    async def harness_check_subprocess(
+        cmd: str | list[str],
+        shell: bool = False,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> tuple[str | None, str | None]:
+        if (
+            os.getenv("DRY_RUN", "False").lower() == "true"
+            and cwd is not None
+            and _is_package_prep_command(cmd)
+        ):
+            source_dir = _materialize_replay_unpacked_sources(cwd)
+            if source_dir is None:
+                raise RuntimeError(f"replay source archive is missing for {cwd}")
+            return "", ""
+        return await original_check_subprocess(cmd, shell=shell, cwd=cwd, env=env)
+
+    def harness_get_unpacked_sources(local_clone: Path, package: str) -> Path:
+        if os.getenv("DRY_RUN", "False").lower() == "true":
+            source_dir = _materialize_replay_unpacked_sources(local_clone)
+            if source_dir is not None:
+                return source_dir
+        return original_get_unpacked_sources(local_clone, package)
+
+    backport_module.check_subprocess = harness_check_subprocess
+    backport_module.tasks.get_unpacked_sources = harness_get_unpacked_sources
+    backport_module._ymir_harness_check_subprocess_patched = True
+
+
+def _patch_backport_workflow_step_logging(backport_module: Any) -> None:
+    if getattr(backport_module, "_ymir_harness_workflow_step_logging_patched", False):
+        return
+
+    workflow_class = getattr(backport_module, "Workflow", None)
+    if workflow_class is None:
+        return
+
+    original_add_step = workflow_class.add_step
+
+    def harness_add_step(self: Any, step_name: Any, runnable: Any) -> Any:
+        if os.getenv("DRY_RUN", "False").lower() != "true":
+            return original_add_step(self, step_name, runnable)
+
+        async def logged_step(state: Any) -> Any:
+            request = _request_from_environment()
+            started_at = time.monotonic()
+            _workflow_debug(
+                request,
+                "ymir_step_start",
+                workflow="backport",
+                step=str(step_name),
+                state=_workflow_state_snapshot(state),
+            )
+            try:
+                result = await _maybe_await(runnable(state))
+            except BaseException as exc:
+                _workflow_debug(
+                    request,
+                    "ymir_step_errored",
+                    workflow="backport",
+                    step=str(step_name),
+                    elapsed_seconds=round(time.monotonic() - started_at, 3),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    error_detail="".join(traceback.format_exception(exc)),
+                    state=_workflow_state_snapshot(state),
+                )
+                raise
+            result = _recover_backport_stage_changes(step_name, state, result)
+            _workflow_debug(
+                request,
+                "ymir_step_finished",
+                workflow="backport",
+                step=str(step_name),
+                next_step=str(result),
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                state=_workflow_state_snapshot(state),
+            )
+            return result
+
+        return original_add_step(self, step_name, logged_step)
+
+    workflow_class.add_step = harness_add_step
+    backport_module._ymir_harness_workflow_step_logging_patched = True
+
+
+def _recover_backport_stage_changes(step_name: Any, state: Any, result: Any) -> Any:
+    if (
+        os.getenv("DRY_RUN", "False").lower() != "true"
+        or str(step_name) != "stage_changes"
+        or str(result) != "comment_in_jira"
+    ):
+        return result
+
+    backport_result = _field_value(state, "backport_result")
+    error = _string_or_none(_field_value(backport_result, "error"))
+    if error is None or not _is_system_rpm_bindings_error(RuntimeError(error)):
+        return result
+
+    local_clone = _field_value(state, "local_clone")
+    package = _string_or_none(_field_value(state, "package"))
+    if not isinstance(local_clone, Path) or package is None:
+        return result
+
+    if not _stage_spec_patch_files_from_text(local_clone, package):
+        return result
+
+    _set_field(backport_result, "success", True)
+    _set_field(backport_result, "error", None)
+    return "commit_push_and_open_mr" if _field_value(state, "log_result") else "run_log_agent"
+
+
+def _stage_spec_patch_files_from_text(local_clone: Path, package: str) -> bool:
+    spec_path = local_clone / f"{package}.spec"
+    try:
+        spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    files_to_stage = [f"{package}.spec", *_spec_patch_filenames(spec_text)]
+    completed = subprocess.run(
+        ["git", "add", "--all", *files_to_stage],
+        cwd=local_clone,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    return completed.returncode == 0
+
+
+def _spec_patch_filenames(spec_text: str) -> list[str]:
+    filenames = []
+    for line in spec_text.splitlines():
+        match = re.match(r"^\s*Patch\d*:\s*(?P<filename>\S+)", line, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        filename = match.group("filename")
+        if "%" not in filename:
+            filenames.append(filename)
+    return list(dict.fromkeys(filenames))
+
+
+def _set_field(value: Any, name: str, item: Any) -> None:
+    if isinstance(value, dict):
+        value[name] = item
+    else:
+        setattr(value, name, item)
+
+
+def _patch_fixture_duckduckgo_search(agent_module: Any) -> None:
+    if getattr(agent_module, "_ymir_harness_duckduckgo_patched", False):
+        return
+
+    original_tool = getattr(agent_module, "DuckDuckGoSearchTool", None)
+    if original_tool is None:
+        return
+
+    try:
+        from beeai_framework.tools.search.duckduckgo.duckduckgo import (
+            DuckDuckGoSearchToolOutput,
+            DuckDuckGoSearchToolResult,
+        )
+    except ImportError:
+        return
+
+    class HarnessDuckDuckGoSearchTool(original_tool):  # type: ignore[misc, valid-type]
+        async def _run(self, input: Any, options: Any, context: Any) -> Any:
+            if os.getenv("DRY_RUN", "False").lower() != "true":
+                return await super()._run(input, options, context)
+
+            request = _request_from_environment()
+            query = str(getattr(input, "query", ""))
+            results = [
+                DuckDuckGoSearchToolResult(
+                    title=result["title"],
+                    description=result["description"],
+                    url=result["url"],
+                )
+                for result in _fixture_search_results(request, query, max_results=self.max_results)
+            ]
+            _workflow_debug(
+                request,
+                "duckduckgo_replay",
+                query=query,
+                result_count=len(results),
+                urls=[result.url for result in results],
+            )
+            return DuckDuckGoSearchToolOutput(results)
+
+    agent_module.DuckDuckGoSearchTool = HarnessDuckDuckGoSearchTool
+    agent_module._ymir_harness_duckduckgo_patched = True
+
+
+def _fixture_search_results(
+    request: RunCaseRequest,
+    query: str,
+    *,
+    max_results: int,
+) -> list[dict[str, str]]:
+    query_terms = _search_terms(query)
+    candidates = _fixture_search_candidates(request)
+    scored: list[tuple[int, int, dict[str, str]]] = []
+    for index, candidate in enumerate(candidates):
+        haystack = " ".join(
+            (candidate.get("title", ""), candidate.get("description", ""), candidate.get("url", ""))
+        )
+        score = _search_score(query_terms, haystack)
+        if score > 0:
+            scored.append((score, -index, candidate))
+    scored.sort(reverse=True)
+    return [candidate for _score, _index, candidate in scored[:max_results]]
+
+
+def _fixture_search_candidates(request: RunCaseRequest) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    def add(url: str, title: str, description: str) -> None:
+        url = _normalize_fixture_url(url)
+        if not url or url in seen_urls:
+            return
+        seen_urls.add(url)
+        candidates.append({"url": url, "title": title or url, "description": description})
+
+    jira_dir = request.cases_dir / "jiras" / request.case_id
+    for link in _json_list(jira_dir / "links.json", "links"):
+        obj = link.get("object") if isinstance(link, Mapping) else None
+        if not isinstance(obj, Mapping):
+            continue
+        url = _string_value(obj.get("url"))
+        title = _string_value(obj.get("title")) or url
+        add(url, title, "Known Jira remote link.")
+
+    for path in (
+        jira_dir / "starting-issue.json",
+        jira_dir / "issue.json",
+        jira_dir / "comments.json",
+    ):
+        _add_urls_from_json(path, add, "Known Jira issue content.")
+    for path in sorted((jira_dir / "linked").glob("*/starting-issue.json")):
+        _add_urls_from_json(path, add, "Known linked Jira issue content.")
+
+    manifest_path = request.cases_dir / "web_cache" / request.case_id / "manifest.json"
+    manifest = _read_json_object(manifest_path)
+    recorded_files = manifest.get("recorded_files")
+    if isinstance(recorded_files, Mapping):
+        for url in recorded_files:
+            add(str(url), str(url), "Recorded fixture URL.")
+    required_urls = manifest.get("required_urls")
+    if isinstance(required_urls, Sequence) and not isinstance(required_urls, str | bytes):
+        for url in required_urls:
+            add(str(url), str(url), "Required fixture URL.")
+
+    source_cache = request.cases_dir / "source_cache" / request.case_id / "upstream"
+    for config_path in sorted(source_cache.glob("**/config")):
+        url = _git_remote_url(config_path)
+        if url:
+            add(url, url, "Cached source repository.")
+
+    return candidates
+
+
+def _add_urls_from_json(path: Path, add: Callable[[str, str, str], None], description: str) -> None:
+    data = _read_json_value(path)
+    for url in _urls_from_value(data):
+        add(url, url, description)
+
+
+def _json_list(path: Path, key: str) -> list[Any]:
+    data = _read_json_object(path)
+    value = data.get(key)
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    data = _read_json_value(path)
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _read_json_value(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _urls_from_value(value: Any) -> list[str]:
+    urls: list[str] = []
+    if isinstance(value, str):
+        urls.extend(
+            _normalize_fixture_url(match.group(0))
+            for match in re.finditer(r"https?://[^\s\"'<>]+", value)
+        )
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            urls.extend(_urls_from_value(item))
+    elif isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        for item in value:
+            urls.extend(_urls_from_value(item))
+    return list(dict.fromkeys(urls))
+
+
+def _normalize_fixture_url(url: str) -> str:
+    return url.split("|", 1)[0].rstrip(").,|]")
+
+
+def _git_remote_url(config_path: Path) -> str | None:
+    parser = ConfigParser()
+    try:
+        parser.read(config_path, encoding="utf-8")
+    except OSError:
+        return None
+    for section in parser.sections():
+        if section.startswith('remote "') and parser.has_option(section, "url"):
+            return parser.get(section, "url")
+    return None
+
+
+def _search_score(query_terms: set[str], text: str) -> int:
+    if not query_terms:
+        return 0
+    text_terms = _search_terms(text)
+    return len(query_terms & text_terms)
+
+
+def _search_terms(text: str) -> set[str]:
+    stop_words = {
+        "and",
+        "for",
+        "from",
+        "https",
+        "http",
+        "the",
+        "www",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) >= 3 and token not in stop_words
+    }
+
+
+def _string_value(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _patch_no_write_candidate_build_lookup() -> None:
+    try:
+        from ymir.common import utils as utils_module  # type: ignore[import-not-found]
+        from ymir.tools.unprivileged import specfile as specfile_module  # type: ignore[import-not-found]
+        from ymir_harness.koji_replay import recorded_candidate_build_from_environment
+    except ImportError:
+        return
+
+    if not getattr(specfile_module, "_ymir_harness_candidate_build_patched", False):
+        original_specfile_get_latest_candidate_build = specfile_module.get_latest_candidate_build
+        original_utils_get_latest_candidate_build = utils_module.get_latest_candidate_build
+
+        async def harness_get_latest_candidate_build(
+            package: str,
+            dist_git_branch: str,
+        ) -> tuple[Any, str]:
+            if os.getenv("DRY_RUN", "False").lower() != "true":
+                return await original_utils_get_latest_candidate_build(package, dist_git_branch)
+
+            return recorded_candidate_build_from_environment(package, dist_git_branch)
+
+        specfile_module.get_latest_candidate_build = harness_get_latest_candidate_build
+        utils_module.get_latest_candidate_build = harness_get_latest_candidate_build
+        specfile_module._ymir_harness_candidate_build_patched = True
+        specfile_module._ymir_harness_original_get_latest_candidate_build = (
+            original_specfile_get_latest_candidate_build
+        )
+
+    _patch_no_write_update_release(specfile_module)
+
+
+def _patch_no_write_update_release(specfile_module: Any) -> None:
+    if getattr(specfile_module, "_ymir_harness_update_release_patched", False):
+        return
+
+    original_update_release_run = specfile_module.UpdateReleaseTool._run
+
+    async def harness_update_release_run(
+        self: Any,
+        tool_input: Any,
+        options: Any,
+        context: Any,
+    ) -> Any:
+        try:
+            return await original_update_release_run(self, tool_input, options, context)
+        except Exception as exc:
+            if (
+                os.getenv("DRY_RUN", "False").lower() != "true"
+                or not _is_system_rpm_bindings_error(exc)
+            ):
+                raise
+
+            spec_path = specfile_module.get_absolute_path(tool_input.spec, self)
+            _fallback_update_release_text(
+                spec_path,
+                rebase=bool(tool_input.rebase),
+                dist_git_branch=str(tool_input.dist_git_branch),
+                abandon_autorelease=bool(getattr(tool_input, "abandon_autorelease", False)),
+            )
+            return specfile_module.StringToolOutput(
+                result=f"Successfully updated release in {spec_path}"
+            )
+
+    specfile_module.UpdateReleaseTool._run = harness_update_release_run
+    specfile_module._ymir_harness_update_release_patched = True
+    specfile_module._ymir_harness_original_update_release_run = original_update_release_run
+
+
+def _is_system_rpm_bindings_error(exc: BaseException) -> bool:
+    return "rpm.expandMacro requires system RPM bindings" in str(exc)
+
+
+def _fallback_update_release_text(
+    spec_path: Path,
+    *,
+    rebase: bool,
+    dist_git_branch: str,
+    abandon_autorelease: bool,
+) -> None:
+    try:
+        lines = spec_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError as exc:
+        raise RuntimeError(f"could not read spec file {spec_path}: {exc}") from exc
+
+    for index, line in enumerate(lines):
+        match = re.match(r"^(?P<prefix>\s*Release:\s*)(?P<value>.*?)(?P<newline>\r?\n?)$", line)
+        if match is None:
+            continue
+        release = match.group("value").rstrip()
+        trailing = match.group("value")[len(release) :]
+        lines[index] = (
+            match.group("prefix")
+            + _fallback_release_value(
+                release,
+                rebase=rebase,
+                dist_git_branch=dist_git_branch,
+                abandon_autorelease=abandon_autorelease,
+            )
+            + trailing
+            + match.group("newline")
+        )
+        spec_path.write_text("".join(lines), encoding="utf-8")
+        return
+
+    raise RuntimeError(f"Release field not found in {spec_path}")
+
+
+def _fallback_release_value(
+    release: str,
+    *,
+    rebase: bool,
+    dist_git_branch: str,
+    abandon_autorelease: bool,
+) -> str:
+    if _is_zstream_branch(dist_git_branch):
+        return _fallback_zstream_release_value(
+            release,
+            rebase=rebase,
+            abandon_autorelease=abandon_autorelease,
+        )
+    return _fallback_stream_release_value(release, rebase=rebase)
+
+
+def _fallback_stream_release_value(release: str, *, rebase: bool) -> str:
+    if "%autorelease" in release:
+        return "%autorelease"
+
+    prefix, dist_token, suffix = _split_release_dist_token(release)
+    match = re.match(r"^(\d+)(.*)$", prefix)
+    if match is not None:
+        prefix = str(1 if rebase else int(match.group(1)) + 1) + match.group(2)
+    else:
+        prefix += ".1"
+    if dist_token is None:
+        return prefix + "%{?dist}"
+    if re.fullmatch(r"\.\d+", suffix):
+        suffix = ""
+    return prefix + dist_token + suffix
+
+
+def _fallback_zstream_release_value(
+    release: str,
+    *,
+    rebase: bool,
+    abandon_autorelease: bool,
+) -> str:
+    if "%autorelease" in release:
+        if abandon_autorelease:
+            return f"{'0' if rebase else 1}%{{?dist}}.1"
+        prefix, dist_token, suffix = _split_release_dist_token(release)
+        if dist_token is not None and "%autorelease" in suffix and not rebase:
+            return release
+        return "0%{?dist}.%{autorelease -n}" if rebase else "1%{?dist}.%{autorelease -n}"
+
+    if rebase:
+        return "0%{?dist}.1"
+
+    prefix, dist_token, suffix = _split_release_dist_token(release)
+    if dist_token is None:
+        return release + "%{?dist}.1"
+    if match := re.fullmatch(r"\.(\d+)", suffix):
+        return prefix + dist_token + "." + str(int(match.group(1)) + 1)
+    if suffix:
+        return "1%{?dist}.1"
+    return release + ".1"
+
+
+def _split_release_dist_token(release: str) -> tuple[str, str | None, str]:
+    for token in ("%{?dist}", "%dist"):
+        if token in release:
+            prefix, suffix = release.split(token, 1)
+            return prefix, token, suffix
+    return release, None, ""
+
+
+def _is_zstream_branch(dist_git_branch: str) -> bool:
+    return bool(re.match(r"^rhel-\d+\.\d+(?:\.\d+)?$", dist_git_branch))
+
+
+def _is_package_prep_command(cmd: str | list[str]) -> bool:
+    if isinstance(cmd, str):
+        parts = cmd.split()
+    else:
+        parts = [str(part) for part in cmd]
+    if not parts or parts[-1] != "prep":
+        return False
+    program = Path(parts[0]).name
+    return program in {"rhpkg", "centpkg"}
+
+
+def _materialize_replay_unpacked_sources(cwd: Path) -> Path | None:
+    source_dir = _expected_unpacked_sources_dir(cwd)
+    if source_dir is None:
+        return None
+    if _has_materialized_source_content(source_dir):
+        return source_dir
+
+    archive = _primary_source_archive(cwd)
+    if archive is None:
+        return None
+
+    if source_dir.exists() and not _has_materialized_source_content(source_dir):
+        shutil.rmtree(source_dir)
+
+    extracted = _extract_source_archive(archive, cwd)
+    if extracted is None:
+        return None
+    if extracted == source_dir:
+        return source_dir
+    if source_dir.exists():
+        shutil.rmtree(source_dir)
+    if extracted.exists():
+        extracted.rename(source_dir)
+        return source_dir
+    return None
+
+
+def _expected_unpacked_sources_dir(cwd: Path) -> Path | None:
+    spec_path = next(cwd.glob("*.spec"), None)
+    if spec_path is None:
+        return None
+
+    text = spec_path.read_text(encoding="utf-8", errors="replace")
+    explicit_setup = re.search(r"^%(?:auto)?setup\b[^\n]*\s-n\s+(\S+)", text, re.MULTILINE)
+    if explicit_setup is not None:
+        return cwd / explicit_setup.group(1)
+
+    name = _rpm_tag_value(text, "Name")
+    version = _rpm_tag_value(text, "Version")
+    if name is not None and version is not None:
+        return cwd / f"{name}-{version}"
+    return None
+
+
+def _has_materialized_source_content(source_dir: Path) -> bool:
+    if not source_dir.is_dir():
+        return False
+    return any(child.name != ".git" for child in source_dir.iterdir())
+
+
+def _primary_source_archive(cwd: Path) -> Path | None:
+    spec_path = next(cwd.glob("*.spec"), None)
+    if spec_path is None:
+        return None
+
+    text = spec_path.read_text(encoding="utf-8", errors="replace")
+    name = _rpm_tag_value(text, "Name")
+    version = _rpm_tag_value(text, "Version")
+    source_filename = _source0_filename(text, name=name, version=version)
+    if source_filename is not None:
+        candidate = cwd / source_filename
+        if candidate.is_file():
+            return candidate
+
+    for filename in _sources_file_filenames(cwd / "sources"):
+        candidate = cwd / filename
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _source0_filename(text: str, *, name: str | None, version: str | None) -> str | None:
+    source = _rpm_source_tag_value(text, "Source0") or _rpm_source_tag_value(text, "Source")
+    if source is None:
+        return None
+    if name is not None:
+        source = source.replace("%{name}", name).replace("%{?name}", name)
+    if version is not None:
+        source = source.replace("%{version}", version).replace("%{?version}", version)
+    return Path(source).name
+
+
+def _rpm_source_tag_value(text: str, tag: str) -> str | None:
+    match = re.search(rf"^{re.escape(tag)}:\s*(\S+)", text, re.MULTILINE | re.IGNORECASE)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def _sources_file_filenames(path: Path) -> tuple[str, ...]:
+    if not path.is_file():
+        return ()
+    filenames = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = re.search(r"\(([^)]+)\)", line)
+        if match is not None:
+            filenames.append(match.group(1).strip())
+            continue
+        parts = line.split()
+        if parts:
+            filenames.append(parts[-1])
+    return tuple(dict.fromkeys(filename for filename in filenames if filename))
+
+
+def _extract_source_archive(archive: Path, cwd: Path) -> Path | None:
+    before = {child.resolve() for child in cwd.iterdir()}
+    try:
+        shutil.unpack_archive(str(archive), str(cwd))
+        return _single_new_directory(cwd, before)
+    except (shutil.ReadError, ValueError, OSError):
+        pass
+
+    rpm_uncompress = Path("/usr/lib/rpm/rpmuncompress")
+    if rpm_uncompress.exists():
+        completed = subprocess.run(
+            [str(rpm_uncompress), "-x", str(archive)],
+            cwd=cwd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if completed.returncode == 0:
+            return _single_new_directory(cwd, before)
+    return None
+
+
+def _single_new_directory(cwd: Path, before: set[Path]) -> Path | None:
+    new_directories = [
+        child for child in cwd.iterdir() if child.resolve() not in before and child.is_dir()
+    ]
+    if len(new_directories) == 1:
+        return new_directories[0]
+    return None
+
+
+def _rpm_tag_value(text: str, tag: str) -> str | None:
+    match = re.search(rf"^{re.escape(tag)}:\s*(\S+)", text, re.MULTILINE | re.IGNORECASE)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    if not value or "%" in value:
+        return None
+    return value
+
+
+def _backport_inputs(request: RunCaseRequest) -> BackportInputs | RunCaseExecution:
+    expected = load_json_file(request.expected_path)
+    upstream_patches = tuple(
+        _string_list(expected.get("patch_urls")) or _string_list(expected.get("fix_sources"))
+    )
+    values = {
+        "package": _string_or_none(expected.get("package")),
+        "dist_git_branch": _string_or_none(
+            expected.get("dist_git_branch")
+            or expected.get("target_branch")
+            or expected.get("fix_version")
+        ),
+        "upstream_patches": upstream_patches,
+        "jira_issue": _string_or_none(expected.get("jira_issue") or expected.get("case_id"))
+        or request.case_id,
+    }
+    missing = [
+        name for name, value in values.items() if value is None or value == () or value == ""
+    ]
+    if missing:
+        return RunCaseExecution(
+            status="failed",
+            reason=f"ymir backport workflow missing expected {', '.join(missing)}",
+        )
+
+    return BackportInputs(
+        package=values["package"],
+        dist_git_branch=values["dist_git_branch"],
+        upstream_patches=upstream_patches,
+        jira_issue=values["jira_issue"],
+        cve_id=_first_string(expected.get("cve_id"), expected.get("cve_ids")),
+        justification=_string_or_none(
+            expected.get("justification") or expected.get("rationale") or expected.get("notes")
+        ),
+        fix_version=_string_or_none(expected.get("fix_version")),
+    )
+
+
+def _backport_actual_result(
+    request: RunCaseRequest,
+    inputs: BackportInputs,
+    state: Any,
+    backport_result: Any,
+) -> dict[str, Any]:
+    payload = _model_payload(backport_result)
+    package = getattr(state, "package", None) or inputs.package
+    dist_git_branch = getattr(state, "dist_git_branch", None) or inputs.dist_git_branch
+    upstream_patches = getattr(state, "upstream_patches", None) or inputs.upstream_patches
+    cve_id = getattr(state, "cve_id", None) or inputs.cve_id
+    srpm_path = payload.get("srpm_path")
+
+    actual: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "case_id": request.case_id,
+        "case_type": request.case_type,
+        "workflow": "ymir-backport",
+        "resolution": "backport",
+        "package": package,
+        "target_branch": dist_git_branch,
+        "patch_urls": _string_list(upstream_patches),
+        "cve_ids": [cve_id] if cve_id else [],
+        "build_result": "passed" if payload.get("success") else "failed",
+        "backport_status": payload.get("status"),
+        "backport_error": payload.get("error"),
+        "data": payload,
+    }
+    if srpm_path:
+        actual["generated_artifacts"] = [str(srpm_path)]
+
+    merge_artifact_fields(
+        actual,
+        request_artifact_dir=_request_artifact_dir(request),
+        state=state,
+        payload=payload,
+    )
+    actual.update(_state_diagnostics(state))
+    return actual
+
+
+def _request_artifact_dir(request: RunCaseRequest) -> Path | None:
+    artifact_dir = request.environment.get("YMIR_BENCHMARK_ARTIFACT_DIR")
+    return Path(artifact_dir) if artifact_dir else None
