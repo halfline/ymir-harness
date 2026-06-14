@@ -56,9 +56,64 @@ uv run ymir-harness compare-results \
   --markdown-output examples/benchmark_cases/reports/RHEL-12345-comparison.md
 ```
 
+Validate fixture structure before relying on a case:
+
+```bash
+uv run ymir-harness validate-cases examples/benchmark_cases --workflow ymir-triage
+```
+
 Use `--provenance KEY=VALUE` with `run` or `score-results` to add explicit
 run metadata such as `agentic_skills_sha`, `container_image_digest`, or model
 configuration.
+The repository includes a synthetic offline seed fixture under
+`examples/benchmark_cases/`. It is not a historical benchmark case, but it gives
+new users a checked-in fixture layout to validate before adding real cases:
+
+```bash
+ymir-harness validate-cases examples/benchmark_cases/
+```
+
+Validation writes:
+
+```text
+benchmark_cases/reports/fixture-validation.json
+benchmark_cases/reports/fixture-validation.md
+benchmark_cases/reports/fixture-validation-errors.md
+```
+
+Pass `--workflow ymir-triage` when validating a triage-only run so validation
+does not require implementation-only source cache or reference patch artifacts.
+For runnable cases, validation checks that an expected `target_branch` or
+`fix_version` is declared by a mock repo `branch` or `zstream_override` value.
+Replay web cache manifests must list expected `patch_urls` in `required_urls`.
+Recorded web cache files must stay under `web_cache/CASE_ID/`.
+`network_denied` cases must not declare expected `patch_urls`.
+`network_denied` cases must not include `web_cache/CASE_ID/manifest.json`.
+Implementation cases must include `source_cache/CASE_ID/` unless the expected
+result sets `requires_source_cache` to `false`.
+Implementation source caches must include `source_cache/CASE_ID/upstream/` with
+a git clone or source archive.
+Upstream source archive files must be readable.
+Implementation source caches must include artifact files under
+`source_cache/CASE_ID/lookaside/`.
+Lookaside artifact files must be readable.
+Expected results may declare `required_source_cache_files` as a list of
+`source_cache/CASE_ID`-relative file paths.
+Expected results may declare `source_cache_checksums` as a mapping from
+`source_cache/CASE_ID`-relative paths to `sha256:<hex>` digests.
+Validation checks those cached files against their declared digests.
+When expected metadata declares `reference_patch_mode`, validation accepts
+`applies`, `scope_only`, or `semantic_reference`.
+Merged MR implementation cases must declare `reference_patch_mode`.
+Merged MR implementation cases must include
+`mock_data/*/reference_patches/CASE_ID.patch`.
+Reference patch files must parse as git patches.
+Validation also requires a touched-file list to be extractable from each
+reference patch.
+When `reference_patch_mode` is `applies`, the reference patch must apply to a
+local mock repo at `pre_fix_ref`.
+It must not reverse-apply to `pre_fix_ref`, which indicates the fix is already
+present.
 
 `score-results` reads every `benchmark_cases/expected/*.expected.json` file and
 matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
