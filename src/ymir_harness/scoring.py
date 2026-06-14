@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from ymir_harness import __version__
 from ymir_harness.models import (
     AdvisoryMetric,
+    ScoreCollectionEntry,
+    ScoreCollectionReport,
     ScoreMetric,
     ScoreReport,
 )
+from ymir_harness.provenance import collect_provenance
 
 ADVISORY_RESULT_FIELDS = (
     "diff_similarity",
@@ -175,6 +180,12 @@ def _score_case_once(
             normalized_actual["backport_source"],
             optional=True,
         ),
+        _patch_urls_metric(
+            expected,
+            normalized_actual["patch_urls"],
+            cases_dir=cases_dir,
+            case_id=case_id,
+        ),
     ]
 
     if actual.get("error") or actual.get("crash"):
@@ -194,6 +205,8 @@ def _score_case_once(
         metrics=metrics,
         advisory_metrics=_advisory_metrics(actual),
     )
+
+
 def _alternate_expected_results(expected: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     alternates = expected.get("alternate_acceptable_outcomes")
     if not isinstance(alternates, list):
@@ -210,6 +223,32 @@ def _alternate_expected_results(expected: Mapping[str, Any]) -> list[Mapping[str
     return output
 
 
+def score_result_directory(
+    cases_dir: Path,
+    actual_results_dir: Path,
+    *,
+    run_id: str | None = None,
+    ymir_sha: str | None = None,
+    variant: str | None = None,
+    provenance: Mapping[str, Any] | None = None,
+) -> ScoreCollectionReport:
+    cases_dir = cases_dir.resolve()
+    actual_results_dir = actual_results_dir.resolve()
+    entries = [
+        _score_expected_file(expected_path, actual_results_dir, cases_dir)
+        for expected_path in _expected_result_files(cases_dir)
+    ]
+    return ScoreCollectionReport(
+        cases_dir=cases_dir,
+        actual_results_dir=actual_results_dir,
+        entries=entries,
+        run_id=run_id,
+        ymir_sha=ymir_sha,
+        variant=variant,
+        harness_version=__version__,
+        fixture_checksum=_fixture_checksum(cases_dir),
+        provenance=collect_provenance(ymir_sha=ymir_sha, overrides=provenance),
+    )
 
 
 def normalize_actual_result(actual: Mapping[str, Any]) -> dict[str, Any]:
@@ -306,6 +345,7 @@ def _touched_files_metric(expected: Mapping[str, Any], actual: Mapping[str, Any]
         actual=actual_files,
         notes=notes,
     )
+
 
 def _patch_urls_metric(
     expected: Mapping[str, Any],
@@ -461,6 +501,114 @@ def _advisory_metrics(actual: Mapping[str, Any]) -> list[AdvisoryMetric]:
     return metrics
 
 
+def _score_expected_file(
+    expected_path: Path,
+    actual_results_dir: Path,
+    cases_dir: Path,
+) -> ScoreCollectionEntry:
+    expected = load_json_file(expected_path)
+    case_id = _case_id_from_expected_path(expected_path)
+    case_type = _string_or_none(expected.get("case_type"))
+    case_status = _string_or_none(expected.get("case_status"))
+    headline_reason = _headline_exclusion_reason(expected)
+    headline = headline_reason is None
+
+    if case_status == "excluded":
+        return ScoreCollectionEntry(
+            case_id=case_id,
+            case_type=case_type,
+            case_status=case_status,
+            expected_path=expected_path,
+            actual_path=None,
+            status="skipped",
+            headline=False,
+            headline_reason=headline_reason,
+            reason=_string_or_none(expected.get("case_status_reason")) or "case_status is excluded",
+        )
+
+    actual_path = _find_actual_result_file(actual_results_dir, case_id)
+    if actual_path is None:
+        return ScoreCollectionEntry(
+            case_id=case_id,
+            case_type=case_type,
+            case_status=case_status,
+            expected_path=expected_path,
+            actual_path=None,
+            status="missing",
+            headline=headline,
+            headline_reason=headline_reason,
+            reason="actual result file is missing",
+        )
+
+    score = score_case(expected, load_json_file(actual_path), cases_dir=cases_dir)
+    return ScoreCollectionEntry(
+        case_id=case_id,
+        case_type=case_type,
+        case_status=case_status,
+        expected_path=expected_path,
+        actual_path=actual_path,
+        status="passed" if score.passed else "failed",
+        headline=headline,
+        headline_reason=headline_reason,
+        score=score,
+    )
+
+
+def _expected_result_files(cases_dir: Path) -> list[Path]:
+    return sorted((cases_dir / "expected").glob("*.expected.json"))
+
+
+def _fixture_checksum(cases_dir: Path) -> str:
+    digest = hashlib.sha256()
+    for path in _fixture_checksum_files(cases_dir):
+        relative_path = path.relative_to(cases_dir).as_posix()
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _fixture_checksum_files(cases_dir: Path) -> list[Path]:
+    paths: list[Path] = []
+    cases_yaml = cases_dir / "cases.yaml"
+    if cases_yaml.is_file():
+        paths.append(cases_yaml)
+
+    for directory_name in ("expected", "jiras", "mock_data", "web_cache", "source_cache"):
+        directory = cases_dir / directory_name
+        if not directory.is_dir():
+            continue
+        paths.extend(path for path in directory.rglob("*") if path.is_file())
+
+    return sorted(paths, key=lambda path: path.relative_to(cases_dir).as_posix())
+
+
+def _find_actual_result_file(actual_results_dir: Path, case_id: str) -> Path | None:
+    for name in (f"{case_id}.actual.json", f"{case_id}.json"):
+        path = actual_results_dir / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _case_id_from_expected_path(expected_path: Path) -> str:
+    return expected_path.name.removesuffix(".expected.json")
+
+
+def _headline_exclusion_reason(expected: Mapping[str, Any]) -> str | None:
+    case_status = expected.get("case_status", "active")
+    if case_status == "excluded":
+        return "case_status is excluded"
+    if case_status == "quarantined":
+        return "case_status is quarantined"
+    if expected.get("ground_truth_confidence") == "low":
+        return "ground_truth_confidence is low"
+    if expected.get("answer_leakage") == "explicit":
+        return "answer_leakage is explicit"
+    if expected.get("network_mode") == "live_non_reproducible":
+        return "network_mode is live_non_reproducible"
+    return None
 
 
 def _compare(
