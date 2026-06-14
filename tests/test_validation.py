@@ -102,6 +102,71 @@ def test_validate_case_directory_reports_invalid_backport_source(tmp_path: Path)
     )
 
 
+def test_validate_case_directory_reports_invalid_ymir_jira_mock(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+            "expected_basis": "historical_jira_state",
+            "ground_truth_confidence": "high",
+            "answer_leakage": "none",
+            "case_status": "active",
+            "network_mode": "network_denied",
+        },
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": [],
+        },
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "jira_mock_invalid" and "fields must be an object" in issue.message
+        for issue in issues
+    )
+
+
+def test_strict_validation_reports_target_branch_missing_from_mock_fixture(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(cases_dir, repo_path, pre_fix_ref, zstream_override={})
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "mock_repo_mismatch" and "target_branch or fix_version" in issue.message
+        for issue in issues
+    )
+
+
+def test_strict_validation_accepts_zstream_override_target_branch(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+        reference_patch_mode="applies",
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert not report.has_blocking_errors
+
 
 def test_strict_validation_reports_web_cache_missing_expected_patch_url(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
@@ -558,6 +623,7 @@ def test_strict_validation_reports_source_cache_checksum_mismatch(tmp_path: Path
         and issue.path == str(artifact_path)
         for issue in issues
     )
+
 
 def test_strict_validation_reports_missing_reference_patch(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
