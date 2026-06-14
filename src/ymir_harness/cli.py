@@ -16,10 +16,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {__version__}",
     )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    parser.parse_args(argv)
-    return 0
+    args = parser.parse_args(argv)
+    return args.func(args)
