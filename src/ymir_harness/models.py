@@ -59,6 +59,7 @@ FAILURE_CATEGORIES = {
 IssueSeverity = Literal["error", "warning"]
 CaseValidationStatus = Literal["valid", "invalid", "warning-only", "skipped"]
 ScoreMetricStatus = Literal["pass", "fail", "skipped"]
+ScoreCollectionStatus = Literal["passed", "failed", "missing", "skipped"]
 RunCaseStatus = Literal["not_run", "passed", "failed", "timeout", "skipped", "unsupported"]
 
 
@@ -221,6 +222,94 @@ class ScoreReport:
 
 
 @dataclass
+class ScoreCollectionEntry:
+    case_id: str
+    case_type: str | None
+    case_status: str | None
+    expected_path: Path
+    actual_path: Path | None
+    status: ScoreCollectionStatus
+    headline: bool
+    headline_reason: str | None = None
+    score: ScoreReport | None = None
+    reason: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "case_id": self.case_id,
+            "case_type": self.case_type,
+            "case_status": self.case_status,
+            "expected_path": str(self.expected_path),
+            "actual_path": str(self.actual_path) if self.actual_path else None,
+            "status": self.status,
+            "headline": self.headline,
+        }
+        if self.headline_reason:
+            payload["headline_reason"] = self.headline_reason
+        if self.reason:
+            payload["reason"] = self.reason
+        if self.score is not None:
+            payload["score"] = self.score.to_json()
+        return payload
+
+
+@dataclass
+class ScoreCollectionReport:
+    cases_dir: Path
+    actual_results_dir: Path
+    entries: list[ScoreCollectionEntry]
+    run_id: str | None = None
+    ymir_sha: str | None = None
+    variant: str | None = None
+    harness_version: str | None = None
+    fixture_checksum: str | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def has_headline_failures(self) -> bool:
+        return any(
+            entry.headline and entry.status in {"failed", "missing"} for entry in self.entries
+        )
+
+    def summary(self) -> dict[str, int | bool]:
+        counts: dict[str, int | bool] = {
+            "total": len(self.entries),
+            "passed": 0,
+            "failed": 0,
+            "missing": 0,
+            "skipped": 0,
+            "headline_passed": 0,
+            "headline_failed": 0,
+            "headline_missing": 0,
+            "non_headline": 0,
+            "has_headline_failures": self.has_headline_failures,
+        }
+        for entry in self.entries:
+            counts[entry.status] = int(counts[entry.status]) + 1
+            if entry.headline:
+                if entry.status in {"passed", "failed", "missing"}:
+                    key = f"headline_{entry.status}"
+                    counts[key] = int(counts[key]) + 1
+            else:
+                counts["non_headline"] = int(counts["non_headline"]) + 1
+        return counts
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "ymir_sha": self.ymir_sha,
+            "variant": self.variant,
+            "harness_version": self.harness_version,
+            "fixture_checksum": self.fixture_checksum,
+            "provenance": self.provenance,
+            "cases_dir": str(self.cases_dir),
+            "actual_results_dir": str(self.actual_results_dir),
+            "summary": self.summary(),
+            "cases": [entry.to_json() for entry in self.entries],
+        }
+
+
 class RunCaseResult:
     case_id: str
     case_type: str | None
