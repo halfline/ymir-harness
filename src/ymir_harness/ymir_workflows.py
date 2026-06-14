@@ -1845,3 +1845,156 @@ def _backport_actual_result(
 def _request_artifact_dir(request: RunCaseRequest) -> Path | None:
     artifact_dir = request.environment.get("YMIR_BENCHMARK_ARTIFACT_DIR")
     return Path(artifact_dir) if artifact_dir else None
+
+
+@dataclass(frozen=True)
+class RebaseInputs:
+    package: str
+    dist_git_branch: str
+    version: str
+    jira_issue: str
+    justification: str | None
+
+
+def make_ymir_rebase_executor(
+    *,
+    workflow: AsyncWorkflow | None = None,
+) -> Callable[[RunCaseRequest], RunCaseExecution]:
+    def executor(request: RunCaseRequest) -> RunCaseExecution:
+        return asyncio.run(
+            _run_ymir_rebase(
+                request,
+                workflow=workflow,
+            )
+        )
+
+    return executor
+
+
+async def _run_ymir_rebase(
+    request: RunCaseRequest,
+    *,
+    workflow: AsyncWorkflow | None,
+) -> RunCaseExecution:
+    inputs = _rebase_inputs(request)
+    if isinstance(inputs, RunCaseExecution):
+        return inputs
+
+    missing_dependency = _live_workflow_dependency_failure(
+        request,
+        workflow=workflow,
+        workflow_name="rebase",
+    )
+    if missing_dependency is not None:
+        return missing_dependency
+
+    workflow_runner = _rebase_dependencies(workflow)
+
+    with _workflow_environment(request, workflow=workflow):
+        state = await _await_workflow(
+            request,
+            "rebase",
+            workflow_runner(
+                package=inputs.package,
+                dist_git_branch=inputs.dist_git_branch,
+                version=inputs.version,
+                jira_issue=inputs.jira_issue,
+                justification=inputs.justification,
+                redis_conn=None,
+            ),
+        )
+
+    rebase_result = getattr(state, "rebase_result", None)
+    if rebase_result is None:
+        return RunCaseExecution(
+            status="failed",
+            reason="ymir rebase workflow returned no rebase result",
+        )
+
+    return RunCaseExecution(
+        status="passed",
+        actual_result=_rebase_actual_result(request, inputs, state, rebase_result),
+    )
+
+
+def _rebase_dependencies(workflow: AsyncWorkflow | None) -> AsyncWorkflow:
+    if workflow is not None:
+        return workflow
+
+    return _agent_class_workflow(
+        "ymir.agents.rebase_agent",
+        class_names=("RebaseAgent", "RebaseWorkflow"),
+    )
+
+
+def _rebase_inputs(request: RunCaseRequest) -> RebaseInputs | RunCaseExecution:
+    expected = load_json_file(request.expected_path)
+    values = {
+        "package": _string_or_none(expected.get("package")),
+        "dist_git_branch": _string_or_none(
+            expected.get("dist_git_branch")
+            or expected.get("target_branch")
+            or expected.get("fix_version")
+        ),
+        "version": _string_or_none(expected.get("version") or expected.get("target_version")),
+        "jira_issue": _string_or_none(expected.get("jira_issue") or expected.get("case_id"))
+        or request.case_id,
+    }
+    missing = [name for name, value in values.items() if value is None or value == ""]
+    if missing:
+        return RunCaseExecution(
+            status="failed",
+            reason=f"ymir rebase workflow missing expected {', '.join(missing)}",
+        )
+
+    return RebaseInputs(
+        package=values["package"],
+        dist_git_branch=values["dist_git_branch"],
+        version=values["version"],
+        jira_issue=values["jira_issue"],
+        justification=_string_or_none(
+            expected.get("justification") or expected.get("rationale") or expected.get("notes")
+        ),
+    )
+
+
+def _rebase_actual_result(
+    request: RunCaseRequest,
+    inputs: RebaseInputs,
+    state: Any,
+    rebase_result: Any,
+) -> dict[str, Any]:
+    payload = _model_payload(rebase_result)
+    package = getattr(state, "package", None) or inputs.package
+    dist_git_branch = getattr(state, "dist_git_branch", None) or inputs.dist_git_branch
+    version = getattr(state, "version", None) or inputs.version
+    srpm_path = payload.get("srpm_path")
+    files_to_git_add = _string_list(payload.get("files_to_git_add"))
+
+    actual: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "case_id": request.case_id,
+        "case_type": request.case_type,
+        "workflow": "ymir-rebase",
+        "resolution": "rebase",
+        "package": package,
+        "target_branch": dist_git_branch,
+        "version": version,
+        "build_result": "passed" if payload.get("success") else "failed",
+        "rebase_status": payload.get("status"),
+        "rebase_error": payload.get("error"),
+        "data": payload,
+    }
+    if srpm_path:
+        actual["generated_artifacts"] = [str(srpm_path)]
+    if files_to_git_add:
+        actual["touched_files"] = files_to_git_add
+
+    merge_artifact_fields(
+        actual,
+        request_artifact_dir=_request_artifact_dir(request),
+        state=state,
+        payload=payload,
+    )
+    actual.update(_state_diagnostics(state))
+    return actual
