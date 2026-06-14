@@ -686,7 +686,6 @@ def test_collect_case_records_commit_patches_from_jira_merge_request_patch(
         "/repository/files/AGENTS.md/raw?ref=main"
     )
     internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fglib2"
-    project_id = 501034256
     internal_branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
     responses = {
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
@@ -795,7 +794,6 @@ def test_collect_case_synthesizes_hidden_internal_branch_fixture(
         "/repository/files/AGENTS.md/raw?ref=main"
     )
     internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fglib2"
-    project_id = 501034256
     internal_branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
     responses = {
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
@@ -879,7 +877,6 @@ def test_collect_case_fetches_internal_branch_records_from_local_jira(
     comments_json = _write_json(tmp_path / "comments.json", {"comments": []})
     links_json = _write_json(tmp_path / "links.json", [])
     internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fglib2"
-    project_id = 501034256
     internal_branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
     responses = {
         internal_project_url: HTTPError(internal_project_url, 404, "Not Found", None, None),
@@ -993,3 +990,218 @@ def _write_text(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def test_collect_case_warns_when_auto_discovered_gitlab_mr_is_private(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    mr_url = "https://gitlab.com/redhat/rhel/rpms/redis/-/merge_requests/6"
+    patch_url = f"{mr_url}.patch"
+    issue_json = _write_json(
+        tmp_path / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": {"summary": "Backport CVE fix"},
+        },
+    )
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": (
+                        "Output from Ymir Backport Agent\n"
+                        f"*Resolution*: backport\n*Patch URL*: {patch_url}\n"
+                    )
+                }
+            ]
+        },
+    )
+    responses: dict[str, object] = {}
+    seen_urls: list[str] = []
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: None)
+    monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            jira_issue_json=issue_json,
+            jira_comments_json=comments_json,
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["patch_urls"] == [patch_url]
+    assert expected["backport_source"] == "distgit"
+    assert any("skipped auto-discovered GitLab MR" in warning for warning in result.warnings)
+    assert any("skipped Jira patch URL" in warning for warning in result.warnings)
+    assert seen_urls == []
+
+
+def test_collect_case_fails_when_explicit_gitlab_mr_is_private(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mr_url = "https://gitlab.com/redhat/rhel/rpms/redis/-/merge_requests/6"
+    api_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis/merge_requests/6"
+    responses = {api_url: HTTPError(api_url, 404, "Not Found", None, None)}
+    seen_urls: list[str] = []
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: None)
+    monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
+
+    with pytest.raises(CollectCaseError, match="failed to fetch"):
+        collect_case(
+            CollectCaseRequest(
+                cases_dir=tmp_path / "benchmark_cases",
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                resolution="backport",
+                package="redis",
+                target_branch="rhel-9.6.z",
+                expected_basis="merged_mr",
+                network_mode="replay_only",
+                gitlab_mr_url=mr_url,
+            )
+        )
+
+    assert seen_urls == [api_url]
+
+
+def test_collect_case_uses_gitlab_api_diff_when_mr_patch_is_forbidden(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    mr_url = "https://gitlab.com/redhat/rhel/rpms/redis/-/merge_requests/6"
+    commit_sha = "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
+    diff_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis"
+        f"/repository/commits/{commit_sha}/diff"
+    )
+    responses = {
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis/merge_requests/6": {
+            "iid": 6,
+            "target_branch": "rhel-9.6.0",
+            "web_url": mr_url,
+            "diff_refs": {
+                "base_sha": "4549b5e1d58b86ef6c81f4089684034c1d3b302d",
+                "head_sha": commit_sha,
+                "start_sha": "4549b5e1d58b86ef6c81f4089684034c1d3b302d",
+            },
+        },
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis/merge_requests/6/commits": [
+            {"id": commit_sha, "title": "rebase to 6.2.22"}
+        ],
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis/merge_requests/6/changes": {
+            "changes": [{"old_path": "redis.spec", "new_path": "redis.spec"}]
+        },
+        f"{mr_url}.patch": HTTPError(f"{mr_url}.patch", 403, "Forbidden", None, None),
+        diff_url: [
+            {
+                "old_path": "redis.spec",
+                "new_path": "redis.spec",
+                "diff": "@@ -1 +1 @@\n-Version: 6.2.20\n+Version: 6.2.22\n",
+                "new_file": False,
+                "deleted_file": False,
+            }
+        ],
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: "token")
+    monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            gitlab_mr_url=mr_url,
+        )
+    )
+
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    recorded = cases_dir / "web_cache" / "RHEL-12345" / manifest["recorded_files"][f"{mr_url}.patch"]
+    assert recorded.read_text(encoding="utf-8").startswith("diff --git a/redis.spec")
+    assert any("used GitLab API diff" in warning for warning in result.warnings)
+    assert diff_url in seen_urls
+
+
+def test_collect_case_uses_gitlab_api_diff_for_jira_commit_patch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    commit_sha = "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
+    patch_url = f"https://gitlab.com/redhat/rhel/rpms/redis/-/commit/{commit_sha}.patch"
+    diff_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis"
+        f"/repository/commits/{commit_sha}/diff"
+    )
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": (
+                        "Output from Ymir Backport Agent\n"
+                        f"*Resolution*: backport\n*Patch URL*: {patch_url}\n"
+                    )
+                }
+            ]
+        },
+    )
+    responses = {
+        patch_url: HTTPError(patch_url, 403, "Forbidden", None, None),
+        diff_url: [
+            {
+                "old_path": ".gitignore",
+                "new_path": ".gitignore",
+                "diff": "@@ -1 +1,2 @@\n old\n+new\n",
+                "new_file": False,
+                "deleted_file": False,
+            }
+        ],
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: "token")
+    monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            jira_comments_json=comments_json,
+        )
+    )
+
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    recorded = cases_dir / "web_cache" / "RHEL-12345" / manifest["recorded_files"][patch_url]
+    assert recorded.read_text(encoding="utf-8").startswith("diff --git a/.gitignore")
+    assert any("used GitLab API diff" in warning for warning in result.warnings)
+    assert diff_url in seen_urls
