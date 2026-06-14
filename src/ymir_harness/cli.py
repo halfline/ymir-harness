@@ -20,9 +20,22 @@ from ymir_harness.models import (
     ALLOWED_RESOLUTIONS,
 )
 from ymir_harness.reports import write_validation_reports
+from ymir_harness.runner import (
+    append_global_issues,
+    build_run_report,
+    default_results_dir,
+    load_case_manifest,
+    select_validation_cases,
+)
 from ymir_harness.provenance import parse_provenance_items
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 from ymir_harness.validation import validate_case_directory
+from ymir_harness.ymir_workflows import (
+    make_ymir_backport_executor,
+    make_ymir_rebuild_executor,
+    make_ymir_rebase_executor,
+    make_ymir_triage_executor,
+)
 
 WORKFLOW_CHOICES = ("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild")
 
@@ -111,6 +124,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="record additional run provenance; may be provided more than once",
     )
     score_many.set_defaults(func=_cmd_score_results)
+
+    run = subparsers.add_parser(
+        "run",
+        help="validate benchmark cases and write a placeholder run report",
+    )
+    run.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
+    run.add_argument("--variant", required=True, help="benchmark variant name")
+    run.add_argument("--run-id", help="benchmark run identifier; defaults to VARIANT")
+    run.add_argument("--ymir-sha", help="record the benchmarked Ymir git SHA")
+    run.add_argument(
+        "--repeat",
+        type=_positive_int,
+        default=1,
+        help="number of repetitions to record for each runnable case",
+    )
+    run.add_argument(
+        "--case",
+        dest="case_ids",
+        action="append",
+        default=[],
+        help="run only the named case id; may be provided more than once",
+    )
+    run.add_argument(
+        "--feature",
+        dest="features",
+        action="append",
+        default=[],
+        help="record an enabled feature flag; may be provided more than once",
+    )
+    run.add_argument("--results-dir", type=Path, help="directory for run artifacts")
+    run.add_argument("--output", type=Path, help="write run report JSON to this path")
+    run.add_argument("--json", action="store_true", help="print the run report JSON to stdout")
+    run.add_argument(
+        "--workflow",
+        choices=WORKFLOW_CHOICES,
+        default="none",
+        help="workflow executor to invoke; defaults to placeholder run entries",
+    )
+    run.add_argument(
+        "--provenance",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="record additional run provenance; may be provided more than once",
+    )
+    run.set_defaults(func=_cmd_run)
 
     for compare_name in ("compare-results", "compare"):
         compare = subparsers.add_parser(
@@ -209,10 +268,94 @@ def _cmd_score_results(args: argparse.Namespace) -> int:
         sys.stdout.write(f"report written to {output_path}\n")
 
     return 1 if report.has_headline_failures else 0
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    run_id = args.run_id or args.variant
+    results_dir = args.results_dir or default_results_dir(args.cases, run_id)
+    validation_report = validate_case_directory(
+        args.cases,
+        workflow=_validation_workflow(args.workflow),
+    )
+    manifest_case_ids, manifest_issues = load_case_manifest(args.cases)
+    validation_report = append_global_issues(validation_report, manifest_issues)
+    validation_report = select_validation_cases(
+        validation_report,
+        args.case_ids or manifest_case_ids,
+    )
+    validation_reports_dir = args.cases / "reports"
+    write_validation_reports(validation_report, validation_reports_dir)
+
+    if validation_report.has_blocking_errors:
+        summary = validation_report.summary()
+        sys.stdout.write(
+            "benchmark run blocked: "
+            f"{summary['invalid']} invalid, "
+            f"{summary['global_errors']} global errors\n"
+        )
+        sys.stdout.write(f"validation reports written to {validation_reports_dir}\n")
+        return 1
+
+    report = build_run_report(
+        args.cases,
+        results_dir,
+        validation_report=validation_report,
+        run_id=run_id,
+        variant=args.variant,
+        ymir_sha=args.ymir_sha,
+        features=args.features,
+        repeat=args.repeat,
+        executor=_run_executor(args.workflow),
+        provenance=_parse_provenance_or_exit(args.provenance),
+    )
+    output_path = args.output or results_dir / "run.json"
+    payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(payload, encoding="utf-8")
+
+    if args.json:
+        sys.stdout.write(payload)
+    else:
+        summary = report.summary()
+        sys.stdout.write(
+            "benchmark run: "
+            f"{summary['not_run']} not run, "
+            f"{summary['skipped']} skipped, "
+            f"{summary['unsupported']} unsupported\n"
+        )
+        sys.stdout.write(f"run report written to {output_path}\n")
+
+    return 1 if report.has_failures else 0
+
+
+def _run_executor(workflow: str):
+    if workflow == "ymir-triage":
+        return make_ymir_triage_executor()
+    if workflow == "ymir-backport":
+        return make_ymir_backport_executor()
+    if workflow == "ymir-rebase":
+        return make_ymir_rebase_executor()
+    if workflow == "ymir-rebuild":
+        return make_ymir_rebuild_executor()
+    return None
+
+
 def _validation_workflow(workflow: str) -> str | None:
     if workflow == "none":
         return None
     return workflow
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        msg = f"invalid positive integer: {value}"
+        raise argparse.ArgumentTypeError(msg) from exc
+    if parsed < 1:
+        msg = f"invalid positive integer: {value}"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
 
 
 def _parse_provenance_or_exit(items: Sequence[str]) -> dict[str, str]:
