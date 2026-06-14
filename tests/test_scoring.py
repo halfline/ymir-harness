@@ -165,6 +165,35 @@ def test_score_case_does_not_treat_fix_version_as_target_branch() -> None:
     assert metrics["target_branch"].status == "skipped"
 
 
+def test_score_case_accepts_alternate_acceptable_outcome() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "target_branch": "rhel-8.10.z",
+        "alternate_acceptable_outcomes": [
+            {
+                "resolution": "rebase",
+                "target_branch": "rhel-9.0.z",
+            }
+        ],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "rebase",
+        "package": "dnsmasq",
+        "target_branch": "rhel-9.0.z",
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["alternate_acceptable_outcome"].status == "pass"
+    assert metrics["resolution"].expected == "rebase"
+
 
 def test_score_case_reports_affectedness_failures() -> None:
     expected = {
