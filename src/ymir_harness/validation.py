@@ -102,6 +102,7 @@ def _validate_case(
         _validate_expected_metadata(expected, expected_path, result)
         result.case_type = _string_or_none(expected.get("case_type"))
         result.case_status = _string_or_none(expected.get("case_status"))
+        _validate_network_policy(cases_dir, expected, result)
         _validate_source_cache(cases_dir, expected, expected_path, result, workflow)
 
 
@@ -317,6 +318,197 @@ def _validate_expected_metadata(
         result,
         required=reference_patch_mode_required,
     )
+
+
+def _validate_network_policy(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+) -> None:
+    network_mode = expected.get("network_mode")
+    case_status = expected.get("case_status")
+    if network_mode == "live_non_reproducible" and case_status == "active":
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="network_policy_invalid",
+                message="live network cases must be quarantined or excluded",
+                case_id=result.case_id,
+            )
+        )
+
+    if network_mode == "replay_only":
+        _validate_web_cache_manifest(cases_dir, expected, result)
+    elif network_mode == "network_denied":
+        patch_urls = _expected_patch_urls(expected)
+        if patch_urls:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="network_policy_invalid",
+                    message="network_denied case must not declare patch_urls",
+                    case_id=result.case_id,
+                )
+            )
+
+        web_manifest = cases_dir / "web_cache" / result.case_id / "manifest.json"
+        if web_manifest.exists():
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="network_policy_invalid",
+                    message="network_denied case must not include web_cache manifest",
+                    case_id=result.case_id,
+                    path=str(web_manifest),
+                )
+            )
+
+
+def _validate_web_cache_manifest(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+) -> None:
+    manifest_path = cases_dir / "web_cache" / result.case_id / "manifest.json"
+    manifest = _load_json_object(manifest_path, result, required=True)
+    if manifest is None:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="web_cache_incomplete",
+                message="replay_only case must include web_cache manifest.json",
+                case_id=result.case_id,
+                path=str(manifest_path),
+            )
+        )
+        return
+
+    _require_schema_metadata(manifest, manifest_path, result, strict=True)
+    _require_equal(manifest.get("case_id"), result.case_id, "case_id", manifest_path, result)
+    if expected.get("case_type") is not None:
+        _require_equal(
+            manifest.get("case_type"),
+            expected.get("case_type"),
+            "case_type",
+            manifest_path,
+            result,
+        )
+
+    required_urls = manifest.get("required_urls")
+    recorded_files = manifest.get("recorded_files")
+    if not isinstance(required_urls, list):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="web_cache_incomplete",
+                message="manifest required_urls must be a list",
+                case_id=result.case_id,
+                path=str(manifest_path),
+            )
+        )
+        required_urls = []
+    if not isinstance(recorded_files, dict):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="web_cache_incomplete",
+                message="manifest recorded_files must be an object",
+                case_id=result.case_id,
+                path=str(manifest_path),
+            )
+        )
+        recorded_files = {}
+
+    required_url_set = {url for url in required_urls if isinstance(url, str)}
+    for url in _expected_patch_urls(expected):
+        if url not in required_url_set:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"expected patch URL is missing from required_urls: {url}",
+                    case_id=result.case_id,
+                    path=str(manifest_path),
+                )
+            )
+
+    for url in required_urls:
+        if not isinstance(url, str) or not url:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message="manifest required_urls entries must be non-empty strings",
+                    case_id=result.case_id,
+                    path=str(manifest_path),
+                )
+            )
+            continue
+        recorded = recorded_files.get(url)
+        if not isinstance(recorded, str) or not recorded:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"required URL has no recorded file: {url}",
+                    case_id=result.case_id,
+                    path=str(manifest_path),
+                )
+            )
+            continue
+
+        recorded_path = _recorded_cache_path(manifest_path, recorded)
+        if recorded_path is None:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"recorded file path escapes web_cache case directory for URL: {url}",
+                    case_id=result.case_id,
+                    path=str(manifest_path),
+                )
+            )
+            continue
+
+        if not recorded_path.is_file():
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"recorded file is missing for URL: {url}",
+                    case_id=result.case_id,
+                    path=str(recorded_path),
+                )
+            )
+            continue
+        if recorded_path.stat().st_size == 0:
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="web_cache_incomplete",
+                    message=f"recorded file is empty for URL: {url}",
+                    case_id=result.case_id,
+                    path=str(recorded_path),
+                )
+            )
+
+
+def _recorded_cache_path(manifest_path: Path, recorded: str) -> Path | None:
+    cache_dir = manifest_path.parent
+    recorded_path = cache_dir / recorded
+    try:
+        recorded_path.resolve(strict=False).relative_to(cache_dir.resolve(strict=False))
+    except ValueError:
+        return None
+    return recorded_path
+
+
+def _expected_patch_urls(expected: Mapping[str, Any]) -> list[str]:
+    patch_urls = expected.get("patch_urls")
+    if not isinstance(patch_urls, list):
+        return []
+
+    return [url for url in patch_urls if isinstance(url, str) and url]
 
 
 def _validate_source_cache(
