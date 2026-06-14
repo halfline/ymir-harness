@@ -61,6 +61,15 @@ CaseValidationStatus = Literal["valid", "invalid", "warning-only", "skipped"]
 ScoreMetricStatus = Literal["pass", "fail", "skipped"]
 ScoreCollectionStatus = Literal["passed", "failed", "missing", "skipped"]
 RunCaseStatus = Literal["not_run", "passed", "failed", "timeout", "skipped", "unsupported"]
+ComparisonDelta = Literal[
+    "win",
+    "regression",
+    "unchanged_pass",
+    "unchanged_fail",
+    "missing_in_baseline",
+    "missing_in_candidate",
+    "non_headline",
+]
 
 
 @dataclass(frozen=True)
@@ -310,6 +319,7 @@ class ScoreCollectionReport:
         }
 
 
+@dataclass
 class RunCaseResult:
     case_id: str
     case_type: str | None
@@ -392,6 +402,163 @@ class RunReport:
             "provenance": self.provenance,
             "cases_dir": str(self.cases_dir),
             "results_dir": str(self.results_dir),
+            "summary": self.summary(),
+            "cases": [entry.to_json() for entry in self.entries],
+        }
+
+
+@dataclass(frozen=True)
+class ComparisonEntry:
+    case_id: str
+    case_type: str | None
+    headline: bool
+    baseline_status: str | None
+    candidate_status: str | None
+    delta: ComparisonDelta
+    headline_reason: str | None = None
+    baseline_repetitions: int | None = None
+    candidate_repetitions: int | None = None
+    baseline_stability: str | None = None
+    candidate_stability: str | None = None
+    baseline_runtime_seconds: float | None = None
+    candidate_runtime_seconds: float | None = None
+    runtime_delta_seconds: float | None = None
+    baseline_token_count: float | None = None
+    candidate_token_count: float | None = None
+    token_delta: float | None = None
+    baseline_tool_call_count: float | None = None
+    candidate_tool_call_count: float | None = None
+    tool_call_delta: float | None = None
+    baseline_total_cost_usd: float | None = None
+    candidate_total_cost_usd: float | None = None
+    cost_delta_usd: float | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        payload = {
+            "case_id": self.case_id,
+            "case_type": self.case_type,
+            "headline": self.headline,
+            "baseline_status": self.baseline_status,
+            "candidate_status": self.candidate_status,
+            "delta": self.delta,
+        }
+        if self.headline_reason:
+            payload["headline_reason"] = self.headline_reason
+        if self.baseline_repetitions is not None:
+            payload["baseline_repetitions"] = self.baseline_repetitions
+        if self.candidate_repetitions is not None:
+            payload["candidate_repetitions"] = self.candidate_repetitions
+        if self.baseline_stability is not None:
+            payload["baseline_stability"] = self.baseline_stability
+        if self.candidate_stability is not None:
+            payload["candidate_stability"] = self.candidate_stability
+        if self.baseline_runtime_seconds is not None:
+            payload["baseline_runtime_seconds"] = self.baseline_runtime_seconds
+        if self.candidate_runtime_seconds is not None:
+            payload["candidate_runtime_seconds"] = self.candidate_runtime_seconds
+        if self.runtime_delta_seconds is not None:
+            payload["runtime_delta_seconds"] = self.runtime_delta_seconds
+        if self.baseline_token_count is not None:
+            payload["baseline_token_count"] = self.baseline_token_count
+        if self.candidate_token_count is not None:
+            payload["candidate_token_count"] = self.candidate_token_count
+        if self.token_delta is not None:
+            payload["token_delta"] = self.token_delta
+        if self.baseline_tool_call_count is not None:
+            payload["baseline_tool_call_count"] = self.baseline_tool_call_count
+        if self.candidate_tool_call_count is not None:
+            payload["candidate_tool_call_count"] = self.candidate_tool_call_count
+        if self.tool_call_delta is not None:
+            payload["tool_call_delta"] = self.tool_call_delta
+        if self.baseline_total_cost_usd is not None:
+            payload["baseline_total_cost_usd"] = self.baseline_total_cost_usd
+        if self.candidate_total_cost_usd is not None:
+            payload["candidate_total_cost_usd"] = self.candidate_total_cost_usd
+        if self.cost_delta_usd is not None:
+            payload["cost_delta_usd"] = self.cost_delta_usd
+        return payload
+
+
+@dataclass
+class ComparisonReport:
+    baseline_path: Path
+    candidate_path: Path
+    entries: list[ComparisonEntry]
+
+    @property
+    def has_headline_regressions(self) -> bool:
+        return any(
+            entry.headline and entry.delta in {"regression", "missing_in_candidate"}
+            for entry in self.entries
+        )
+
+    def summary(self) -> dict[str, int | bool | float]:
+        counts: dict[str, int | bool | float] = {
+            "total": len(self.entries),
+            "headline_total": 0,
+            "wins": 0,
+            "regressions": 0,
+            "unchanged_pass": 0,
+            "unchanged_fail": 0,
+            "missing_in_baseline": 0,
+            "missing_in_candidate": 0,
+            "non_headline": 0,
+            "stable_wins": 0,
+            "stable_regressions": 0,
+            "flaky_cases": 0,
+            "has_headline_regressions": self.has_headline_regressions,
+        }
+        cost_delta = 0.0
+        runtime_delta = 0.0
+        token_delta = 0.0
+        tool_call_delta = 0.0
+        has_cost_delta = False
+        has_runtime_delta = False
+        has_token_delta = False
+        has_tool_call_delta = False
+        for entry in self.entries:
+            if entry.delta == "win":
+                counts["wins"] = int(counts["wins"]) + 1
+            elif entry.delta == "regression":
+                counts["regressions"] = int(counts["regressions"]) + 1
+            else:
+                counts[entry.delta] = int(counts[entry.delta]) + 1
+            if entry.headline:
+                counts["headline_total"] = int(counts["headline_total"]) + 1
+            stable = entry.baseline_stability == "stable" and entry.candidate_stability == "stable"
+            if stable and entry.delta == "win":
+                counts["stable_wins"] = int(counts["stable_wins"]) + 1
+            if stable and entry.delta == "regression":
+                counts["stable_regressions"] = int(counts["stable_regressions"]) + 1
+            if entry.baseline_stability == "flaky" or entry.candidate_stability == "flaky":
+                counts["flaky_cases"] = int(counts["flaky_cases"]) + 1
+            if entry.cost_delta_usd is not None:
+                cost_delta += entry.cost_delta_usd
+                has_cost_delta = True
+            if entry.runtime_delta_seconds is not None:
+                runtime_delta += entry.runtime_delta_seconds
+                has_runtime_delta = True
+            if entry.token_delta is not None:
+                token_delta += entry.token_delta
+                has_token_delta = True
+            if entry.tool_call_delta is not None:
+                tool_call_delta += entry.tool_call_delta
+                has_tool_call_delta = True
+        if has_cost_delta:
+            counts["cost_delta_usd"] = cost_delta
+        if has_runtime_delta:
+            counts["runtime_delta_seconds"] = runtime_delta
+        if has_token_delta:
+            counts["token_delta"] = token_delta
+        if has_tool_call_delta:
+            counts["tool_call_delta"] = tool_call_delta
+        return counts
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "baseline_path": str(self.baseline_path),
+            "candidate_path": str(self.candidate_path),
             "summary": self.summary(),
             "cases": [entry.to_json() for entry in self.entries],
         }
