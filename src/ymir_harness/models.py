@@ -58,6 +58,7 @@ FAILURE_CATEGORIES = {
 
 IssueSeverity = Literal["error", "warning"]
 CaseValidationStatus = Literal["valid", "invalid", "warning-only", "skipped"]
+ScoreMetricStatus = Literal["pass", "fail", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -153,4 +154,66 @@ class ValidationReport:
             "summary": self.summary(),
             "global_issues": [issue.to_json() for issue in self.global_issues],
             "cases": [case.to_json() for case in self.cases],
+        }
+
+
+@dataclass(frozen=True)
+class ScoreMetric:
+    name: str
+    status: ScoreMetricStatus
+    expected: Any = None
+    actual: Any = None
+    notes: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        payload = {
+            "name": self.name,
+            "status": self.status,
+            "expected": self.expected,
+            "actual": self.actual,
+        }
+        if self.notes:
+            payload["notes"] = self.notes
+        return payload
+
+
+@dataclass(frozen=True)
+class AdvisoryMetric:
+    name: str
+    value: Any
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "value": self.value,
+        }
+
+
+@dataclass
+class ScoreReport:
+    case_id: str
+    case_type: str | None
+    metrics: list[ScoreMetric]
+    advisory_metrics: list[AdvisoryMetric] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return all(metric.status != "fail" for metric in self.metrics)
+
+    def summary(self) -> dict[str, int | bool]:
+        return {
+            "passed": self.passed,
+            "pass": sum(1 for metric in self.metrics if metric.status == "pass"),
+            "fail": sum(1 for metric in self.metrics if metric.status == "fail"),
+            "skipped": sum(1 for metric in self.metrics if metric.status == "skipped"),
+        }
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "case_id": self.case_id,
+            "case_type": self.case_type,
+            "summary": self.summary(),
+            "metrics": [metric.to_json() for metric in self.metrics],
+            "advisory_metrics": [metric.to_json() for metric in self.advisory_metrics],
         }
