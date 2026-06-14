@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ymir_harness import __version__
+from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
 from ymir_harness.provenance import parse_provenance_items
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
 
@@ -73,6 +74,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     score_many.set_defaults(func=_cmd_score_results)
 
+    for compare_name in ("compare-results", "compare"):
+        compare = subparsers.add_parser(
+            compare_name,
+            help="compare two aggregate score-results JSON reports",
+        )
+        compare.add_argument("baseline_json", type=Path)
+        compare.add_argument("candidate_json", type=Path)
+        compare.add_argument(
+            "--output",
+            type=Path,
+            help="write comparison JSON to this path instead of stdout",
+        )
+        compare.add_argument(
+            "--markdown-output",
+            type=Path,
+            help="write a Markdown comparison report to this path",
+        )
+        compare.set_defaults(func=_cmd_compare_results)
 
     return parser
 
@@ -136,3 +155,20 @@ def _parse_provenance_or_exit(items: Sequence[str]) -> dict[str, str]:
         return parse_provenance_items(items)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def _cmd_compare_results(args: argparse.Namespace) -> int:
+    report = compare_result_reports(args.baseline_json, args.candidate_json)
+    payload = json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n"
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload, encoding="utf-8")
+    else:
+        sys.stdout.write(payload)
+
+    if args.markdown_output:
+        args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+        args.markdown_output.write_text(render_comparison_markdown(report), encoding="utf-8")
+
+    return 1 if report.has_headline_regressions else 0
