@@ -1,8 +1,19 @@
+from __future__ import annotations
+
+import json
+import os
 import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
+
+import yaml
+
+from ymir_harness import __version__
 from ymir_harness.artifacts import artifact_environment
 from ymir_harness.capture_missing import CaptureMissingError, blocked_urls_from_run_path
 from ymir_harness.enforcement import BenchmarkBoundaryViolation, enforce_benchmark_boundaries
@@ -11,7 +22,16 @@ from ymir_harness.jira_mock import (
     has_structured_jira_fixture,
     materialize_ymir_jira_mock,
 )
+from ymir_harness.models import (
+    RunCaseResult,
+    RunCaseStatus,
+    RunReport,
+    ScoreReport,
+    ValidationIssue,
+    ValidationReport,
+)
 from ymir_harness.mock_repos import MockRepoMaterializationError, materialize_case_mock_repos
+from ymir_harness.provenance import collect_provenance
 from ymir_harness.replay import canonicalize_replay_url
 from ymir_harness.safety import detect_replay_violations, detect_unsafe_operations
 from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
@@ -19,6 +39,8 @@ from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
 DEFAULT_CHAT_MODEL = "vertexai:claude-sonnet-4-6"
 MAX_ITERATIONS_OVERRIDE_ENV = "BENCHMARK_MAX_ITERATIONS_OVERRIDE"
+MAX_COST_PER_RUN_ENV = "BENCHMARK_MAX_COST_PER_RUN"
+COST_ALERT_THRESHOLD_ENV = "BENCHMARK_COST_ALERT_THRESHOLD"
 EVENT_TRACE_FIELDS = ("events", "tool_events", "tool_calls", "trace")
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
@@ -61,12 +83,22 @@ class RunCaseRequest:
 
 
 @dataclass(frozen=True)
+class RunCaseExecution:
+    status: RunCaseStatus
+    actual_result: Mapping[str, Any] | None = None
+    actual_path: Path | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
 class ReplayPolicy:
     network_mode: str | None
     manifest_path: Path | None
     recorded_urls: tuple[str, ...] = ()
 
 
+def default_results_dir(cases_dir: Path, run_id: str) -> Path:
+    return cases_dir / "reports" / "runs" / run_id
 
 
 def actual_result_path(results_dir: Path, case_id: str, repetition: int) -> Path:
@@ -579,16 +611,18 @@ def _run_case_result(
                     actual_path=execution_actual_path,
                     reason=_actual_result_score_failure_reason(exc),
                 )
+        budget_reason = _budget_guardrail_reason(request.environment, actual_result)
         return RunCaseResult(
             case_id=case_id,
             case_type=case_type,
-            status=_execution_status(execution, score),
+            status="timeout" if budget_reason else _execution_status(execution, score),
             repetition=repetition,
             expected_path=expected_path if expected_path.is_file() else None,
             actual_path=execution_actual_path,
             score=score,
             runtime_seconds=runtime_seconds,
-            reason=execution.reason or _execution_reason(execution, score),
+            reason=budget_reason or execution.reason or _execution_reason(execution, score),
+            warnings=_budget_guardrail_warnings(request.environment, actual_result),
         )
 
     return RunCaseResult(
@@ -600,6 +634,7 @@ def _run_case_result(
         actual_path=actual_path,
         reason=RUNNER_NOT_WIRED_REASON,
     )
+
 
 def _executor_failure_reason(exc: Exception) -> str:
     return "executor failed: " + _exception_summary(exc)
@@ -1063,6 +1098,67 @@ def _append_result_values(
     values.extend(additions)
     payload[name] = values
 
+
+def _budget_guardrail_reason(
+    environment: Mapping[str, str],
+    actual_result: Mapping[str, Any] | None,
+) -> str | None:
+    max_cost = _float_or_none(environment.get(MAX_COST_PER_RUN_ENV))
+    if max_cost is None or actual_result is None:
+        return None
+
+    total_cost = _float_or_none(_actual_result_field(actual_result, "total_cost_usd"))
+    if total_cost is None or total_cost <= max_cost:
+        return None
+
+    return (
+        "budget guardrail exceeded: "
+        f"total_cost_usd {_format_number(total_cost)} > "
+        f"{MAX_COST_PER_RUN_ENV} {_format_number(max_cost)}"
+    )
+
+
+def _budget_guardrail_warnings(
+    environment: Mapping[str, str],
+    actual_result: Mapping[str, Any] | None,
+) -> list[str]:
+    alert_threshold = _float_or_none(environment.get(COST_ALERT_THRESHOLD_ENV))
+    if alert_threshold is None or actual_result is None:
+        return []
+
+    total_cost = _float_or_none(_actual_result_field(actual_result, "total_cost_usd"))
+    max_cost = _float_or_none(environment.get(MAX_COST_PER_RUN_ENV))
+    if total_cost is None or total_cost <= alert_threshold:
+        return []
+    if max_cost is not None and total_cost > max_cost:
+        return []
+
+    return [
+        "budget alert threshold exceeded: "
+        f"total_cost_usd {_format_number(total_cost)} > "
+        f"{COST_ALERT_THRESHOLD_ENV} {_format_number(alert_threshold)}"
+    ]
+
+
+def _actual_result_field(actual_result: Mapping[str, Any], name: str) -> Any:
+    data = actual_result.get("data")
+    nested = data if isinstance(data, Mapping) else {}
+    if actual_result.get(name) is not None:
+        return actual_result.get(name)
+    return nested.get(name)
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_number(value: float) -> str:
+    return f"{value:g}"
 
 
 def _write_actual_result(path: Path, actual_result: Mapping[str, Any]) -> None:
