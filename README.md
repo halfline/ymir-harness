@@ -46,6 +46,22 @@ export GEMINI_API_KEY="..."
 
 
 
+Use `--provenance KEY=VALUE` with `run` or `score-results` to add explicit
+run metadata such as `agentic_skills_sha`, `container_image_digest`, or model
+configuration.
+
+`score-results` reads every `benchmark_cases/expected/*.expected.json` file and
+matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
+actual-results directory. It writes aggregate JSON to
+`benchmark_cases/reports/results.json` unless `--output` is provided. Use
+`--run-id`, `--ymir-sha`, and `--variant` to stamp the aggregate report with
+benchmark run metadata.
+Aggregate score reports also include the Ymir Harness version that produced
+the score.
+They include `fixture_checksum` for fixture inputs under `cases.yaml`,
+`expected/`, `jiras/`, `mock_data/`, `web_cache/`, and `source_cache/`.
+Non-headline aggregate entries include `headline_reason` when case metadata
+excludes them from headline correctness counts.
 
 Scoring treats any `unsafe_operations` entries in an actual result as a hard
 failure gate. Use that field for blocked write attempts such as Jira mutation,
