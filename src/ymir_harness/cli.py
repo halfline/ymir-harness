@@ -57,6 +57,7 @@ from ymir_harness.ymir_workflows import (
     make_ymir_triage_executor,
 )
 
+
 WORKFLOW_CHOICES = ("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild")
 MAX_PREPARE_AUTO_ALLOWED_HOSTS = 16
 
@@ -263,6 +264,67 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--json", action="store_true", help="print collection result JSON")
     collect.set_defaults(func=_cmd_collect_case)
 
+    capture = subparsers.add_parser(
+        "capture-missing",
+        help="capture allowed missing replay URLs from a prior run into web_cache",
+    )
+    capture.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
+    capture.add_argument(
+        "--from-run",
+        dest="run_path",
+        type=Path,
+        required=True,
+        help="run directory or run artifact to scan for blocked replay URLs",
+    )
+    capture.add_argument("--case", dest="case_id", required=True, help="case id to update")
+    capture.add_argument(
+        "--allow-host",
+        dest="allowed_hosts",
+        action="append",
+        default=[],
+        help=(
+            "extra host allowed for read-only capture; defaults include "
+            f"{', '.join(DEFAULT_ALLOWED_HOSTS)}"
+        ),
+    )
+    capture.add_argument(
+        "--gitlab-token-env",
+        default="GITLAB_TOKEN",
+        help="environment variable containing a GitLab private token",
+    )
+    capture.add_argument(
+        "--jira-token-env",
+        default="JIRA_TOKEN",
+        help="environment variable containing a Jira token",
+    )
+    capture.add_argument("--jira-token-file", type=Path, help="file containing a Jira token")
+    capture.add_argument("--jira-email", help="Atlassian account email for Jira Basic auth")
+    capture.add_argument(
+        "--as-of",
+        help=(
+            "historical Jira timestamp to reconstruct search results against; "
+            "defaults to the first existing Ymir/Jotnar result comment when available"
+        ),
+    )
+    capture.add_argument(
+        "--http-timeout",
+        type=float,
+        default=30.0,
+        help="timeout in seconds for read-only captures",
+    )
+    capture.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="list candidate URLs without fetching or writing web_cache",
+    )
+    capture.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace existing recorded files for captured URLs",
+    )
+    capture.add_argument("--json", action="store_true", help="print capture result JSON")
+    capture.set_defaults(func=_cmd_capture_missing)
+
     prepare = subparsers.add_parser(
         "prepare-case",
         help="collect and iteratively capture replay evidence for one case",
@@ -388,6 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="write the score report JSON to this path instead of stdout",
     )
     score.set_defaults(func=_cmd_score_result)
+
     score_many = subparsers.add_parser(
         "score-results",
         help="score every expected case with actual result files from a directory",
@@ -616,6 +679,40 @@ def _collect_mock_repo(args: argparse.Namespace) -> MockRepoInput | None:
         ),
         blocked_original_urls=tuple(args.blocked_original_url),
     )
+
+
+def _cmd_capture_missing(args: argparse.Namespace) -> int:
+    allowed_hosts = tuple(dict.fromkeys((*DEFAULT_ALLOWED_HOSTS, *args.allowed_hosts)))
+    request = CaptureMissingRequest(
+        cases_dir=args.cases,
+        run_path=args.run_path,
+        case_id=args.case_id,
+        allowed_hosts=allowed_hosts,
+        gitlab_token_env=args.gitlab_token_env,
+        jira_token_env=args.jira_token_env,
+        jira_token_file=args.jira_token_file,
+        jira_email=args.jira_email,
+        as_of=args.as_of,
+        http_timeout=args.http_timeout,
+        dry_run=args.dry_run,
+        overwrite=args.overwrite,
+    )
+    try:
+        result = capture_missing(request)
+    except CaptureMissingError as exc:
+        sys.stderr.write(f"capture-missing failed: {exc}\n")
+        return 2
+
+    payload = json.dumps(result.to_json(), indent=2, sort_keys=True) + "\n"
+    if args.json:
+        sys.stdout.write(payload)
+    else:
+        sys.stdout.write(
+            f"captured {len(result.captured)} missing URL(s), "
+            f"{len(result.captured_git_failures)} git failure(s); "
+            f"skipped {len(result.skipped)}; failed {len(result.failed)}\n"
+        )
+    return 1 if result.failed else 0
 
 
 def _cmd_prepare_case(args: argparse.Namespace) -> int:
@@ -992,6 +1089,7 @@ def _workflow_mock_agent(workflow: str) -> str:
     if workflow.startswith("ymir-"):
         return workflow.removeprefix("ymir-")
     return "triage"
+
 
 def _cmd_score_result(args: argparse.Namespace) -> int:
     expected = load_json_file(args.expected_json)
