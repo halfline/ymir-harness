@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+GIT_OPTIONS_WITH_VALUES = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
 CURL_URL_OPTIONS = {"--url"}
 CURL_OPTIONS_WITH_VALUES = {
     "-A",
@@ -118,6 +119,42 @@ def detect_replay_violations(
                 if command_url not in recorded_url_set:
                     violations.append(f"unrecorded URL: {command_url}")
     return _dedupe_strings(violations)
+def detect_unsafe_command(
+    command: str | Sequence[str], *, source: str | None = None
+) -> list[UnsafeOperation]:
+    tokens = _command_tokens(command)
+    if not tokens:
+        return []
+
+    operations = []
+    display = shlex.join(tokens)
+    git_subcommand = _git_subcommand(tokens)
+
+    if git_subcommand == "push":
+        operations.append(UnsafeOperation("git_push", f"git push: {display}", source))
+    if _is_rhpkg_lookaside_upload_command(tokens):
+        operations.append(
+            UnsafeOperation("lookaside_upload", f"rhpkg lookaside upload: {display}", source)
+        )
+    if _is_brew_build_submission_command(tokens):
+        operations.append(
+            UnsafeOperation("build_submission", f"brew build submission: {display}", source)
+        )
+    if _is_koji_build_submission_command(tokens):
+        operations.append(
+            UnsafeOperation("build_submission", f"koji build submission: {display}", source)
+        )
+    if _is_copr_build_submission_command(tokens):
+        operations.append(
+            UnsafeOperation("build_submission", f"copr build submission: {display}", source)
+        )
+    if _is_konflux_build_submission_command(tokens):
+        operations.append(
+            UnsafeOperation("build_submission", f"konflux build submission: {display}", source)
+        )
+
+    return _dedupe_operations(operations)
+
 
 
 def _event_commands(event: Mapping[str, Any]) -> list[str | Sequence[str]]:
@@ -189,6 +226,25 @@ def _command_replay_urls(command: str | Sequence[str]) -> list[str]:
             urls.append(token)
         index += 1
     return urls
+def _git_subcommand(tokens: Sequence[str]) -> str | None:
+    if not tokens or _program_name(tokens[0]) != "git":
+        return None
+
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in GIT_OPTIONS_WITH_VALUES:
+            index += 2
+            continue
+        if any(token.startswith(f"{option}=") for option in GIT_OPTIONS_WITH_VALUES):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+
+    return None
 
 
 def _is_curl_url_option(token: str) -> bool:
@@ -219,6 +275,34 @@ def _short_option_value(token: str) -> str | None:
     if not token.startswith("-") or token.startswith("--") or len(token) < 3:
         return None
     return token[:2]
+def _is_rhpkg_lookaside_upload_command(tokens: Sequence[str]) -> bool:
+    if len(tokens) < 2 or _program_name(tokens[0]) != "rhpkg":
+        return False
+    return tokens[1] in {"new-sources", "upload"}
+
+
+def _is_brew_build_submission_command(tokens: Sequence[str]) -> bool:
+    if len(tokens) < 2 or _program_name(tokens[0]) != "brew":
+        return False
+    return tokens[1] == "build"
+
+
+def _is_koji_build_submission_command(tokens: Sequence[str]) -> bool:
+    if len(tokens) < 2 or _program_name(tokens[0]) != "koji":
+        return False
+    return tokens[1] == "build"
+
+
+def _is_copr_build_submission_command(tokens: Sequence[str]) -> bool:
+    if len(tokens) < 2 or _program_name(tokens[0]) != "copr":
+        return False
+    return tokens[1] == "build"
+
+
+def _is_konflux_build_submission_command(tokens: Sequence[str]) -> bool:
+    if len(tokens) < 2 or _program_name(tokens[0]) != "konflux":
+        return False
+    return tokens[1] == "build"
 
 
 def _dedupe_operations(operations: Sequence[UnsafeOperation]) -> list[UnsafeOperation]:
