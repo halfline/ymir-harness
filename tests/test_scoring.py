@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 
 from ymir_harness import __version__
-from ymir_harness.scoring import score_case
+from ymir_harness.scoring import score_case, score_result_directory
+
 
 def test_score_case_accepts_nested_triage_result() -> None:
     expected = {
@@ -615,3 +616,248 @@ def test_score_case_records_advisory_metrics_without_failing() -> None:
         "retry_count": 1,
         "total_cost_usd": 4.25,
     }
+
+
+def test_score_result_directory_accepts_recorded_patch_commit_coverage(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    actual_dir = tmp_path / "actual-results"
+    commit_sha = "b94b44407a088e6e8278d9db8b59fb377e84bda4"
+    extra_sha = "8297bbc00c14c5db3ad3d1570dd74f137aec2f7d"
+    commit_url = f"https://gitlab.example/group/pkg/-/commit/{commit_sha}.patch"
+    mr_url = "https://gitlab.example/group/pkg/-/merge_requests/7.patch"
+
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "glib2",
+            "case_status": "active",
+            "patch_urls": [commit_url],
+        },
+    )
+    _write_json(
+        actual_dir / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "glib2",
+            "patch_urls": [mr_url],
+        },
+    )
+    _write_json(
+        cases_dir / "web_cache" / "RHEL-12345" / "manifest.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "required_urls": [commit_url, mr_url],
+            "recorded_files": {
+                commit_url: "patches/commit.patch",
+                mr_url: "patches/mr.patch",
+            },
+        },
+    )
+    _write_text(
+        cases_dir / "web_cache" / "RHEL-12345" / "patches" / "commit.patch",
+        f"From {commit_sha} Mon Sep 17 00:00:00 2001\n",
+    )
+    _write_text(
+        cases_dir / "web_cache" / "RHEL-12345" / "patches" / "mr.patch",
+        (
+            f"From {commit_sha} Mon Sep 17 00:00:00 2001\n"
+            f"From {extra_sha} Mon Sep 17 00:00:00 2001\n"
+        ),
+    )
+
+    report = score_result_directory(cases_dir, actual_dir)
+
+    assert report.entries[0].status == "passed"
+    metrics = {metric.name: metric for metric in report.entries[0].score.metrics}
+    assert metrics["patch_urls"].status == "pass"
+    assert metrics["patch_urls"].notes == (
+        "actual patch URLs include the expected patch commit IDs"
+    )
+
+
+def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    actual_dir = tmp_path / "actual-results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        package="dnsmasq",
+        case_status="active",
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-23456",
+        package="libtiff",
+        case_status="excluded",
+    )
+    _write_json(
+        actual_dir / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "resolution": "backport",
+            "package": "dnsmasq",
+        },
+    )
+
+    report = score_result_directory(cases_dir, actual_dir)
+
+    assert not report.has_headline_failures
+    assert report.summary()["headline_passed"] == 1
+    assert report.summary()["skipped"] == 1
+    assert [entry.status for entry in report.entries] == ["passed", "skipped"]
+
+
+def test_score_result_directory_records_run_metadata(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    actual_dir = tmp_path / "actual-results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        package="dnsmasq",
+        case_status="active",
+    )
+    _write_json(
+        actual_dir / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "resolution": "backport",
+            "package": "dnsmasq",
+        },
+    )
+
+    report = score_result_directory(
+        cases_dir,
+        actual_dir,
+        run_id="baseline-2026-06-04T120000Z",
+        ymir_sha="6e22912f83d57ddae1031e6207d4716171a99be0",
+        variant="baseline",
+    )
+
+    payload = report.to_json()
+    assert payload["run_id"] == "baseline-2026-06-04T120000Z"
+    assert payload["ymir_sha"] == "6e22912f83d57ddae1031e6207d4716171a99be0"
+    assert payload["variant"] == "baseline"
+    assert payload["harness_version"] == __version__
+    fixture_checksum = payload["fixture_checksum"]
+    assert isinstance(fixture_checksum, str)
+    assert fixture_checksum.startswith("sha256:")
+    assert len(fixture_checksum) == len("sha256:") + 64
+
+    _write_json(cases_dir / "reports" / "results.json", {"generated": True})
+    repeated_payload = score_result_directory(cases_dir, actual_dir).to_json()
+    assert repeated_payload["fixture_checksum"] == fixture_checksum
+
+
+def test_score_result_directory_records_headline_reasons(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    actual_dir = tmp_path / "actual-results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        package="dnsmasq",
+        case_status="quarantined",
+        case_status_reason="requires human judgment",
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-23456",
+        package="libtiff",
+        case_status="active",
+        ground_truth_confidence="low",
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-34567",
+        package="openssl",
+        case_status="active",
+        answer_leakage="explicit",
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-45678",
+        package="kernel",
+        case_status="active",
+        network_mode="live_non_reproducible",
+    )
+    _write_expected(
+        cases_dir,
+        "RHEL-56789",
+        package="zlib",
+        case_status="excluded",
+        case_status_reason="fixture cannot be replayed",
+    )
+    for case_id, package in (
+        ("RHEL-12345", "dnsmasq"),
+        ("RHEL-23456", "libtiff"),
+        ("RHEL-34567", "openssl"),
+        ("RHEL-45678", "kernel"),
+    ):
+        _write_json(
+            actual_dir / f"{case_id}.actual.json",
+            {
+                "case_id": case_id,
+                "resolution": "backport",
+                "package": package,
+            },
+        )
+
+    report = score_result_directory(cases_dir, actual_dir)
+
+    entries = {entry.case_id: entry for entry in report.entries}
+    assert entries["RHEL-12345"].headline_reason == "case_status is quarantined"
+    assert entries["RHEL-23456"].headline_reason == "ground_truth_confidence is low"
+    assert entries["RHEL-34567"].headline_reason == "answer_leakage is explicit"
+    assert entries["RHEL-45678"].headline_reason == "network_mode is live_non_reproducible"
+    assert entries["RHEL-56789"].headline_reason == "case_status is excluded"
+    assert entries["RHEL-56789"].reason == "fixture cannot be replayed"
+    payload_cases = {case["case_id"]: case for case in report.to_json()["cases"]}
+    assert payload_cases["RHEL-12345"]["headline_reason"] == "case_status is quarantined"
+
+
+def _write_expected(
+    cases_dir: Path,
+    case_id: str,
+    *,
+    package: str,
+    case_status: str,
+    ground_truth_confidence: str = "high",
+    answer_leakage: str = "none",
+    network_mode: str = "replay_only",
+    case_status_reason: str | None = None,
+) -> None:
+    _write_json(
+        cases_dir / "expected" / f"{case_id}.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": package,
+            "expected_basis": "merged_mr",
+            "ground_truth_confidence": ground_truth_confidence,
+            "answer_leakage": answer_leakage,
+            "case_status": case_status,
+            "case_status_reason": case_status_reason,
+            "network_mode": network_mode,
+        },
+    )
+
+
+def _write_json(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
