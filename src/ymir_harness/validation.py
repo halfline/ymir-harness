@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
-from collections.abc import Mapping
+import subprocess
+import tempfile
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from ymir_harness.models import (
     ALLOWED_ANSWER_LEAKAGE,
@@ -15,6 +20,7 @@ from ymir_harness.models import (
     ALLOWED_EXPECTED_BASES,
     ALLOWED_GROUND_TRUTH_CONFIDENCE,
     ALLOWED_NETWORK_MODES,
+    ALLOWED_REFERENCE_PATCH_MODES,
     ALLOWED_RESOLUTIONS,
     SUPPORTED_SCHEMA_VERSIONS,
     CaseValidationResult,
@@ -36,6 +42,12 @@ SOURCE_ARCHIVE_SUFFIXES = (
     ".zip",
 )
 
+
+@dataclass(frozen=True)
+class ReferencePatchTarget:
+    repo_path: Path
+    pre_fix_ref: str
+    mock_path: Path
 
 
 def validate_case_directory(
@@ -91,6 +103,16 @@ def _validate_case(
         result.case_type = _string_or_none(expected.get("case_type"))
         result.case_status = _string_or_none(expected.get("case_status"))
         _validate_source_cache(cases_dir, expected, expected_path, result, workflow)
+
+
+    if expected is not None:
+        _validate_reference_patch(
+            cases_dir,
+            expected,
+            result,
+            reference_patch_targets,
+            workflow,
+        )
 
 
     return result
@@ -286,6 +308,15 @@ def _validate_expected_metadata(
         required=False,
     )
 
+    reference_patch_mode_required = _implementation_case_requires_reference_patch(expected)
+    _validate_allowed_value(
+        expected.get("reference_patch_mode"),
+        ALLOWED_REFERENCE_PATCH_MODES,
+        "reference_patch_mode",
+        expected_path,
+        result,
+        required=reference_patch_mode_required,
+    )
 
 
 def _validate_source_cache(
@@ -699,6 +730,204 @@ def _workflow_requires_source_cache(workflow: str | None, expected: Mapping[str,
     if workflow == "ymir-triage":
         return False
     return _implementation_case_requires_source_cache(expected)
+def _validate_reference_patch(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+    _source_targets: list[ReferencePatchTarget],
+    workflow: str | None,
+) -> None:
+    if not _workflow_requires_reference_patch(workflow, expected):
+        return
+
+    patch_paths = sorted(
+        (cases_dir / "mock_data").glob(
+            f"*/reference_patches/{result.case_id}.patch",
+        )
+    )
+    if patch_paths:
+        for patch_path in patch_paths:
+            touched_paths = _validate_reference_patch_parse(patch_path, result)
+            if touched_paths is not None and _reference_patch_should_apply(expected):
+                _validate_reference_patch_application(patch_path, _source_targets, result)
+        return
+
+    patch_pattern = (
+        cases_dir / "mock_data" / "*" / "reference_patches" / (f"{result.case_id}.patch")
+    )
+    result.issues.append(
+        ValidationIssue(
+            severity="error",
+            category="reference_patch_invalid",
+            message="merged_mr implementation case must include reference patch",
+            case_id=result.case_id,
+            path=str(patch_pattern),
+        )
+    )
+
+
+def _implementation_case_requires_reference_patch(expected: Mapping[str, Any]) -> bool:
+    if expected.get("expected_basis") != "merged_mr":
+        return False
+    return expected.get("resolution") in {"backport", "rebase", "rebuild"}
+
+
+def _workflow_requires_reference_patch(workflow: str | None, expected: Mapping[str, Any]) -> bool:
+    if workflow == "ymir-triage":
+        return False
+    return _implementation_case_requires_reference_patch(expected)
+
+
+def _reference_patch_should_apply(expected: Mapping[str, Any]) -> bool:
+    return expected.get("reference_patch_mode") == "applies"
+
+
+def _validate_reference_patch_parse(
+    patch_path: Path,
+    result: CaseValidationResult,
+) -> list[str] | None:
+    if not patch_path.is_file():
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="reference_patch_invalid",
+                message="reference patch path must be a file",
+                case_id=result.case_id,
+                path=str(patch_path),
+            )
+        )
+        return None
+
+    completed = subprocess.run(
+        ["git", "apply", "--numstat", str(patch_path)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if completed.returncode != 0:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="reference_patch_invalid",
+                message="reference patch must parse as a git patch",
+                case_id=result.case_id,
+                path=str(patch_path),
+            )
+        )
+        return None
+
+    touched_paths = _reference_patch_touched_paths(completed.stdout)
+    if not touched_paths:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="reference_patch_invalid",
+                message="reference patch touched-file list cannot be extracted",
+                case_id=result.case_id,
+                path=str(patch_path),
+            )
+        )
+        return None
+
+    return touched_paths
+
+
+def _reference_patch_touched_paths(numstat_output: str) -> list[str]:
+    paths: list[str] = []
+    for line in numstat_output.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            return []
+
+        path = parts[2].strip()
+        if not path:
+            return []
+
+        paths.append(path)
+
+    return paths
+
+
+def _validate_reference_patch_application(
+    patch_path: Path,
+    source_targets: list[ReferencePatchTarget],
+    result: CaseValidationResult,
+) -> None:
+    if not source_targets:
+        return
+
+    if any(
+        _reference_patch_applies_to_target(patch_path, target, reverse=True)
+        for target in source_targets
+    ):
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="fix_already_present",
+                message="reference patch reverse-applies to pre-fix source tree",
+                case_id=result.case_id,
+                path=str(patch_path),
+            )
+        )
+        return
+
+    if any(_reference_patch_applies_to_target(patch_path, target) for target in source_targets):
+        return
+
+    result.issues.append(
+        ValidationIssue(
+            severity="error",
+            category="reference_patch_invalid",
+            message="reference patch must apply to pre-fix source tree",
+            case_id=result.case_id,
+            path=str(patch_path),
+        )
+    )
+
+
+def _reference_patch_applies_to_target(
+    patch_path: Path,
+    target: ReferencePatchTarget,
+    *,
+    reverse: bool = False,
+) -> bool:
+    with tempfile.TemporaryDirectory(prefix="ymir-harness-index-") as temp_dir:
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = str(Path(temp_dir) / "index")
+
+        read_tree = subprocess.run(
+            ["git", "-C", str(target.repo_path), "read-tree", target.pre_fix_ref],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+        )
+        if read_tree.returncode != 0:
+            return False
+
+        command = [
+            "git",
+            "-C",
+            str(target.repo_path),
+            "apply",
+            "--check",
+            "--cached",
+            str(patch_path),
+        ]
+        if reverse:
+            command.insert(-1, "--reverse")
+
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+        )
+        return completed.returncode == 0
 
 
 
