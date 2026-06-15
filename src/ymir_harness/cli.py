@@ -391,6 +391,221 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _prepare_case(
+    args: argparse.Namespace,
+    provenance: dict[str, str],
+) -> tuple[dict[str, object], int]:
+    collected = None
+    if _prepare_should_collect(args):
+        collected = collect_case(_prepare_collect_request(args)).to_json()
+
+    auto_allowed_hosts: list[str] = []
+    payload: dict[str, object] = {
+        "case_id": args.case_id,
+        "cases_dir": str(args.cases),
+        "workflow": args.workflow,
+        "variant": args.variant,
+        "status": "max_iterations",
+        "collected": collected,
+        "auto_allowed_hosts": auto_allowed_hosts,
+        "iterations": [],
+    }
+    iterations: list[dict[str, object]] = []
+    payload["iterations"] = iterations
+    exit_code = 1
+
+    for iteration in range(1, args.max_iterations + 1):
+        run_id = _prepare_iteration_run_id(args, iteration)
+        results_dir = _prepare_iteration_results_dir(args, run_id, iteration)
+        run_payload, report, run_exit_code = _prepare_run_iteration(
+            args,
+            run_id=run_id,
+            results_dir=results_dir,
+            provenance=provenance,
+        )
+        iteration_payload: dict[str, object] = {
+            "iteration": iteration,
+            "run": run_payload,
+        }
+        iterations.append(iteration_payload)
+
+        if report is None:
+            payload["status"] = "validation_blocked"
+            exit_code = run_exit_code
+            break
+
+        if not report.has_failures and not _prepare_has_replay_candidates(results_dir):
+            payload["status"] = "succeeded"
+            exit_code = 0
+            break
+
+        capture_result, iteration_auto_allowed_hosts = _prepare_capture_missing(
+            args,
+            results_dir,
+            auto_allowed_hosts,
+        )
+        if iteration_auto_allowed_hosts:
+            iteration_payload["auto_allowed_hosts"] = iteration_auto_allowed_hosts
+        capture_payload = capture_result.to_json()
+        iteration_payload["capture"] = capture_payload
+        if capture_result.failed:
+            payload["status"] = "capture_failed"
+            exit_code = 2
+            break
+
+        captured_count = (
+            len(capture_result.captured)
+            + len(capture_result.captured_jira)
+            + len(capture_result.captured_source)
+            + len(capture_result.captured_git_failures)
+        )
+        if captured_count == 0:
+            payload["status"] = "blocked"
+            exit_code = run_exit_code or 1
+            break
+    else:
+        payload["status"] = "max_iterations"
+        exit_code = 1
+
+    return payload, exit_code
+
+
+def _prepare_has_replay_candidates(results_dir: Path) -> bool:
+    try:
+        return bool(
+            blocked_urls_from_run_path(results_dir) or jira_requests_from_run_path(results_dir)
+        )
+    except CaptureMissingError:
+        return False
+
+
+def _prepare_should_collect(args: argparse.Namespace) -> bool:
+    return any((args.jira_url, args.jira_base_url, args.gitlab_mr_url))
+
+
+def _prepare_collect_request(args: argparse.Namespace) -> CollectCaseRequest:
+    return CollectCaseRequest(
+        cases_dir=args.cases,
+        case_id=args.case_id,
+        case_status_reason="fixture scaffold prepared for replay experiments",
+        mock_agent=_workflow_mock_agent(args.workflow),
+        mock_repo_cache=args.mock_repo_cache,
+        jira_url=args.jira_url,
+        jira_base_url=args.jira_base_url,
+        jira_token_env=args.jira_token_env,
+        jira_token_file=args.jira_token_file,
+        jira_email=args.jira_email,
+        gitlab_mr_url=args.gitlab_mr_url,
+        gitlab_token_env=args.gitlab_token_env,
+        http_timeout=args.http_timeout,
+        overwrite=args.overwrite,
+    )
+
+
+def _prepare_capture_request(
+    args: argparse.Namespace,
+    results_dir: Path,
+    *,
+    auto_allowed_hosts: Sequence[str] = (),
+) -> CaptureMissingRequest:
+    allowed_hosts = tuple(
+        dict.fromkeys((*DEFAULT_ALLOWED_HOSTS, *args.allowed_hosts, *auto_allowed_hosts))
+    )
+    return CaptureMissingRequest(
+        cases_dir=args.cases,
+        run_path=results_dir,
+        case_id=args.case_id,
+        allowed_hosts=allowed_hosts,
+        gitlab_token_env=args.gitlab_token_env,
+        jira_token_env=args.jira_token_env,
+        jira_token_file=args.jira_token_file,
+        jira_email=args.jira_email,
+        as_of=args.as_of,
+        http_timeout=args.http_timeout,
+        overwrite=args.overwrite,
+    )
+
+
+def _prepare_run_iteration(
+    args: argparse.Namespace,
+    *,
+    run_id: str,
+    results_dir: Path,
+    provenance: dict[str, str],
+):
+    validation_report = validate_case_directory(
+        args.cases,
+        workflow=_validation_workflow(args.workflow),
+    )
+    manifest_case_ids, manifest_issues = load_case_manifest(args.cases)
+    validation_report = append_global_issues(validation_report, manifest_issues)
+    validation_report = select_validation_cases(
+        validation_report,
+        [args.case_id] or manifest_case_ids,
+    )
+    validation_reports_dir = args.cases / "reports"
+    write_validation_reports(validation_report, validation_reports_dir)
+
+    output_path = results_dir / "run.json"
+    if validation_report.has_blocking_errors:
+        summary = validation_report.summary()
+        return (
+            {
+                "run_id": run_id,
+                "results_dir": str(results_dir),
+                "run_json": None,
+                "summary": summary,
+                "blocked": True,
+            },
+            None,
+            1,
+        )
+
+    report = build_run_report(
+        args.cases,
+        results_dir,
+        validation_report=validation_report,
+        run_id=run_id,
+        variant=args.variant,
+        ymir_sha=args.ymir_sha,
+        features=args.features,
+        repeat=args.repeat,
+        executor=_run_executor(args.workflow),
+        provenance=provenance,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(report.to_json(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return (
+        {
+            "run_id": run_id,
+            "results_dir": str(results_dir),
+            "run_json": str(output_path),
+            "summary": report.summary(),
+            "blocked": False,
+        },
+        report,
+        1 if report.has_failures else 0,
+    )
+
+
+def _prepare_iteration_run_id(args: argparse.Namespace, iteration: int) -> str:
+    base_run_id = args.run_id or f"{args.variant}-{args.case_id}"
+    return f"{base_run_id}-iter-{iteration}"
+
+
+def _prepare_iteration_results_dir(
+    args: argparse.Namespace,
+    run_id: str,
+    iteration: int,
+) -> Path:
+    if args.results_dir is not None:
+        return args.results_dir / f"iteration-{iteration}"
+    return default_results_dir(args.cases, run_id)
+
+
 def _workflow_mock_agent(workflow: str) -> str:
     if workflow.startswith("ymir-"):
         return workflow.removeprefix("ymir-")
