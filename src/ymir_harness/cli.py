@@ -12,9 +12,16 @@ from ymir_harness import __version__
 from ymir_harness.collect_case import (
     CollectCaseError,
     CollectCaseRequest,
+    MockRepoInput,
     collect_case,
+    load_alternate_outcomes,
+    parse_key_value_items,
+    parse_web_record_items,
 )
 from ymir_harness.capture_missing import (
+    DEFAULT_ALLOWED_HOSTS,
+    CaptureMissingError,
+    CaptureMissingRequest,
     CaptureMissingResult,
     blocked_urls_from_run_path,
     capture_missing,
@@ -349,6 +356,36 @@ def _cmd_validate_cases(args: argparse.Namespace) -> int:
         sys.stdout.write(f"reports written to {reports_dir}\n")
 
     return 1 if report.has_blocking_errors else 0
+
+
+def _collect_mock_repo(args: argparse.Namespace) -> MockRepoInput | None:
+    values = {
+        "remote_url": args.remote_url,
+        "pre_fix_ref": args.pre_fix_ref,
+        "branch": args.branch,
+    }
+    if not any(values.values()):
+        if args.reference_patch is not None:
+            msg = "--reference-patch requires --remote-url, --pre-fix-ref, and --branch"
+            raise ValueError(msg)
+        return None
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        missing_options = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+        msg = f"mock repo metadata is incomplete; missing {missing_options}"
+        raise ValueError(msg)
+    return MockRepoInput(
+        remote_url=args.remote_url,
+        pre_fix_ref=args.pre_fix_ref,
+        branch=args.branch,
+        agent=args.mock_agent,
+        zstream_override=parse_key_value_items(
+            args.zstream_override,
+            option_name="--zstream-override",
+        ),
+        blocked_original_urls=tuple(args.blocked_original_url),
+    )
+
 
 def _cmd_prepare_case(args: argparse.Namespace) -> int:
     provenance = _parse_provenance_or_exit(args.provenance)
