@@ -59,6 +59,92 @@ def test_ymir_triage_executor_logs_workflow_progress(
     assert '"event": "workflow_waiting"' in stderr
     assert '"event": "workflow_finished"' in stderr
 
+
+@pytest.mark.parametrize(
+    ("executor_factory", "case_type", "expected", "reason"),
+    [
+        (
+            make_ymir_triage_executor,
+            "cve_backport",
+            None,
+            "ymir triage workflow missing CHAT_MODEL; "
+            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}",
+        ),
+    ],
+)
+def test_ymir_triage_executor_starts_managed_gateway_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    gateway_requests = []
+    calls = []
+
+    @contextmanager
+    def managed_gateway(request):
+        gateway_requests.append(request)
+        yield "http://127.0.0.1:18080/sse"
+
+    async def workflow(jira_issue, dry_run, agent_factory, **kwargs):
+        calls.append(
+            {
+                "jira_issue": jira_issue,
+                "dry_run": dry_run,
+                "agent_factory": agent_factory,
+                "kwargs": kwargs,
+                "gateway_url": os.environ["MCP_GATEWAY_URL"],
+            }
+        )
+        return _State(
+            triage_result=_TriageResult(
+                {
+                    "resolution": "not_affected",
+                    "data": {
+                        "jira_issue": "RHEL-12345",
+                        "package": "dnsmasq",
+                    },
+                }
+            )
+        )
+
+    def agent_factory(_gateway_tools, _local_tool_options):
+        return object()
+
+    monkeypatch.setattr(workflow_module, "_managed_mcp_gateway", managed_gateway)
+    monkeypatch.setattr(
+        workflow_module,
+        "_triage_dependencies",
+        lambda _workflow, _agent_factory: (workflow, agent_factory),
+    )
+
+    executor = make_ymir_triage_executor()
+    execution = executor(
+        _request(
+            tmp_path,
+            environment={
+                "CHAT_MODEL": "gemini:gemini-2.5-pro",
+                "DRY_RUN": "true",
+            },
+        )
+    )
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    assert execution.actual_result["resolution"] == "not_affected"
+    assert len(gateway_requests) == 1
+    assert gateway_requests[0].environment["DRY_RUN"] == "true"
+    assert "MCP_GATEWAY_URL" not in gateway_requests[0].environment
+    assert calls == [
+        {
+            "jira_issue": "RHEL-12345",
+            "dry_run": True,
+            "agent_factory": agent_factory,
+            "kwargs": {"auto_chain": False, "silent_run": True},
+            "gateway_url": "http://127.0.0.1:18080/sse",
+        }
+    ]
+
+
+
 def _request(
     tmp_path: Path,
     *,
