@@ -315,36 +315,6 @@ def _fetch_evidence(
             )
         )
 
-    gitlab_mr_url = request.gitlab_mr_url
-
-    valid_jira_patch_urls: list[str] = []
-    for patch_url in jira_patch_urls:
-        try:
-            patch_body = _fetch_bytes(
-                patch_url,
-                headers={"Accept": "*/*"},
-                request=request,
-                result=result,
-            )
-        except CollectCaseError as exc:
-            result.warnings.append(f"skipped Jira patch URL {patch_url}: {exc}")
-            continue
-        if not _looks_like_patch(patch_body):
-            result.warnings.append(
-                f"skipped Jira patch URL {patch_url}: fetched content is not a patch"
-            )
-            continue
-        valid_jira_patch_urls.append(patch_url)
-        gitlab_records.append(
-            FetchedRecord(
-                url=patch_url,
-                relative_path=(
-                    f"jira/patches/{len(valid_jira_patch_urls):03d}{_patch_suffix(patch_url)}"
-                ),
-                body=patch_body,
-            )
-        )
-    jira_patch_urls = tuple(valid_jira_patch_urls)
 
     return FetchedEvidence(
         jira_issue=jira_issue,
@@ -1721,6 +1691,252 @@ def _load_json(path: Path) -> Any:
         raise CollectCaseError(f"cannot read JSON file {path}: {exc}") from exc
 
 
+def _fetch_gitlab_mr_evidence(
+    gitlab_mr_url: str,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> tuple[Mapping[str, Any], Any, str, bytes, list[FetchedRecord]]:
+    gitlab_urls = _gitlab_mr_urls(gitlab_mr_url)
+    gitlab_headers = _gitlab_headers(request.gitlab_token_env)
+    gitlab_mr: Mapping[str, Any] | None = None
+    gitlab_commits: Any = None
+    gitlab_records: list[FetchedRecord] = []
+    for name in ("merge_request", "commits", "changes"):
+        url = gitlab_urls[name]
+        body = _fetch_bytes(url, headers=gitlab_headers, request=request, result=result)
+        if name == "merge_request":
+            gitlab_mr = _json_object_from_body(body, url)
+        elif name == "commits":
+            gitlab_commits = _json_value_from_body(body, url)
+        gitlab_records.append(
+            FetchedRecord(
+                url=url,
+                relative_path=f"gitlab/{name}.json",
+                body=body,
+            )
+        )
+
+    if gitlab_mr is None:
+        raise CollectCaseError(f"failed to fetch GitLab MR metadata: {gitlab_mr_url}")
+
+    gitlab_patch_url = gitlab_urls["patch"]
+    try:
+        gitlab_patch_body = _fetch_bytes(
+            gitlab_patch_url,
+            headers=gitlab_headers,
+            request=request,
+            result=result,
+        )
+    except CollectCaseError as exc:
+        gitlab_patch_body = _gitlab_mr_api_diff_patch_body(
+            gitlab_mr_url,
+            gitlab_commits,
+            request=request,
+            result=result,
+        )
+        result.warnings.append(f"used GitLab API diff for {gitlab_patch_url}: {exc}")
+    gitlab_records.append(
+        FetchedRecord(
+            url=gitlab_patch_url,
+            relative_path="gitlab/merge_request.patch",
+            body=gitlab_patch_body,
+        )
+    )
+    return gitlab_mr, gitlab_commits, gitlab_patch_url, gitlab_patch_body, gitlab_records
+
+def _gitlab_mr_urls(url: str) -> dict[str, str]:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise CollectCaseError(f"GitLab MR URL must be absolute: {url}")
+
+    marker = "/-/merge_requests/"
+    if marker not in parsed.path:
+        raise CollectCaseError(f"GitLab MR URL must contain {marker}: {url}")
+
+    project_path, iid_part = parsed.path.strip("/").split(marker, 1)
+    iid = iid_part.strip("/").split("/", 1)[0].removesuffix(".patch")
+    if not iid:
+        raise CollectCaseError(f"GitLab MR URL is missing merge request id: {url}")
+
+    project = quote(unquote(project_path), safe="")
+    api_base = f"{parsed.scheme}://{parsed.netloc}/api/v4/projects/{project}/merge_requests/{iid}"
+    normalized_mr_url = f"{parsed.scheme}://{parsed.netloc}/{project_path}/-/merge_requests/{iid}"
+    return {
+        "merge_request": api_base,
+        "commits": f"{api_base}/commits",
+        "changes": f"{api_base}/changes",
+        "patch": f"{normalized_mr_url}.patch",
+    }
+
+def _gitlab_commit_patch_records_from_mr_patch(
+    patch_url: str | None,
+    patch_body: bytes | None,
+    *,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+    skipped_urls: Sequence[str],
+
+) -> list[FetchedRecord]:
+    if patch_url is None or patch_body is None:
+        return []
+
+    project_url = _gitlab_project_url_from_mr_patch_url(patch_url)
+    if project_url is None:
+        return []
+
+    records: list[FetchedRecord] = []
+    recorded_urls = {patch_url, *skipped_urls}
+    for commit_sha in _patch_commit_shas(patch_body):
+        commit_patch_url = f"{project_url}/-/commit/{commit_sha}.patch"
+        if commit_patch_url in recorded_urls:
+            continue
+        try:
+            commit_patch_body = _fetch_bytes(
+                commit_patch_url,
+                headers={"Accept": "*/*"},
+                request=request,
+                result=result,
+            )
+        except CollectCaseError as exc:
+            result.warnings.append(f"skipped GitLab commit patch URL {commit_patch_url}: {exc}")
+            continue
+        if not _looks_like_patch(commit_patch_body):
+            result.warnings.append(
+                f"skipped GitLab commit patch URL {commit_patch_url}: fetched content is not a patch"
+            )
+            continue
+
+        records.append(
+            FetchedRecord(
+                url=commit_patch_url,
+                relative_path=f"gitlab/commit_patches/{commit_sha}.patch",
+                body=commit_patch_body,
+            )
+        )
+        recorded_urls.add(commit_patch_url)
+
+        format_url = f"{project_url}/-/commit/{commit_sha}?format=.patch"
+        if format_url not in recorded_urls:
+            records.append(
+                FetchedRecord(
+                    url=format_url,
+                    relative_path=f"gitlab/commit_patches/{commit_sha}-format.patch",
+                    body=commit_patch_body,
+                )
+            )
+            recorded_urls.add(format_url)
+
+    return records
+
+
+def _gitlab_project_url_from_mr_patch_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    marker = "/-/merge_requests/"
+    if not parsed.scheme or not parsed.netloc or marker not in parsed.path:
+        return None
+    project_path = parsed.path.split(marker, 1)[0]
+    if not project_path:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}{project_path}"
+
+
+def _gitlab_mr_api_diff_patch_body(
+    mr_url: str,
+    commits: Any,
+    *,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> bytes:
+    parsed = urlparse(mr_url)
+    marker = "/-/merge_requests/"
+    if marker not in parsed.path:
+        raise CollectCaseError(f"GitLab MR URL must contain {marker}: {mr_url}")
+    project_path = parsed.path.strip("/").split(marker, 1)[0]
+    commit_ids = [
+        commit.get("id")
+        for commit in commits
+        if isinstance(commit, Mapping) and isinstance(commit.get("id"), str)
+    ] if isinstance(commits, list) else []
+    if not commit_ids:
+        raise CollectCaseError(f"GitLab MR has no commits for API diff fallback: {mr_url}")
+    return b"".join(
+        _gitlab_commit_api_diff_patch_body(
+            project_path,
+            commit_id,
+            request=request,
+            result=result,
+        )
+        for commit_id in commit_ids
+    )
+
+
+def _gitlab_commit_api_diff_patch_body_for_url(
+    patch_url: str,
+    *,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> bytes:
+    parsed = urlparse(patch_url)
+    marker = "/-/commit/"
+    if parsed.hostname != "gitlab.com" or marker not in parsed.path:
+        raise CollectCaseError(f"not a GitLab commit patch URL: {patch_url}")
+    project_path, commit_part = parsed.path.strip("/").split(marker, 1)
+    commit_id = commit_part.split("/", 1)[0].removesuffix(".patch")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit_id):
+        raise CollectCaseError(f"GitLab commit patch URL lacks a commit SHA: {patch_url}")
+    return _gitlab_commit_api_diff_patch_body(
+        project_path,
+        commit_id,
+        request=request,
+        result=result,
+    )
+
+
+def _gitlab_commit_api_diff_patch_body(
+    project_path: str,
+    commit_id: str,
+    *,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> bytes:
+    project = quote(unquote(project_path), safe="")
+    url = f"https://gitlab.com/api/v4/projects/{project}/repository/commits/{commit_id}/diff"
+    body = _fetch_bytes(
+        url,
+        headers=_gitlab_headers(request.gitlab_token_env),
+        request=request,
+        result=result,
+    )
+    diffs = _json_value_from_body(body, url)
+    if not isinstance(diffs, list):
+        raise CollectCaseError(f"GitLab commit diff API returned non-list JSON: {url}")
+    return _gitlab_api_diffs_to_patch(diffs)
+
+
+def _gitlab_api_diffs_to_patch(diffs: Sequence[Any]) -> bytes:
+    parts: list[str] = []
+    for item in diffs:
+        if not isinstance(item, Mapping):
+            continue
+        old_path = _nonempty_string(item.get("old_path"))
+        new_path = _nonempty_string(item.get("new_path"))
+        diff = item.get("diff")
+        if old_path is None or new_path is None or not isinstance(diff, str):
+            continue
+        a_path = "/dev/null" if item.get("new_file") else f"a/{old_path}"
+        b_path = "/dev/null" if item.get("deleted_file") else f"b/{new_path}"
+        parts.extend(
+            [
+                f"diff --git a/{old_path} b/{new_path}\n",
+                f"--- {a_path}\n",
+                f"+++ {b_path}\n",
+                diff if diff.endswith("\n") else diff + "\n",
+            ]
+        )
+    body = "".join(parts).encode("utf-8")
+    if not _looks_like_patch(body):
+        raise CollectCaseError("GitLab commit diff API returned no patch content")
+    return body
 def _gitlab_mr_url_from_jira_evidence(*values: Any) -> str | None:
     for value in _string_values(values):
         for candidate in _urls_from_text(value):
