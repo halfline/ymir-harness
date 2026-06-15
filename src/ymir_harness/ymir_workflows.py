@@ -34,6 +34,134 @@ WORKFLOW_PROGRESS_INTERVAL_SECONDS = 30.0
 
 
 
+def _workflow_environment(
+    request: RunCaseRequest,
+    *,
+    workflow: AsyncWorkflow | None,
+) -> Any:
+    if workflow is not None or _string_or_none(request.environment.get(MCP_GATEWAY_URL_ENV)):
+        _workflow_debug(request, "workflow_environment", mode="external_gateway_or_injected")
+        with _request_environment(request):
+            yield request
+        return
+
+    with _managed_mcp_gateway(request) as gateway_url:
+        effective_request = _request_with_environment(
+            request,
+            {
+                **request.environment,
+                MCP_GATEWAY_URL_ENV: gateway_url,
+            },
+        )
+        with _request_environment(effective_request):
+            _workflow_debug(
+                effective_request,
+                "workflow_environment",
+                mode="managed_gateway",
+                gateway_url=gateway_url,
+            )
+            yield effective_request
+
+
+@contextmanager
+def _managed_mcp_gateway(request: RunCaseRequest) -> Any:
+    port = _available_local_port()
+    gateway_dir = request.results_dir / f"repeat-{request.repetition}" / "mcp-gateway"
+    gateway_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = gateway_dir / f"{request.case_id}.stdout.log"
+    stderr_path = gateway_dir / f"{request.case_id}.stderr.log"
+    gateway_url = f"http://127.0.0.1:{port}/sse"
+
+    env = {
+        **request.environment,
+        "MCP_TRANSPORT": "sse",
+        "SSE_PORT": str(port),
+        "PYTHONUNBUFFERED": "1",
+        "JIRA_URL": request.environment.get("JIRA_URL", "https://redhat.atlassian.net"),
+        "DEBUG_FILE": str(gateway_dir / f"{request.case_id}.debug.log"),
+    }
+
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        _workflow_debug(
+            request,
+            "gateway_starting",
+            stderr_path=str(stderr_path),
+            stdout_path=str(stdout_path),
+            port=port,
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-m", "ymir_harness.ymir_gateway"],
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+        )
+        try:
+            _wait_for_gateway(process, port, stderr_path)
+            _workflow_debug(request, "gateway_ready", gateway_url=gateway_url, pid=process.pid)
+            yield gateway_url
+        finally:
+            _workflow_debug(request, "gateway_stopping", pid=process.pid)
+            _terminate_gateway(process)
+            _workflow_debug(request, "gateway_stopped", returncode=process.returncode)
+
+
+async def _await_workflow(
+    request: RunCaseRequest,
+    workflow_name: str,
+    awaitable: Awaitable[Any],
+) -> Any:
+    started_at = time.monotonic()
+    _workflow_debug(request, "workflow_started", workflow=workflow_name)
+    task = asyncio.create_task(awaitable)
+    interval = _workflow_progress_interval(request)
+
+    try:
+        if interval <= 0:
+            result = await task
+        else:
+            while not task.done():
+                done, _pending = await asyncio.wait({task}, timeout=interval)
+                if done:
+                    break
+                _workflow_debug(
+                    request,
+                    "workflow_waiting",
+                    workflow=workflow_name,
+                    elapsed_seconds=round(time.monotonic() - started_at, 3),
+                )
+            result = await task
+    except BaseException as exc:
+        _workflow_debug(
+            request,
+            "workflow_errored",
+            workflow=workflow_name,
+            elapsed_seconds=round(time.monotonic() - started_at, 3),
+            error_type=type(exc).__name__,
+            error=str(exc),
+            error_detail="".join(traceback.format_exception(exc)),
+        )
+        raise
+
+    _workflow_debug(
+        request,
+        "workflow_finished",
+        workflow=workflow_name,
+        elapsed_seconds=round(time.monotonic() - started_at, 3),
+        state_type=type(result).__name__,
+    )
+    return result
+
+
+def _workflow_progress_interval(request: RunCaseRequest) -> float:
+    raw_value = request.environment.get("YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL")
+    if raw_value is None:
+        return WORKFLOW_PROGRESS_INTERVAL_SECONDS
+    try:
+        return float(raw_value)
+    except ValueError:
+        return WORKFLOW_PROGRESS_INTERVAL_SECONDS
+
+
 
 
 def _json_safe_value(value: Any) -> Any:
@@ -64,6 +192,75 @@ def _workflow_debug(
     sys.stderr.write("\n")
     sys.stderr.flush()
 
+
+def _available_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        return int(server.getsockname()[1])
+
+
+def _wait_for_gateway(
+    process: subprocess.Popen[bytes],
+    port: int,
+    stderr_path: Path,
+) -> None:
+    deadline = time.monotonic() + GATEWAY_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                "managed MCP gateway exited before accepting connections"
+                + _gateway_log_excerpt(stderr_path)
+            )
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.1)
+
+    raise RuntimeError(
+        f"managed MCP gateway did not accept connections within "
+        f"{GATEWAY_START_TIMEOUT_SECONDS:g}s" + _gateway_log_excerpt(stderr_path)
+    )
+
+
+def _terminate_gateway(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _gateway_log_excerpt(stderr_path: Path) -> str:
+    try:
+        text = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    lines = text.splitlines()[-8:]
+    return ": " + " | ".join(lines)
+
+
+def _request_with_environment(
+    request: RunCaseRequest,
+    environment: Mapping[str, str],
+) -> RunCaseRequest:
+    return RunCaseRequest(
+        case_id=request.case_id,
+        case_type=request.case_type,
+        repetition=request.repetition,
+        cases_dir=request.cases_dir,
+        results_dir=request.results_dir,
+        expected_path=request.expected_path,
+        actual_path=request.actual_path,
+        environment=environment,
+        variant=request.variant,
+        features=request.features,
+    )
 
 
 def _model_payload(value: Any) -> dict[str, Any]:
@@ -217,3 +414,17 @@ def _number_or_none(value: Any) -> float | None:
 
 
 
+@contextmanager
+def _request_environment(request: RunCaseRequest):
+    original = os.environ.copy()
+    env = dict(request.environment)
+    for feature in request.features:
+        env[feature] = "true"
+
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
