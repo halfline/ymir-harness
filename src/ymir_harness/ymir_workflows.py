@@ -34,6 +34,93 @@ WORKFLOW_PROGRESS_INTERVAL_SECONDS = 30.0
 
 
 
+def make_ymir_triage_executor(
+    *,
+    workflow: AsyncWorkflow | None = None,
+    agent_factory: AgentFactory | None = None,
+) -> Callable[[RunCaseRequest], RunCaseExecution]:
+    def executor(request: RunCaseRequest) -> RunCaseExecution:
+        return asyncio.run(
+            _run_ymir_triage(
+                request,
+                workflow=workflow,
+                agent_factory=agent_factory,
+            )
+        )
+
+    return executor
+
+
+
+
+
+
+async def _run_ymir_triage(
+    request: RunCaseRequest,
+    *,
+    workflow: AsyncWorkflow | None,
+    agent_factory: AgentFactory | None,
+) -> RunCaseExecution:
+    missing_dependency = _live_workflow_dependency_failure(
+        request,
+        workflow=workflow,
+        workflow_name="triage",
+    )
+    if missing_dependency is not None:
+        return missing_dependency
+
+    workflow_runner, default_agent_factory = _triage_dependencies(workflow, agent_factory)
+
+    with _workflow_environment(request, workflow=workflow) as effective_request:
+        state = await _await_workflow(
+            effective_request,
+            "triage",
+            workflow_runner(
+                effective_request.case_id,
+                True,
+                default_agent_factory,
+                auto_chain=False,
+                silent_run=True,
+            ),
+        )
+
+    triage_result = getattr(state, "triage_result", None)
+    if triage_result is None:
+        return RunCaseExecution(
+            status="failed",
+            reason="ymir triage workflow returned no triage result",
+        )
+
+    return RunCaseExecution(
+        status="passed",
+        actual_result=_triage_actual_result(request, state, triage_result),
+    )
+
+
+
+
+
+
+
+def _live_workflow_dependency_failure(
+    request: RunCaseRequest,
+    *,
+    workflow: AsyncWorkflow | None,
+    workflow_name: str,
+) -> RunCaseExecution | None:
+    if workflow is not None or _string_or_none(request.environment.get(CHAT_MODEL_ENV)):
+        return None
+
+    return RunCaseExecution(
+        status="failed",
+        reason=(
+            f"ymir {workflow_name} workflow missing {CHAT_MODEL_ENV}; "
+            f"set CHAT_MODEL in the run environment, e.g. {DEFAULT_CHAT_MODEL}"
+        ),
+    )
+
+
+@contextmanager
 def _workflow_environment(
     request: RunCaseRequest,
     *,
@@ -502,6 +589,150 @@ def _request_with_environment(
         variant=request.variant,
         features=request.features,
     )
+
+
+def _triage_dependencies(
+    workflow: AsyncWorkflow | None,
+    agent_factory: AgentFactory | None,
+) -> tuple[AsyncWorkflow, AgentFactory]:
+    if workflow is not None and agent_factory is not None:
+        return workflow, agent_factory
+
+    ensure_ymir_source_path()
+    from ymir.agents.triage_agent import (  # type: ignore[import-not-found]
+        create_triage_agent,
+        run_workflow,
+    )
+
+    return workflow or run_workflow, agent_factory or create_triage_agent
+
+
+
+def _patch_no_write_candidate_build_lookup() -> None:
+    try:
+        from ymir.common import utils as utils_module  # type: ignore[import-not-found]
+        from ymir.tools.unprivileged import specfile as specfile_module  # type: ignore[import-not-found]
+        from ymir_harness.koji_replay import recorded_candidate_build_from_environment
+    except ImportError:
+        return
+
+    if getattr(specfile_module, "_ymir_harness_candidate_build_patched", False):
+        return
+
+    original_specfile_get_latest_candidate_build = specfile_module.get_latest_candidate_build
+    original_utils_get_latest_candidate_build = utils_module.get_latest_candidate_build
+
+    async def harness_get_latest_candidate_build(
+        package: str,
+        dist_git_branch: str,
+    ) -> tuple[Any, str]:
+        if os.getenv("DRY_RUN", "False").lower() != "true":
+            return await original_utils_get_latest_candidate_build(package, dist_git_branch)
+
+        return recorded_candidate_build_from_environment(package, dist_git_branch)
+
+    specfile_module.get_latest_candidate_build = harness_get_latest_candidate_build
+    utils_module.get_latest_candidate_build = harness_get_latest_candidate_build
+    specfile_module._ymir_harness_candidate_build_patched = True
+    specfile_module._ymir_harness_original_get_latest_candidate_build = (
+        original_specfile_get_latest_candidate_build
+    )
+
+
+def _agent_class_workflow(
+    module_name: str,
+    *,
+    class_names: tuple[str, ...],
+) -> AsyncWorkflow:
+    ensure_ymir_source_path()
+    module = importlib.import_module(module_name)
+    _patch_no_write_candidate_build_lookup()
+
+    for class_name in class_names:
+        workflow_class = getattr(module, class_name, None)
+        if inspect.isclass(workflow_class) and callable(
+            getattr(workflow_class, "run_workflow", None)
+        ):
+            return _bind_class_workflow(module_name, class_name, workflow_class)
+
+    candidates = [
+        name
+        for name, value in vars(module).items()
+        if inspect.isclass(value) and callable(getattr(value, "run_workflow", None))
+    ]
+    if len(candidates) == 1:
+        class_name = candidates[0]
+        return _bind_class_workflow(module_name, class_name, getattr(module, class_name))
+
+    if not candidates:
+        raise ImportError(f"{module_name} does not define an agent class with run_workflow")
+
+    joined = ", ".join(sorted(candidates))
+    raise ImportError(f"{module_name} defines multiple agent classes with run_workflow: {joined}")
+
+
+def _bind_class_workflow(module_name: str, class_name: str, workflow_class: type) -> AsyncWorkflow:
+    descriptor = inspect.getattr_static(workflow_class, "run_workflow", None)
+    if descriptor is None:
+        raise ImportError(f"{module_name}.{class_name} does not define run_workflow")
+
+    if isinstance(descriptor, staticmethod | classmethod):
+        workflow = descriptor.__get__(None, workflow_class)
+    else:
+        try:
+            workflow = getattr(workflow_class(), "run_workflow")
+        except TypeError as exc:
+            raise ImportError(
+                f"{module_name}.{class_name} must be instantiable without arguments "
+                "or define run_workflow as a staticmethod/classmethod"
+            ) from exc
+
+    if not callable(workflow):
+        raise ImportError(f"{module_name}.{class_name}.run_workflow is not callable")
+
+    return workflow
+
+
+def _triage_actual_result(
+    request: RunCaseRequest,
+    state: Any,
+    triage_result: Any,
+) -> dict[str, Any]:
+    payload = _model_payload(triage_result)
+    data = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
+    actual: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "case_id": request.case_id,
+        "case_type": request.case_type,
+        "workflow": "ymir-triage",
+        **payload,
+    }
+
+    for name in (
+        "package",
+        "patch_urls",
+        "cve_id",
+        "fix_version",
+        "version",
+        "dependency_issue",
+        "dependency_component",
+    ):
+        if name in data and data[name] is not None:
+            actual[name] = data[name]
+
+    if "package" not in actual:
+        expected = load_json_file(request.expected_path)
+        pkg = expected.get("package")
+        if pkg:
+            actual["package"] = pkg
+
+    target_branch = getattr(state, "target_branch", None)
+    if target_branch:
+        actual["target_branch"] = target_branch
+
+    actual.update(_state_diagnostics(state))
+    return actual
+
 
 
 def _model_payload(value: Any) -> dict[str, Any]:
