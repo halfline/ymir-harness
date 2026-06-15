@@ -1,19 +1,13 @@
-from __future__ import annotations
+import base64
+import copy
+import tempfile
+import unicodedata
+from collections.abc import Iterable, Mapping, Sequence
+from urllib.error import HTTPError
+from urllib.parse import quote, unquote, urlparse
+from urllib.request import Request, urlopen
 
-import hashlib
-import json
-import os
-import re
-import shutil
-import subprocess
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
-
-from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
-
-import yaml
+from ymir_harness.jira_replay import derive_as_of_from_comments, filter_comments_as_of
 from ymir_harness.koji_replay import (
     KOJI_CANDIDATE_BUILDS_MANIFEST_KEY,
     candidate_build_branches,
@@ -215,24 +209,8 @@ class CollectCaseResult:
         }
 
 
-def collect_case(request: CollectCaseRequest) -> CollectCaseResult:
-    _validate_request(request, require_metadata=False)
-    cases_dir = request.cases_dir.resolve()
-    result = CollectCaseResult(case_id=request.case_id, cases_dir=cases_dir)
-    fetched = FetchedEvidence()
-    request = _complete_request(request, fetched)
-    fetched = replace(fetched, koji_candidate_builds=_fetch_koji_candidate_builds(request, result))
-    _validate_request(request, require_metadata=True)
-    cases_dir.mkdir(parents=True, exist_ok=True)
-
-    _write_cases_manifest(cases_dir / "cases.yaml", request.case_id, request.overwrite, result)
-    _write_expected(cases_dir, request, fetched, result)
-    _write_mock_data(cases_dir, request, fetched, result)
-    _write_web_cache(cases_dir, request, fetched, result)
-    _write_source_cache(cases_dir, request, fetched, result)
-
-    _append_completion_warnings(request, fetched, result)
-    return result
+    fetched = _fetch_evidence(request, result)
+    _write_jira_fixtures(cases_dir, request, fetched, result)
 
 
 def parse_key_value_items(items: Sequence[str], *, option_name: str) -> dict[str, str]:
@@ -268,117 +246,503 @@ def load_alternate_outcomes(paths: Sequence[Path]) -> tuple[Mapping[str, Any], .
     return tuple(alternates)
 
 
-
-def _complete_request(
-    request: CollectCaseRequest,
-    fetched: FetchedEvidence,
-) -> CollectCaseRequest:
-    issue = _evidence_issue(request, fetched)
-    comments = _evidence_comments(request, fetched)
-    resolution = request.resolution or _derive_resolution(issue, comments)
-    package = request.package or _derive_package(issue)
-    fix_version = request.fix_version or _derive_fix_version(issue)
-    target_branch = request.target_branch
-    mock_repo = request.mock_repo or _derive_mock_repo(
-        request,
-        fetched,
-        target_branch=target_branch,
-        fix_version=fix_version,
-    )
-    if target_branch is None and mock_repo is not None:
-        target_branch = mock_repo.branch
-
-    return replace(
-        request,
-        case_type=request.case_type or _derive_case_type(resolution),
-        resolution=resolution,
-        package=package,
-        expected_basis=request.expected_basis
-        or ("historical_jira_state" if issue is not None else "manual_review"),
-        network_mode=request.network_mode or _derive_network_mode(request, fetched),
-        target_branch=target_branch,
-        fix_version=fix_version,
-        cve_ids=request.cve_ids or tuple(_derive_cve_ids(issue, comments)),
-        mock_repo=mock_repo,
-    )
-
-
-def _fetch_koji_candidate_builds(
+def _fetch_evidence(
     request: CollectCaseRequest,
     result: CollectCaseResult,
-) -> dict[str, Any]:
-    if request.network_mode == "network_denied":
-        return {}
-    if request.resolution not in {"backport", "rebase", "rebuild"}:
-        return {}
-    if not request.package or not request.target_branch:
-        return {}
-    if not (request.jira_url or request.jira_base_url or request.gitlab_mr_url):
-        return {}
+) -> FetchedEvidence:
+    jira_issue = None
+    jira_comments = None
+    jira_links = None
+    jira_patch_urls: tuple[str, ...] = ()
+    gitlab_mr = None
+    gitlab_commits = None
+    gitlab_records: list[FetchedRecord] = []
+    gitlab_patch_url = None
+    gitlab_patch_body = None
+    linked_jira_issues: list[FetchedJiraIssue] = []
 
-    records: dict[str, Any] = {}
-    for branch in candidate_build_branches(request.target_branch):
+    if request.jira_url or request.jira_base_url:
+        jira_urls = _jira_urls(request, request.case_id)
+        jira_headers = _jira_headers(
+            request.jira_token_env,
+            token_file=request.jira_token_file,
+            email=request.jira_email,
+        )
+        jira_issue = _fetch_json(
+            jira_urls["issue"], headers=jira_headers, request=request, result=result
+        )
+        jira_comments = _fetch_json(
+            jira_urls["comments"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+        jira_links = _fetch_json_value(
+            jira_urls["links"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+        linked_jira_issues.extend(
+            _fetch_linked_jira_issues(
+                request,
+                result,
+                jira_headers,
+                root_issue=jira_issue,
+                root_case_id=request.case_id,
+            )
+        )
+
+    jira_issue_source = _jira_issue_source(request, jira_issue)
+    jira_comments_source = _jira_comments_source(request, jira_comments)
+    jira_links_source = _jira_links_source(request, jira_links)
+    seen_linked_keys = {linked.key for linked in linked_jira_issues}
+    linked_jira_issues.extend(
+        linked
+        for linked in _embedded_linked_jira_issues(jira_issue_source, request.case_id)
+        if linked.key not in seen_linked_keys
+    )
+    if request.network_mode != "network_denied":
+        jira_patch_urls = tuple(
+            _patch_urls_from_jira_evidence(
+                jira_issue_source,
+                jira_comments_source,
+                *[
+                    value
+                    for linked in linked_jira_issues
+                    for value in (linked.issue, linked.comments)
+                ],
+            )
+        )
+
+    gitlab_mr_url = request.gitlab_mr_url
+
+    valid_jira_patch_urls: list[str] = []
+    for patch_url in jira_patch_urls:
         try:
-            record = fetch_candidate_build(request.package, branch)
-        except Exception as exc:
+            patch_body = _fetch_bytes(
+                patch_url,
+                headers={"Accept": "*/*"},
+                request=request,
+                result=result,
+            )
+        except CollectCaseError as exc:
+            result.warnings.append(f"skipped Jira patch URL {patch_url}: {exc}")
+            continue
+        if not _looks_like_patch(patch_body):
             result.warnings.append(
-                "skipped Koji candidate build "
-                f"for {request.package} {branch}: {exc}"
+                f"skipped Jira patch URL {patch_url}: fetched content is not a patch"
             )
             continue
-        records[candidate_build_key(request.package, branch)] = record
-    return records
+        valid_jira_patch_urls.append(patch_url)
+        gitlab_records.append(
+            FetchedRecord(
+                url=patch_url,
+                relative_path=(
+                    f"jira/patches/{len(valid_jira_patch_urls):03d}{_patch_suffix(patch_url)}"
+                ),
+                body=patch_body,
+            )
+        )
+    jira_patch_urls = tuple(valid_jira_patch_urls)
+
+    return FetchedEvidence(
+        jira_issue=jira_issue,
+        jira_comments=jira_comments,
+        jira_links=jira_links,
+        linked_jira_issues=tuple(linked_jira_issues),
+        jira_patch_urls=jira_patch_urls,
+        gitlab_mr=gitlab_mr,
+        gitlab_commits=gitlab_commits,
+        gitlab_mr_url=gitlab_mr_url,
+        gitlab_patch_url=gitlab_patch_url,
+        gitlab_patch_body=gitlab_patch_body,
+        web_records=tuple(gitlab_records),
+    )
 
 
 
-
-
-
-def _evidence_issue(
+def _jira_issue_source(
     request: CollectCaseRequest,
-    fetched: FetchedEvidence,
+    jira_issue: Mapping[str, Any] | None,
 ) -> Mapping[str, Any] | None:
-    if fetched.jira_issue is not None:
-        return fetched.jira_issue
+    if jira_issue is not None:
+        return jira_issue
     if request.jira_issue_json is None:
         return None
     data = _load_json(request.jira_issue_json)
     return data if isinstance(data, Mapping) else None
 
 
-def _evidence_comments(request: CollectCaseRequest, fetched: FetchedEvidence) -> Any:
-    if fetched.jira_comments is not None:
-        return fetched.jira_comments
+def _jira_comments_source(request: CollectCaseRequest, jira_comments: Any) -> Any:
+    if jira_comments is not None:
+        return jira_comments
     if request.jira_comments_json is None:
         return None
     return _load_json(request.jira_comments_json)
 
 
-def _derive_resolution(issue: Mapping[str, Any] | None, comments: Any) -> str | None:
-    for label in _issue_labels(issue):
-        resolution = RESOLUTION_LABELS.get(label)
-        if resolution is not None:
-            return resolution
+def _jira_links_source(request: CollectCaseRequest, jira_links: Any) -> Any:
+    if jira_links is not None:
+        return jira_links
+    if request.jira_links_json is None:
+        return None
+    return _links_value(_load_json(request.jira_links_json))
 
-    for body in _comment_bodies(comments):
-        if resolution := _comment_resolution(body):
-            return resolution
+
+def _jira_urls(request: CollectCaseRequest, case_id: str) -> dict[str, str]:
+    if request.jira_url and case_id == request.case_id:
+        issue_url = _jira_issue_api_url(request.jira_url, case_id)
+    elif request.jira_url:
+        issue_url = _join_url(_origin(request.jira_url), f"/rest/api/2/issue/{case_id}")
+    elif request.jira_base_url:
+        issue_url = _join_url(
+            request.jira_base_url,
+            f"/rest/api/2/issue/{case_id}",
+        )
+    else:
+        raise CollectCaseError("jira URL configuration is missing")
+
+    issue_base = issue_url.split("?", 1)[0].rstrip("/")
+    return {
+        "issue": issue_url,
+        "comments": f"{issue_base}/comment",
+        "links": f"{issue_base}/remotelink",
+    }
+
+
+def _linked_jira_keys(
+    issue: Mapping[str, Any] | None,
+    case_id: str,
+) -> list[str]:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return []
+    values = fields.get("issuelinks")
+    if not isinstance(values, list):
+        return []
+
+    keys: list[str] = []
+    for link in values:
+        if not isinstance(link, Mapping):
+            continue
+        for name in ("inwardIssue", "outwardIssue"):
+            linked = link.get(name)
+            if not isinstance(linked, Mapping):
+                continue
+            key = _nonempty_string(linked.get("key"))
+            if key is not None and key != case_id:
+                keys.append(key)
+    return list(dict.fromkeys(keys))
+
+
+def _fetch_linked_jira_issues(
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+    jira_headers: Mapping[str, str],
+    *,
+    root_issue: Mapping[str, Any] | None,
+    root_case_id: str,
+    max_depth: int = 1,
+) -> list[FetchedJiraIssue]:
+    linked_issues: list[FetchedJiraIssue] = []
+    seen_keys = {root_case_id}
+    queue: list[tuple[Mapping[str, Any] | None, str, int]] = [(root_issue, root_case_id, 1)]
+
+    while queue:
+        parent_issue, parent_key, depth = queue.pop(0)
+        for linked_key in _linked_jira_keys(parent_issue, parent_key):
+            if linked_key in seen_keys:
+                continue
+            seen_keys.add(linked_key)
+            linked_issue = _fetch_linked_jira_issue(
+                request,
+                result,
+                jira_headers,
+                parent_issue=parent_issue,
+                parent_key=parent_key,
+                linked_key=linked_key,
+            )
+            if linked_issue is None:
+                continue
+            linked_issues.append(linked_issue)
+            if depth < max_depth:
+                queue.append((linked_issue.issue, linked_key, depth + 1))
+
+    return linked_issues
+
+
+def _fetch_linked_jira_issue(
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+    jira_headers: Mapping[str, str],
+    *,
+    parent_issue: Mapping[str, Any] | None,
+    parent_key: str,
+    linked_key: str,
+) -> FetchedJiraIssue | None:
+    linked_urls = _jira_urls(request, linked_key)
+    try:
+        linked_issue = _fetch_json(
+            linked_urls["issue"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+        linked_comments = _fetch_json(
+            linked_urls["comments"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+        linked_links = _fetch_json_value(
+            linked_urls["links"],
+            headers=jira_headers,
+            request=request,
+            result=result,
+        )
+    except CollectCaseError as exc:
+        linked_stub = _linked_jira_issue_stub(parent_issue, parent_key, linked_key)
+        if linked_stub is None:
+            result.warnings.append(f"skipped linked Jira {linked_key}: {exc}")
+            return None
+        result.warnings.append(f"used embedded linked Jira {linked_key}: {exc}")
+        return linked_stub
+
+    return FetchedJiraIssue(
+        key=linked_key,
+        issue=linked_issue,
+        comments=linked_comments,
+        links=linked_links,
+    )
+
+
+def _embedded_linked_jira_issues(
+    issue: Mapping[str, Any] | None,
+    case_id: str,
+) -> list[FetchedJiraIssue]:
+    return [
+        stub
+        for key in _linked_jira_keys(issue, case_id)
+        if (stub := _linked_jira_issue_stub(issue, case_id, key)) is not None
+    ]
+
+
+def _linked_jira_issue_stub(
+    issue: Mapping[str, Any] | None,
+    case_id: str,
+    linked_key: str,
+) -> FetchedJiraIssue | None:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return None
+    values = fields.get("issuelinks")
+    if not isinstance(values, list):
+        return None
+
+    for link in values:
+        if not isinstance(link, Mapping):
+            continue
+        for name in ("inwardIssue", "outwardIssue"):
+            linked = link.get(name)
+            if not isinstance(linked, Mapping):
+                continue
+            key = _nonempty_string(linked.get("key"))
+            if key != linked_key or key == case_id:
+                continue
+            payload = copy.deepcopy(dict(linked))
+            payload["key"] = key
+            linked_fields = payload.get("fields")
+            payload["fields"] = (
+                copy.deepcopy(dict(linked_fields)) if isinstance(linked_fields, Mapping) else {}
+            )
+            return FetchedJiraIssue(
+                key=key,
+                issue=payload,
+                comments={"comments": [], "maxResults": 0, "startAt": 0, "total": 0},
+                links=[],
+            )
     return None
 
 
-def _derive_case_type(resolution: str | None) -> str | None:
-    if resolution is None:
-        return None
-    return {
-        "backport": "cve_backport",
-        "rebase": "rebase",
-        "rebuild": "dependency_rebuild",
-        "not_affected": "not_affected",
-        "postponed": "postponed",
-        "clarification_needed": "clarification_needed",
-    }.get(resolution)
+def _jira_issue_api_url(url: str, case_id: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise CollectCaseError(f"Jira URL must be absolute: {url}")
+
+    if "/rest/api/" in parsed.path and "/issue/" in parsed.path:
+        return url
+    if "/browse/" in parsed.path:
+        return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}")
+    return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}")
 
 
+
+def _patch_commit_shas(body: bytes) -> list[str]:
+    text = body[:1_000_000].decode("utf-8", errors="ignore")
+    shas = [match.group(1).lower() for match in re.finditer(r"(?m)^From ([0-9a-fA-F]{40}) ", text)]
+    return list(dict.fromkeys(shas))
+
+
+def _json_object_from_body(body: bytes, url: str) -> Mapping[str, Any]:
+    data = _json_value_from_body(body, url)
+    if not isinstance(data, Mapping):
+        raise CollectCaseError(f"fetched URL returned non-object JSON: {url}")
+    return data
+
+
+def _json_value_from_body(body: bytes, url: str) -> Any:
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CollectCaseError(f"fetched URL did not return JSON: {url}") from exc
+
+
+
+def _patch_urls_from_jira_evidence(*values: Any) -> list[str]:
+    urls: list[str] = []
+    for text in _string_values(values):
+        for url in _urls_from_text(text):
+            if patch_url := _patch_url_candidate(url):
+                urls.append(patch_url)
+    return list(dict.fromkeys(urls))
+
+
+def _urls_from_text(text: str) -> list[str]:
+    return [match.group(0).rstrip(".,;:)]}\"'") for match in URL_PATTERN.finditer(text)]
+
+
+def _is_patch_url(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return path.endswith((".patch", ".diff"))
+
+
+def _patch_url_candidate(url: str) -> str | None:
+    if _is_patch_url(url):
+        return url
+    path = urlparse(url).path
+    if "/-/merge_requests/" in path or "/-/commit/" in path:
+        return url.rstrip("/") + ".patch"
+    return None
+
+
+def _patch_suffix(url: str) -> str:
+    path = urlparse(url).path.lower()
+    if path.endswith(".diff"):
+        return ".diff"
+    return ".patch"
+
+
+def _looks_like_patch(body: bytes) -> bool:
+    prefix = body[:4096].decode("utf-8", errors="ignore").lstrip()
+    return (
+        prefix.startswith("From ") or prefix.startswith("diff --git ") or "\ndiff --git " in prefix
+    )
+
+
+def _string_values(value: Any) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, Mapping):
+        for item in value.values():
+            yield from _string_values(item)
+        return
+    if isinstance(value, list | tuple):
+        for item in value:
+            yield from _string_values(item)
+
+
+def _join_url(base_url: str, path: str) -> str:
+    return _origin(base_url) + path
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        raise CollectCaseError(f"URL must be absolute: {url}")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _jira_headers(
+    token_env: str,
+    *,
+    token_file: Path | None,
+    email: str | None,
+) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    token = _jira_token(token_env, token_file)
+    if token:
+        headers["Authorization"] = _jira_authorization(token, email)
+    return headers
+
+
+def _jira_token(token_env: str, token_file: Path | None) -> str | None:
+    if token_file is not None:
+        return token_file.read_text(encoding="utf-8").strip()
+    token = os.environ.get(token_env)
+    return token.strip() if token else None
+
+
+def _jira_authorization(token: str, email: str | None) -> str:
+    lowered = token.lower()
+    if lowered.startswith("bearer ") or lowered.startswith("basic "):
+        return token
+
+    basic_email = email or os.environ.get("JIRA_EMAIL") or os.environ.get("ATLASSIAN_EMAIL")
+    if basic_email:
+        raw = f"{basic_email}:{token}".encode("utf-8")
+        return "Basic " + base64.b64encode(raw).decode("ascii")
+
+    return f"Bearer {token}"
+
+
+
+
+def _fetch_json(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> Mapping[str, Any]:
+    body = _fetch_bytes(url, headers=headers, request=request, result=result)
+    return _json_object_from_body(body, url)
+
+
+def _fetch_json_value(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> Any:
+    body = _fetch_bytes(url, headers=headers, request=request, result=result)
+    return _json_value_from_body(body, url)
+
+
+def _fetch_bytes(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> bytes:
+    http_request = Request(url, headers=dict(headers), method="GET")
+    try:
+        with urlopen(http_request, timeout=request.http_timeout) as response:
+            body = response.read()
+    except OSError as exc:
+        raise CollectCaseError(f"failed to fetch {url}: {exc}") from exc
+    result.fetched_urls.append(url)
+    return body
+
+
+
+
+
+def _json_body(value: Any) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 def _derive_package(issue: Mapping[str, Any] | None) -> str | None:
     fields = _issue_fields(issue)
     if fields is None:
@@ -422,19 +786,6 @@ def _derive_cve_ids(issue: Mapping[str, Any] | None, comments: Any) -> list[str]
     for text in [*_issue_text_values(issue), *_comment_bodies(comments)]:
         values.extend(match.group(0).upper() for match in CVE_PATTERN.finditer(text))
     return list(dict.fromkeys(values))
-
-
-def _derive_network_mode(request: CollectCaseRequest, fetched: FetchedEvidence) -> str:
-    if (
-        request.gitlab_mr_url
-        or fetched.gitlab_patch_url
-        or fetched.jira_patch_urls
-        or fetched.web_records
-        or request.patch_urls
-        or request.web_records
-    ):
-        return "replay_only"
-    return "network_denied"
 
 
 def _derive_mock_repo(
@@ -889,14 +1240,15 @@ def _effective_patch_urls(
     return tuple(dict.fromkeys(urls))
 
 
-def _expected_patch_urls(
-    request: CollectCaseRequest,
-    fetched: FetchedEvidence,
-) -> tuple[str, ...]:
-    if request.patch_urls:
-        return tuple(dict.fromkeys(request.patch_urls))
+    historical_urls = _historical_result_patch_urls(_evidence_comments(request, fetched))
+    if historical_urls:
+        valid_evidence_urls = set(fetched.jira_patch_urls)
+        if valid_evidence_urls:
+            filtered = [url for url in historical_urls if url in valid_evidence_urls]
+            if filtered:
+                return tuple(filtered)
+        return tuple(historical_urls)
 
-    return _effective_patch_urls(request, fetched)
 
 
 def _infer_backport_source(resolution: str | None, patch_urls: Sequence[str]) -> str | None:
@@ -928,6 +1280,17 @@ def _backport_source_for_url(url: str) -> str | None:
     return None
 
 
+def _historical_result_patch_urls(comments: Any) -> list[str]:
+    urls: list[str] = []
+    for comment in _comment_values(comments):
+        if not _is_result_comment(comment):
+            continue
+        body = comment.get("body")
+        if body is None:
+            continue
+        body_text = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
+        urls.extend(_patch_urls_from_jira_evidence(body_text))
+    return list(dict.fromkeys(urls))
 
 
 def _effective_fix_sources(
