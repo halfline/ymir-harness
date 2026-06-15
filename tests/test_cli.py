@@ -6,8 +6,15 @@ from pathlib import Path
 import pytest
 
 from ymir_harness import __version__
+from ymir_harness.capture_missing import (
+    CapturedJiraRequest,
+    CapturedResponse,
+    CaptureFailure,
+    CaptureMissingResult,
+)
 import ymir_harness.cli as cli_module
 from ymir_harness.cli import main
+from ymir_harness.collect_case import CollectCaseResult
 from ymir_harness.models import CaseValidationResult, RunCaseResult, RunReport, ValidationReport
 from ymir_harness.runner import RunCaseExecution
 
@@ -631,101 +638,300 @@ def test_cli_run_can_use_ymir_rebuild_workflow(
     assert Path(output["cases"][0]["actual_path"]).is_file()
 
 
-def test_cli_run_blocks_invalid_fixtures(
+def test_cli_prepare_case_collects_until_run_succeeds(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
-    output_path = tmp_path / "reports" / "run.json"
-    _write_json(
-        cases_dir / "expected" / "RHEL-12345.expected.json",
-        {
-            "schema_version": 99,
-            "case_id": "RHEL-99999",
-            "case_type": "not_affected",
-            "resolution": "not_affected",
-            "package": "dnsmasq",
-            "expected_basis": "maintainer_decision",
-            "ground_truth_confidence": "high",
-            "answer_leakage": "none",
-            "case_status": "active",
-            "network_mode": "network_denied",
-        },
-    )
+    collect_requests = []
+    capture_requests = []
+    run_ids = []
+    run_statuses = ["failed", "passed"]
+
+    def fake_collect_case(request):
+        collect_requests.append(request)
+        return CollectCaseResult(case_id=request.case_id, cases_dir=request.cases_dir)
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    case_status="active",
+                    status="valid",
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        status = run_statuses.pop(0)
+        run_ids.append(kwargs["run_id"])
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    status=status,
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    def fake_capture_missing(request):
+        capture_requests.append(request)
+        result = CaptureMissingResult(
+            case_id=request.case_id,
+            cases_dir=request.cases_dir,
+            run_path=request.run_path,
+        )
+        if len(capture_requests) == 1:
+            result.captured_jira.append(
+                CapturedJiraRequest(
+                    kind="jira_search",
+                    method="POST",
+                    url="https://redhat.atlassian.net/rest/api/2/search",
+                    relative_path="api/search/abc.json",
+                )
+            )
+        return result
+
+    monkeypatch.setattr(cli_module, "collect_case", fake_collect_case)
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
 
     assert (
         main(
             [
-                "run",
+                "prepare-case",
                 "--cases",
                 str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--jira-url",
+                "https://redhat.atlassian.net/browse/RHEL-12345",
+                "--jira-token-file",
+                str(tmp_path / "jira-token.txt"),
+                "--gitlab-token-env",
+                "GITLAB_API_TOKEN",
+                "--workflow",
+                "ymir-triage",
                 "--variant",
                 "baseline",
-                "--output",
-                str(output_path),
-            ]
-        )
-        == 1
-    )
-
-    output = capsys.readouterr().out
-    assert "benchmark run blocked" in output
-    assert not output_path.exists()
-    assert (cases_dir / "reports" / "fixture-validation-errors.md").is_file()
-def test_cli_compares_result_reports(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    baseline_path = tmp_path / "baseline.json"
-    candidate_path = tmp_path / "candidate.json"
-    markdown_path = tmp_path / "comparison.md"
-    _write_result_report(
-        baseline_path,
-        {
-            "RHEL-12345": ("failed", True),
-        },
-    )
-    _write_result_report(
-        candidate_path,
-        {
-            "RHEL-12345": ("passed", True),
-        },
-    )
-
-    assert (
-        main(
-            [
-                "compare-results",
-                str(baseline_path),
-                str(candidate_path),
-                "--markdown-output",
-                str(markdown_path),
+                "--json",
             ]
         )
         == 0
     )
 
     output = json.loads(capsys.readouterr().out)
-    assert output["summary"]["wins"] == 1
-    assert output["cases"][0]["delta"] == "win"
-    assert "RHEL-12345" in markdown_path.read_text(encoding="utf-8")
+    assert output["status"] == "succeeded"
+    assert output["collected"]["case_id"] == "RHEL-12345"
+    assert [iteration["run"]["run_id"] for iteration in output["iterations"]] == [
+        "baseline-RHEL-12345-iter-1",
+        "baseline-RHEL-12345-iter-2",
+    ]
+    assert run_ids == ["baseline-RHEL-12345-iter-1", "baseline-RHEL-12345-iter-2"]
+    assert len(capture_requests) == 1
+    assert capture_requests[0].case_id == "RHEL-12345"
+    assert collect_requests[0].jira_url == "https://redhat.atlassian.net/browse/RHEL-12345"
+    assert collect_requests[0].mock_agent == "triage"
+    assert collect_requests[0].gitlab_token_env == "GITLAB_API_TOKEN"
 
 
-def _write_result_report(path: Path, cases: dict[str, tuple[str, bool]]) -> None:
-    _write_json(
-        path,
-        {
-            "schema_version": 1,
-            "cases": [
-                {
-                    "case_id": case_id,
-                    "case_type": "cve_backport",
-                    "status": status,
-                    "headline": headline,
-                }
-                for case_id, (status, headline) in cases.items()
+def test_cli_prepare_case_reruns_after_passing_run_captures_replay_miss(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    capture_requests = []
+    run_ids = []
+    has_replay_candidates = [True, False]
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    case_status="active",
+                    status="valid",
+                )
             ],
-        },
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        run_ids.append(kwargs["run_id"])
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    status="passed",
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    def fake_capture_missing(request):
+        capture_requests.append(request)
+        result = CaptureMissingResult(
+            case_id=request.case_id,
+            cases_dir=request.cases_dir,
+            run_path=request.run_path,
+        )
+        if len(capture_requests) == 1:
+            result.candidate_jira_requests.append(
+                {
+                    "kind": "jira_search",
+                    "method": "POST",
+                    "url": "https://redhat.atlassian.net/rest/api/2/search",
+                    "payload": {"jql": 'component = "sqlite"'},
+                }
+            )
+            result.captured_jira.append(
+                CapturedJiraRequest(
+                    kind="jira_search",
+                    method="POST",
+                    url="https://redhat.atlassian.net/rest/api/2/search",
+                    relative_path="api/search/abc.json",
+                )
+            )
+        return result
+
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_has_replay_candidates",
+        lambda _results_dir: has_replay_candidates.pop(0),
+    )
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--workflow",
+                "ymir-triage",
+                "--variant",
+                "baseline",
+                "--max-iterations",
+                "2",
+                "--json",
+            ]
+        )
+        == 0
     )
 
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "succeeded"
+    assert [iteration["run"]["run_id"] for iteration in output["iterations"]] == [
+        "baseline-RHEL-12345-iter-1",
+        "baseline-RHEL-12345-iter-2",
+    ]
+    assert run_ids == ["baseline-RHEL-12345-iter-1", "baseline-RHEL-12345-iter-2"]
+    assert len(capture_requests) == 1
+    assert len(output["iterations"][0]["capture"]["captured_jira"]) == 1
+    assert "capture" not in output["iterations"][1]
 
-def _write_json(path: Path, data: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+def test_cli_prepare_case_blocks_passing_run_with_uncaptured_replay_miss(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    case_status="active",
+                    status="valid",
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    status="passed",
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    def fake_capture_missing(request):
+        result = CaptureMissingResult(
+            case_id=request.case_id,
+            cases_dir=request.cases_dir,
+            run_path=request.run_path,
+        )
+        result.candidate_urls.append("https://example.invalid/missing.patch")
+        return result
+
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
+    monkeypatch.setattr(cli_module, "_prepare_has_replay_candidates", lambda _results_dir: True)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--workflow",
+                "ymir-triage",
+                "--variant",
+                "baseline",
+                "--json",
+            ]
+        )
+        == 1
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "blocked"
+    assert output["iterations"][0]["run"]["summary"]["has_failures"] is False
+    assert output["iterations"][0]["capture"]["candidate_urls"] == [
+        "https://example.invalid/missing.patch"
+    ]
+
+
