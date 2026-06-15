@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from urllib.parse import urlparse
 
 from ymir_harness import __version__
+from ymir_harness.collect_case import (
+    CollectCaseError,
+    CollectCaseRequest,
+    collect_case,
+)
+from ymir_harness.capture_missing import (
+    CaptureMissingResult,
+    blocked_urls_from_run_path,
+    capture_missing,
+    jira_requests_from_run_path,
+)
 from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
 from ymir_harness.models import (
     ALLOWED_ANSWER_LEAKAGE,
@@ -38,6 +51,7 @@ from ymir_harness.ymir_workflows import (
 )
 
 WORKFLOW_CHOICES = ("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild")
+MAX_PREPARE_AUTO_ALLOWED_HOSTS = 16
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,6 +89,119 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the validation report JSON to stdout",
     )
     validate.set_defaults(func=_cmd_validate_cases)
+
+    prepare = subparsers.add_parser(
+        "prepare-case",
+        help="collect and iteratively capture replay evidence for one case",
+    )
+    prepare.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
+    prepare.add_argument(
+        "--case",
+        "--case-id",
+        dest="case_id",
+        required=True,
+        help="case id to prepare",
+    )
+    prepare.add_argument(
+        "--workflow",
+        choices=tuple(choice for choice in WORKFLOW_CHOICES if choice != "none"),
+        default="ymir-triage",
+        help="workflow executor to run while preparing the case",
+    )
+    prepare.add_argument("--variant", default="prepare", help="benchmark variant name")
+    prepare.add_argument("--run-id", help="base benchmark run identifier")
+    prepare.add_argument("--ymir-sha", help="record the benchmarked Ymir git SHA")
+    prepare.add_argument(
+        "--repeat",
+        type=_positive_int,
+        default=1,
+        help="number of repetitions to record for each iteration",
+    )
+    prepare.add_argument(
+        "--max-iterations",
+        type=_positive_int,
+        default=3,
+        help="maximum run/capture iterations before stopping",
+    )
+    prepare.add_argument(
+        "--feature",
+        dest="features",
+        action="append",
+        default=[],
+        help="record an enabled feature flag; may be provided more than once",
+    )
+    prepare.add_argument(
+        "--results-dir",
+        type=Path,
+        help="base directory for iteration run artifacts",
+    )
+    prepare.add_argument(
+        "--jira-url",
+        help="Jira issue browse or REST API URL to import before the first run",
+    )
+    prepare.add_argument(
+        "--jira-base-url",
+        help="Jira instance base URL used to import CASE before the first run",
+    )
+    prepare.add_argument(
+        "--gitlab-mr",
+        dest="gitlab_mr_url",
+        help="GitLab merge request URL to import before the first run",
+    )
+    prepare.add_argument(
+        "--mock-repo-cache",
+        type=Path,
+        help="clone or refresh mock repos into this local cache during collection",
+    )
+    prepare.add_argument(
+        "--allow-host",
+        dest="allowed_hosts",
+        action="append",
+        default=[],
+        help=(
+            "extra host allowed for read-only capture; defaults include "
+            f"{', '.join(DEFAULT_ALLOWED_HOSTS)}"
+        ),
+    )
+    prepare.add_argument(
+        "--jira-token-env",
+        default="JIRA_TOKEN",
+        help="environment variable containing a Jira token",
+    )
+    prepare.add_argument("--jira-token-file", type=Path, help="file containing a Jira token")
+    prepare.add_argument("--jira-email", help="Atlassian account email for Jira Basic auth")
+    prepare.add_argument(
+        "--gitlab-token-env",
+        default="GITLAB_TOKEN",
+        help="environment variable containing a GitLab private token",
+    )
+    prepare.add_argument(
+        "--as-of",
+        help=(
+            "historical Jira timestamp to reconstruct search results against; "
+            "defaults to the first existing Ymir/Jotnar result comment when available"
+        ),
+    )
+    prepare.add_argument(
+        "--http-timeout",
+        type=float,
+        default=30.0,
+        help="timeout in seconds for read-only collection and capture",
+    )
+    prepare.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace existing collected or captured fixture files",
+    )
+    prepare.add_argument("--json", action="store_true", help="print preparation result JSON")
+    prepare.add_argument(
+        "--provenance",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="record additional run provenance; may be provided more than once",
+    )
+    prepare.set_defaults(func=_cmd_prepare_case)
 
     score = subparsers.add_parser(
         "score-result",
@@ -222,6 +349,53 @@ def _cmd_validate_cases(args: argparse.Namespace) -> int:
         sys.stdout.write(f"reports written to {reports_dir}\n")
 
     return 1 if report.has_blocking_errors else 0
+
+def _cmd_prepare_case(args: argparse.Namespace) -> int:
+    provenance = _parse_provenance_or_exit(args.provenance)
+    try:
+        payload, exit_code = _prepare_case(args, provenance)
+    except (CaptureMissingError, CollectCaseError, ValueError) as exc:
+        sys.stderr.write(f"prepare-case failed: {exc}\n")
+        return 2
+
+    encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if args.json:
+        sys.stdout.write(encoded)
+    else:
+        sys.stdout.write(
+            f"prepare case: {payload['status']}, {len(payload['iterations'])} iteration(s)\n"
+        )
+        if payload.get("collected"):
+            sys.stdout.write(
+                f"collected {payload['case_id']}: "
+                f"{len(payload['collected'].get('written_paths', []))} files written\n"
+            )
+        for iteration in payload["iterations"]:
+            run = iteration["run"]
+            sys.stdout.write(
+                f"iteration {iteration['iteration']}: run {run['run_id']} -> {run['summary']}\n"
+            )
+            capture = iteration.get("capture")
+            if capture:
+                sys.stdout.write(
+                    "  capture: "
+                    f"{len(capture['captured'])} URL(s), "
+                    f"{len(capture['captured_jira'])} Jira request(s), "
+                    f"{len(capture['captured_git_failures'])} git failure(s), "
+                    f"{len(capture['failed'])} failure(s)\n"
+                )
+            if auto_allowed_hosts := iteration.get("auto_allowed_hosts"):
+                sys.stdout.write(
+                    f"  auto-allowed hosts: {', '.join(str(host) for host in auto_allowed_hosts)}\n"
+                )
+    return exit_code
+
+
+def _workflow_mock_agent(workflow: str) -> str:
+    if workflow.startswith("ymir-"):
+        return workflow.removeprefix("ymir-")
+    return "triage"
+
 def _cmd_score_result(args: argparse.Namespace) -> int:
     expected = load_json_file(args.expected_json)
     actual = load_json_file(args.actual_json)
