@@ -20,6 +20,116 @@ from ymir_harness.ymir_workflows import (
 
 
 
+def test_ymir_triage_executor_runs_workflow_with_no_write_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OUTER_ONLY", "kept")
+    calls = []
+
+    async def workflow(jira_issue, dry_run, agent_factory, **kwargs):
+        calls.append(
+            {
+                "jira_issue": jira_issue,
+                "dry_run": dry_run,
+                "agent_factory": agent_factory,
+                "kwargs": kwargs,
+                "dry_run_env": os.environ["DRY_RUN"],
+                "feature_env": os.environ["YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK"],
+                "outer_only": os.environ.get("OUTER_ONLY"),
+            }
+        )
+        return _State(
+            triage_result=_TriageResult(
+                {
+                    "resolution": "backport",
+                    "data": {
+                        "package": "dnsmasq",
+                        "patch_urls": ["https://example.invalid/fix.patch"],
+                        "cve_id": "CVE-2026-0001",
+                        "fix_version": "rhel-8.10.z",
+                    },
+                }
+            ),
+            target_branch="rhel-8.10.z",
+            usage={"input_tokens": 1200, "output_tokens": 300},
+            iteration=9,
+            steps=[object(), object(), object()],
+            cost=_State(total=4.25),
+        )
+
+    def agent_factory(_gateway_tools, _local_tool_options):
+        return object()
+
+    executor = make_ymir_triage_executor(
+        workflow=workflow,
+        agent_factory=agent_factory,
+    )
+
+    execution = executor(
+        _request(
+            tmp_path,
+            environment={
+                "PATH": "/usr/bin",
+                "DRY_RUN": "true",
+            },
+            features=("YMIR_ENABLE_CVE_AFFECTED_VERSION_CHECK",),
+        )
+    )
+
+    assert os.environ["OUTER_ONLY"] == "kept"
+    assert execution.status == "passed"
+    assert execution.actual_result == {
+        "schema_version": 1,
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "workflow": "ymir-triage",
+        "resolution": "backport",
+        "data": {
+            "package": "dnsmasq",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+            "cve_id": "CVE-2026-0001",
+            "fix_version": "rhel-8.10.z",
+        },
+        "package": "dnsmasq",
+        "patch_urls": ["https://example.invalid/fix.patch"],
+        "cve_id": "CVE-2026-0001",
+        "fix_version": "rhel-8.10.z",
+        "target_branch": "rhel-8.10.z",
+        "token_usage": {"input_tokens": 1200, "output_tokens": 300},
+        "iteration_count": 9,
+        "tool_call_count": 3,
+        "total_cost_usd": 4.25,
+    }
+    assert calls == [
+        {
+            "jira_issue": "RHEL-12345",
+            "dry_run": True,
+            "agent_factory": agent_factory,
+            "kwargs": {"auto_chain": False, "silent_run": True},
+            "dry_run_env": "true",
+            "feature_env": "true",
+            "outer_only": None,
+        }
+    ]
+
+
+def test_ymir_triage_executor_reports_missing_triage_result(tmp_path: Path) -> None:
+    async def workflow(*_args, **_kwargs):
+        return _State(triage_result=None, target_branch=None)
+
+    executor = make_ymir_triage_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(_request(tmp_path))
+
+    assert execution.status == "failed"
+    assert execution.actual_result is None
+    assert execution.reason == "ymir triage workflow returned no triage result"
+
+
 def test_ymir_triage_executor_logs_workflow_progress(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -72,6 +182,24 @@ def test_ymir_triage_executor_logs_workflow_progress(
         ),
     ],
 )
+def test_live_ymir_executors_report_missing_chat_model(
+    tmp_path: Path,
+    executor_factory,
+    case_type: str,
+    expected: dict[str, object] | None,
+    reason: str,
+) -> None:
+    request = _request(tmp_path, case_type=case_type)
+    if expected is not None:
+        _write_expected(request, expected)
+
+    execution = executor_factory()(request)
+
+    assert execution.status == "failed"
+    assert execution.actual_result is None
+    assert execution.reason == reason
+
+
 def test_ymir_triage_executor_starts_managed_gateway_by_default(
     tmp_path: Path,
     monkeypatch,
@@ -142,6 +270,54 @@ def test_ymir_triage_executor_starts_managed_gateway_by_default(
             "gateway_url": "http://127.0.0.1:18080/sse",
         }
     ]
+
+
+
+def test_patch_no_write_candidate_build_lookup_replays_brewhub(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("ymir")
+    from ymir.common import utils as utils_module
+    from ymir.tools.unprivileged import specfile as specfile_module
+
+    async def fail_lookup(_package: str, _dist_git_branch: str):
+        raise AssertionError("live candidate build lookup should not run")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "recorded_files": {},
+                "koji_candidate_builds": {
+                    "redis|rhel-9.6.0": {
+                        "evr": {
+                            "epoch": 1,
+                            "version": "6.2.20",
+                            "release": "3.el9",
+                        },
+                        "source_ref": "real-source-ref",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("YMIR_BENCHMARK_REPLAY_MANIFEST", str(manifest_path))
+    monkeypatch.delattr(specfile_module, "_ymir_harness_candidate_build_patched", raising=False)
+    monkeypatch.setattr(specfile_module, "get_latest_candidate_build", fail_lookup)
+    monkeypatch.setattr(utils_module, "get_latest_candidate_build", fail_lookup)
+
+    _patch_no_write_candidate_build_lookup()
+
+    evr, source_ref = asyncio.run(specfile_module.get_latest_candidate_build("redis", "rhel-9.6.0"))
+
+    assert evr.epoch == 1
+    assert evr.version == "6.2.20"
+    assert evr.release == "3.el9"
+    assert source_ref == "real-source-ref"
 
 
 
