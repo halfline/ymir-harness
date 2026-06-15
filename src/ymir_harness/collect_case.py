@@ -1053,6 +1053,349 @@ def _write_expected(
     )
 
 
+def _write_jira_fixtures(
+    cases_dir: Path,
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+    result: CollectCaseResult,
+) -> None:
+    jira_dir = cases_dir / "jiras" / request.case_id
+    issue_for_start: Mapping[str, Any] | None = None
+    comments_for_start: Any = None
+    if fetched.jira_issue is not None:
+        issue_for_start = fetched.jira_issue
+        _write_json(
+            jira_dir / "issue.json",
+            fetched.jira_issue,
+            overwrite=request.overwrite,
+            result=result,
+        )
+    elif request.jira_issue_json is not None:
+        issue_data = _load_json(request.jira_issue_json)
+        if isinstance(issue_data, Mapping):
+            issue_for_start = issue_data
+        _copy_file(
+            request.jira_issue_json,
+            jira_dir / "issue.json",
+            overwrite=request.overwrite,
+            result=result,
+        )
+    else:
+        issue_for_start = {
+            "schema_version": SCHEMA_VERSION,
+            "case_id": request.case_id,
+            "case_type": request.case_type,
+            "key": request.case_id,
+            "fields": {
+                "summary": f"TODO: collect Jira summary for {request.case_id}",
+                "components": [{"name": request.package}],
+            },
+        }
+        _write_json(
+            jira_dir / "issue.json",
+            issue_for_start,
+            overwrite=request.overwrite,
+            result=result,
+        )
+
+    if fetched.jira_comments is not None:
+        comments_for_start = fetched.jira_comments
+        _write_json(
+            jira_dir / "comments.json",
+            fetched.jira_comments,
+            overwrite=request.overwrite,
+            result=result,
+        )
+    elif request.jira_comments_json is not None:
+        comments_for_start = _load_json(request.jira_comments_json)
+        _copy_file(
+            request.jira_comments_json,
+            jira_dir / "comments.json",
+            overwrite=request.overwrite,
+            result=result,
+        )
+    else:
+        comments_for_start = {
+            "schema_version": SCHEMA_VERSION,
+            "case_id": request.case_id,
+            "case_type": request.case_type,
+            "comments": [],
+        }
+        _write_json(
+            jira_dir / "comments.json",
+            comments_for_start,
+            overwrite=request.overwrite,
+            result=result,
+        )
+
+    if fetched.jira_links is not None:
+        _write_json(
+            jira_dir / "links.json",
+            _jira_links_fixture_payload(request, fetched.jira_links),
+            overwrite=request.overwrite,
+            result=result,
+        )
+    elif request.jira_links_json is not None:
+        _write_json(
+            jira_dir / "links.json",
+            _jira_links_fixture_payload(request, _load_json(request.jira_links_json)),
+            overwrite=request.overwrite,
+            result=result,
+        )
+    else:
+        _write_json(
+            jira_dir / "links.json",
+            {
+                "schema_version": SCHEMA_VERSION,
+                "case_id": request.case_id,
+                "case_type": request.case_type,
+                "links": [],
+            },
+            overwrite=request.overwrite,
+            result=result,
+        )
+
+    if issue_for_start is not None:
+        as_of = derive_as_of_from_comments(comments_for_start)
+        if as_of is not None:
+            _write_json(
+                jira_dir / "reconstruction.json",
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "case_id": request.case_id,
+                    "as_of": as_of,
+                    "method": "first_historical_result_comment",
+                },
+                overwrite=request.overwrite,
+                result=result,
+            )
+        _write_json(
+            jira_dir / "starting-issue.json",
+            _build_starting_jira_issue(
+                issue_for_start,
+                comments_for_start,
+                case_id=request.case_id,
+                case_type=request.case_type,
+                as_of=as_of,
+            ),
+            overwrite=request.overwrite,
+            result=result,
+        )
+
+    for linked in fetched.linked_jira_issues:
+        _write_fetched_jira_fixture(
+            jira_dir / "linked" / linked.key,
+            linked.key,
+            None,
+            linked.issue,
+            linked.comments,
+            linked.links,
+            overwrite=request.overwrite,
+            result=result,
+        )
+
+    for attachment in request.attachments:
+        _copy_into_dir(
+            attachment,
+            jira_dir / "attachments",
+            overwrite=request.overwrite,
+            result=result,
+        )
+
+
+def _write_fetched_jira_fixture(
+    jira_dir: Path,
+    case_id: str,
+    case_type: str | None,
+    issue: Mapping[str, Any],
+    comments: Mapping[str, Any],
+    links: Any,
+    *,
+    overwrite: bool,
+    result: CollectCaseResult,
+) -> None:
+    _write_json(
+        jira_dir / "issue.json",
+        issue,
+        overwrite=overwrite,
+        result=result,
+    )
+    _write_json(
+        jira_dir / "comments.json",
+        comments,
+        overwrite=overwrite,
+        result=result,
+    )
+    _write_json(
+        jira_dir / "links.json",
+        _jira_links_fixture_payload_for(case_id, case_type, links),
+        overwrite=overwrite,
+        result=result,
+    )
+    _write_json(
+        jira_dir / "starting-issue.json",
+        _build_starting_jira_issue(
+            issue,
+            comments,
+            case_id=case_id,
+            case_type=case_type,
+            as_of=derive_as_of_from_comments(comments),
+        ),
+        overwrite=overwrite,
+        result=result,
+    )
+
+
+def _jira_links_fixture_payload(request: CollectCaseRequest, links: Any) -> dict[str, Any]:
+    return _jira_links_fixture_payload_for(request.case_id, request.case_type, links)
+
+
+def _jira_links_fixture_payload_for(
+    case_id: str,
+    case_type: str | None,
+    links: Any,
+) -> dict[str, Any]:
+    if isinstance(links, Mapping):
+        payload = copy.deepcopy(dict(links))
+        link_values = _links_value(payload)
+    elif isinstance(links, list):
+        payload = {}
+        link_values = copy.deepcopy(links)
+    else:
+        raise CollectCaseError("Jira links JSON must contain an object or list")
+
+    if not isinstance(link_values, list):
+        raise CollectCaseError("Jira links must be a list")
+
+    payload.setdefault("schema_version", SCHEMA_VERSION)
+    payload.setdefault("case_id", case_id)
+    if case_type is not None:
+        payload.setdefault("case_type", case_type)
+    payload["links"] = link_values
+    return payload
+
+
+def _links_value(links: Any) -> Any:
+    if isinstance(links, Mapping):
+        if "links" in links:
+            return links["links"]
+        if "remote_links" in links:
+            return links["remote_links"]
+        return []
+    return links
+
+
+def _build_starting_jira_issue(
+    issue: Mapping[str, Any],
+    comments: Any,
+    *,
+    case_id: str,
+    case_type: str | None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    payload = copy.deepcopy(dict(issue))
+    payload.setdefault("schema_version", SCHEMA_VERSION)
+    payload.setdefault("case_id", case_id)
+    if case_type is not None:
+        payload.setdefault("case_type", case_type)
+    payload.setdefault("key", case_id)
+
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        fields = {}
+    else:
+        fields = copy.deepcopy(dict(fields))
+    payload["fields"] = fields
+
+    fields.setdefault("summary", f"TODO: collect Jira summary for {case_id}")
+    fields.setdefault("description", "")
+    fields.setdefault("components", [])
+    fields.setdefault("fixVersions", [])
+    fields["labels"] = _starting_labels(fields.get("labels"))
+    fields["status"] = _starting_status(fields.get("status"))
+    fields["resolution"] = None
+    fields["comment"] = _starting_comment_block(comments, fields.get("comment"), as_of=as_of)
+    payload["remote_links"] = []
+    return payload
+
+
+def _starting_labels(labels: Any) -> list[str]:
+    if not isinstance(labels, list):
+        return []
+    return [
+        label
+        for label in labels
+        if isinstance(label, str)
+        and label
+        and label not in YMIR_RESULT_LABELS
+        and not label.startswith("ymir_")
+        and not label.startswith("jotnar_")
+        and "jotnar" not in label
+    ]
+
+
+def _starting_status(status: Any) -> Any:
+    if not isinstance(status, Mapping):
+        return {"name": "New"}
+    name = status.get("name")
+    if isinstance(name, str) and name.lower() in CLOSED_STATUS_NAMES:
+        return {"name": "New"}
+    return copy.deepcopy(dict(status))
+
+
+def _starting_comment_block(
+    comments: Any, issue_comment: Any, *, as_of: str | None
+) -> dict[str, Any]:
+    source = comments if comments is not None else issue_comment
+    source = filter_comments_as_of(source, as_of=as_of)
+    comment_values = [
+        copy.deepcopy(dict(comment))
+        for comment in _comment_values(source)
+        if not _is_result_comment(comment)
+    ]
+    return {
+        "comments": comment_values,
+        "maxResults": len(comment_values),
+        "startAt": 0,
+        "total": len(comment_values),
+    }
+
+
+def _is_result_comment(comment: Mapping[str, Any]) -> bool:
+    body = comment.get("body")
+    body_text = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
+    lowered_body = _normalized_text(body_text)
+    if any(pattern in lowered_body for pattern in RESULT_COMMENT_PATTERNS):
+        return True
+
+    author = comment.get("author")
+    if isinstance(author, Mapping):
+        author_text = _normalized_text(
+            " ".join(
+                value
+                for value in (
+                    author.get("name"),
+                    author.get("key"),
+                    author.get("displayName"),
+                    author.get("emailAddress"),
+                )
+                if isinstance(value, str)
+            )
+        )
+        if (
+            "automation bot" in author_text
+            or "e-tool" in author_text
+            or "errata-tool" in author_text
+            or "jotnar" in author_text
+            or "ymir" in author_text
+            or "rhel jira bot" in author_text
+        ):
+            return True
+    return False
+
+
+def _normalized_text(value: str) -> str:
+    return unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower()
 
 
 def _write_mock_data(
