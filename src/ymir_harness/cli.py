@@ -97,6 +97,172 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate.set_defaults(func=_cmd_validate_cases)
 
+    collect = subparsers.add_parser(
+        "collect-case",
+        help="scaffold one benchmark case from local files or read-only evidence fetches",
+    )
+    collect.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
+    collect.add_argument("--case-id", required=True, help="Jira issue key / benchmark case id")
+    collect.add_argument(
+        "--case-type",
+        choices=sorted(ALLOWED_CASE_TYPES),
+        help="benchmark case type; derived from Jira when omitted",
+    )
+    collect.add_argument(
+        "--resolution",
+        choices=sorted(ALLOWED_RESOLUTIONS),
+        help="expected resolution; derived from completed Jira when omitted",
+    )
+    collect.add_argument("--package", help="source package name; derived from Jira when omitted")
+    collect.add_argument("--target-branch", help="expected target dist-git branch")
+    collect.add_argument("--fix-version", help="expected fix version when branch is not enough")
+    collect.add_argument(
+        "--expected-basis",
+        choices=sorted(ALLOWED_EXPECTED_BASES),
+        help="ground-truth basis; defaults to historical_jira_state for Jira imports",
+    )
+    collect.add_argument(
+        "--ground-truth-confidence",
+        choices=sorted(ALLOWED_GROUND_TRUTH_CONFIDENCE),
+        default="medium",
+    )
+    collect.add_argument(
+        "--answer-leakage",
+        choices=sorted(ALLOWED_ANSWER_LEAKAGE),
+        default="none",
+    )
+    collect.add_argument(
+        "--case-status",
+        choices=sorted(ALLOWED_CASE_STATUSES),
+        default="quarantined",
+    )
+    collect.add_argument(
+        "--case-status-reason",
+        default="fixture scaffold requires ground-truth review",
+    )
+    collect.add_argument(
+        "--network-mode",
+        choices=sorted(ALLOWED_NETWORK_MODES),
+        help=(
+            "expected replay network policy; defaults to replay_only when "
+            "patch/web/GitLab MR evidence is provided, otherwise network_denied"
+        ),
+    )
+    collect.add_argument("--cve-id", dest="cve_ids", action="append", default=[])
+    collect.add_argument("--patch-url", dest="patch_urls", action="append", default=[])
+    collect.add_argument("--fix-source", dest="fix_sources", action="append", default=[])
+    collect.add_argument(
+        "--backport-source",
+        choices=sorted(ALLOWED_BACKPORT_SOURCES),
+        help="backport patch source bucket; inferred from patch URLs when omitted",
+    )
+    collect.add_argument("--notes")
+    collect.add_argument(
+        "--alternate-outcome",
+        dest="alternate_outcomes",
+        action="append",
+        type=Path,
+        default=[],
+        help="JSON object with expected-result overrides for an acceptable alternate",
+    )
+    collect.add_argument("--mock-agent", default="triage")
+    collect.add_argument("--remote-url", help="mock repo original remote URL or local path")
+    collect.add_argument("--pre-fix-ref", help="commit/ref before the historical fix")
+    collect.add_argument("--branch", help="mock repo source branch")
+    collect.add_argument(
+        "--mock-repo-cache",
+        type=Path,
+        help="clone/fetch mock repos into this local cache and write source_url",
+    )
+    collect.add_argument(
+        "--zstream-override",
+        action="append",
+        default=[],
+        metavar="MAJOR=BRANCH",
+    )
+    collect.add_argument(
+        "--blocked-original-url",
+        action="append",
+        default=[],
+        help="extra original URL prefix to block during replay",
+    )
+    collect.add_argument(
+        "--reference-patch",
+        type=Path,
+        help="local patch file to copy into mock_data/*/reference_patches",
+    )
+    collect.add_argument(
+        "--reference-patch-mode",
+        choices=sorted(ALLOWED_REFERENCE_PATCH_MODES),
+    )
+    collect.add_argument("--jira-issue-json", type=Path)
+    collect.add_argument("--jira-comments-json", type=Path)
+    collect.add_argument("--jira-links-json", type=Path)
+    collect.add_argument(
+        "--jira-url",
+        help="Jira issue browse or REST API URL to fetch into jiras/CASE_ID",
+    )
+    collect.add_argument(
+        "--jira-base-url",
+        help="Jira instance base URL used to fetch CASE_ID into jiras/CASE_ID",
+    )
+    collect.add_argument(
+        "--jira-token-env",
+        default="JIRA_TOKEN",
+        help="environment variable containing a Jira token",
+    )
+    collect.add_argument(
+        "--jira-token-file",
+        type=Path,
+        help="file containing a Jira token",
+    )
+    collect.add_argument(
+        "--jira-email",
+        help="Atlassian account email for Jira Basic auth",
+    )
+    collect.add_argument(
+        "--gitlab-mr",
+        dest="gitlab_mr_url",
+        help="GitLab merge request URL to fetch into web_cache and mock_data",
+    )
+    collect.add_argument(
+        "--gitlab-token-env",
+        default="GITLAB_TOKEN",
+        help="environment variable containing a GitLab private token",
+    )
+    collect.add_argument(
+        "--http-timeout",
+        type=float,
+        default=30.0,
+        help="timeout in seconds for Jira/GitLab fetches",
+    )
+    collect.add_argument("--attachment", dest="attachments", action="append", type=Path, default=[])
+    collect.add_argument(
+        "--web-record",
+        dest="web_records",
+        action="append",
+        default=[],
+        metavar="URL=PATH",
+        help="copy a recorded response file and map it to URL in web_cache manifest",
+    )
+    collect.add_argument(
+        "--source-upstream",
+        action="append",
+        type=Path,
+        default=[],
+        help="copy upstream source archive or clone into source_cache/CASE/upstream",
+    )
+    collect.add_argument(
+        "--source-lookaside",
+        action="append",
+        type=Path,
+        default=[],
+        help="copy lookaside artifact into source_cache/CASE/lookaside",
+    )
+    collect.add_argument("--overwrite", action="store_true")
+    collect.add_argument("--json", action="store_true", help="print collection result JSON")
+    collect.set_defaults(func=_cmd_collect_case)
+
     prepare = subparsers.add_parser(
         "prepare-case",
         help="collect and iteratively capture replay evidence for one case",
@@ -356,6 +522,71 @@ def _cmd_validate_cases(args: argparse.Namespace) -> int:
         sys.stdout.write(f"reports written to {reports_dir}\n")
 
     return 1 if report.has_blocking_errors else 0
+
+
+def _cmd_collect_case(args: argparse.Namespace) -> int:
+    try:
+        request = _collect_case_request(args)
+        result = collect_case(request)
+    except (CollectCaseError, ValueError) as exc:
+        sys.stderr.write(f"collect-case failed: {exc}\n")
+        return 1
+
+    if args.json:
+        json.dump(result.to_json(), sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(f"collected {result.case_id}: {len(result.written_paths)} files written\n")
+        if result.warnings:
+            for warning in result.warnings:
+                sys.stdout.write(f"warning: {warning}\n")
+    return 0
+
+
+def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
+    mock_repo = _collect_mock_repo(args)
+    return CollectCaseRequest(
+        cases_dir=args.cases,
+        case_id=args.case_id,
+        case_type=args.case_type,
+        resolution=args.resolution,
+        package=args.package,
+        expected_basis=args.expected_basis,
+        ground_truth_confidence=args.ground_truth_confidence,
+        answer_leakage=args.answer_leakage,
+        case_status=args.case_status,
+        case_status_reason=args.case_status_reason,
+        network_mode=args.network_mode,
+        target_branch=args.target_branch,
+        fix_version=args.fix_version,
+        cve_ids=tuple(args.cve_ids),
+        patch_urls=tuple(args.patch_urls),
+        fix_sources=tuple(args.fix_sources),
+        backport_source=args.backport_source,
+        notes=args.notes,
+        alternate_acceptable_outcomes=load_alternate_outcomes(args.alternate_outcomes),
+        reference_patch_mode=args.reference_patch_mode,
+        mock_repo=mock_repo,
+        mock_agent=args.mock_agent,
+        mock_repo_cache=args.mock_repo_cache,
+        jira_url=args.jira_url,
+        jira_base_url=args.jira_base_url,
+        jira_token_env=args.jira_token_env,
+        jira_token_file=args.jira_token_file,
+        jira_email=args.jira_email,
+        gitlab_mr_url=args.gitlab_mr_url,
+        gitlab_token_env=args.gitlab_token_env,
+        http_timeout=args.http_timeout,
+        jira_issue_json=args.jira_issue_json,
+        jira_comments_json=args.jira_comments_json,
+        jira_links_json=args.jira_links_json,
+        attachments=tuple(args.attachments),
+        reference_patch=args.reference_patch,
+        web_records=parse_web_record_items(args.web_records),
+        source_upstream=tuple(args.source_upstream),
+        source_lookaside=tuple(args.source_lookaside),
+        overwrite=args.overwrite,
+    )
 
 
 def _collect_mock_repo(args: argparse.Namespace) -> MockRepoInput | None:
