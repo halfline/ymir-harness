@@ -162,6 +162,247 @@ def _workflow_progress_interval(request: RunCaseRequest) -> float:
         return WORKFLOW_PROGRESS_INTERVAL_SECONDS
 
 
+def _agent_timeout_seconds(request: RunCaseRequest) -> float | None:
+    raw_value = request.environment.get("YMIR_HARNESS_AGENT_TIMEOUT_SECONDS")
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _instrument_agent_factory(
+    agent_factory: AgentFactory,
+    *,
+    request: RunCaseRequest,
+    agent_name: str,
+) -> AgentFactory:
+    async def factory(*args: Any, **kwargs: Any) -> Any:
+        result = agent_factory(*args, **kwargs)
+        agent = await result if inspect.isawaitable(result) else result
+        _instrument_agent_llm(agent, request=request, agent_name=agent_name)
+        return _InstrumentedAgent(agent, request=request, agent_name=agent_name)
+
+    return factory
+
+
+def _instrument_agent_llm(agent: Any, *, request: RunCaseRequest, agent_name: str) -> None:
+    llm = getattr(agent, "_llm", None)
+    if llm is None or isinstance(llm, _InstrumentedChatModel):
+        return
+    try:
+        setattr(agent, "_llm", _InstrumentedChatModel(llm, request=request, agent_name=agent_name))
+    except (AttributeError, TypeError):
+        _workflow_debug(
+            request,
+            "chat_model_instrumentation_skipped",
+            agent=agent_name,
+            agent_type=type(agent).__name__,
+            chat_model_type=type(llm).__name__,
+        )
+
+
+class _InstrumentedChatModel:
+    def __init__(self, model: Any, *, request: RunCaseRequest, agent_name: str) -> None:
+        self._model = model
+        self._request = request
+        self._agent_name = agent_name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model, name)
+
+    def run(self, messages: Any, **options: Any) -> Any:
+        _workflow_debug(
+            self._request,
+            "chat_model_run_start",
+            agent=self._agent_name,
+            chat_model_type=type(self._model).__name__,
+            message_count=_safe_len(messages),
+            message_summary=_message_summary(messages),
+            option_keys=sorted(options),
+        )
+        run = self._model.run(messages, **options)
+        _workflow_debug(
+            self._request,
+            "chat_model_run_created",
+            agent=self._agent_name,
+            run_type=type(run).__name__,
+        )
+        return _InstrumentedChatModelRun(run, request=self._request, agent_name=self._agent_name)
+
+
+class _InstrumentedChatModelRun:
+    def __init__(self, run: Any, *, request: RunCaseRequest, agent_name: str) -> None:
+        self._run = run
+        self._request = request
+        self._agent_name = agent_name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._run, name)
+
+    def middleware(self, *args: Any, **kwargs: Any) -> Awaitable[Any]:
+        _workflow_debug(
+            self._request,
+            "chat_model_middleware_start",
+            agent=self._agent_name,
+            middleware_count=len(args) + len(kwargs),
+        )
+        awaitable = self._run.middleware(*args, **kwargs)
+        _workflow_debug(
+            self._request,
+            "chat_model_awaitable_created",
+            agent=self._agent_name,
+            awaitable_type=type(awaitable).__name__,
+        )
+        return self._log_awaitable(awaitable)
+
+    async def _log_awaitable(self, awaitable: Awaitable[Any]) -> Any:
+        started_at = time.monotonic()
+        _workflow_debug(
+            self._request,
+            "chat_model_await_start",
+            agent=self._agent_name,
+        )
+        try:
+            result = await awaitable
+        except BaseException as exc:
+            _workflow_debug(
+                self._request,
+                "chat_model_await_errored",
+                agent=self._agent_name,
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                error_detail="".join(traceback.format_exception(exc)),
+            )
+            raise
+        _workflow_debug(
+            self._request,
+            "chat_model_await_finished",
+            agent=self._agent_name,
+            elapsed_seconds=round(time.monotonic() - started_at, 3),
+            result_type=type(result).__name__,
+        )
+        return result
+
+
+class _InstrumentedAgent:
+    def __init__(self, agent: Any, *, request: RunCaseRequest, agent_name: str) -> None:
+        self._agent = agent
+        self._request = request
+        self._agent_name = agent_name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._agent, name)
+
+    async def run(self, *args: Any, **kwargs: Any) -> Any:
+        started_at = time.monotonic()
+        timeout = _agent_timeout_seconds(self._request)
+        _workflow_debug(
+            self._request,
+            "agent_run_start",
+            agent=self._agent_name,
+            agent_type=type(self._agent).__name__,
+            timeout_seconds=timeout,
+            chat_model=self._request.environment.get(CHAT_MODEL_ENV),
+        )
+        try:
+            awaitable = self._agent.run(*args, **kwargs)
+            _workflow_debug(
+                self._request,
+                "agent_run_awaitable_created",
+                agent=self._agent_name,
+                awaitable_type=type(awaitable).__name__,
+                args_summary=_agent_args_summary(args, kwargs),
+            )
+            if timeout is None:
+                result = await awaitable
+            else:
+                result = await asyncio.wait_for(awaitable, timeout=timeout)
+        except BaseException as exc:
+            _workflow_debug(
+                self._request,
+                "agent_run_errored",
+                agent=self._agent_name,
+                elapsed_seconds=round(time.monotonic() - started_at, 3),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                error_detail="".join(traceback.format_exception(exc)),
+            )
+            raise
+        _workflow_debug(
+            self._request,
+            "agent_run_finished",
+            agent=self._agent_name,
+            elapsed_seconds=round(time.monotonic() - started_at, 3),
+            result_type=type(result).__name__,
+        )
+        return result
+
+
+def _safe_len(value: Any) -> int | None:
+    try:
+        return len(value)
+    except TypeError:
+        return None
+
+
+def _agent_args_summary(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "arg_count": len(args),
+        "kwarg_keys": sorted(str(key) for key in kwargs),
+    }
+    if args:
+        first = args[0]
+        if isinstance(first, str):
+            summary["first_arg_chars"] = len(first)
+            summary["first_arg_head"] = first[:200]
+        else:
+            summary["first_arg_type"] = type(first).__name__
+    expected_output = kwargs.get("expected_output")
+    if expected_output is not None:
+        summary["expected_output"] = getattr(
+            expected_output, "__name__", type(expected_output).__name__
+        )
+    return summary
+
+
+def _message_summary(messages: Any) -> dict[str, Any]:
+    if not isinstance(messages, Sequence) or isinstance(messages, str | bytes):
+        return {"type": type(messages).__name__}
+    total_chars = 0
+    summaries: list[dict[str, Any]] = []
+    for message in messages[-3:]:
+        text = _message_text(message)
+        total_chars += len(text)
+        summaries.append(
+            {
+                "type": type(message).__name__,
+                "chars": len(text),
+                "head": text[:160],
+            }
+        )
+    return {
+        "recent": summaries,
+        "recent_total_chars": total_chars,
+    }
+
+
+def _message_text(message: Any) -> str:
+    if isinstance(message, str):
+        return message
+    text = getattr(message, "text", None)
+    if isinstance(text, str):
+        return text
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Sequence) and not isinstance(content, str | bytes):
+        return "\n".join(_message_text(item) for item in content)
+    return str(message)
+
 
 
 def _json_safe_value(value: Any) -> Any:
