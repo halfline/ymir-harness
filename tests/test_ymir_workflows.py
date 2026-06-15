@@ -145,6 +145,108 @@ def test_ymir_triage_executor_starts_managed_gateway_by_default(
 
 
 
+def test_instrument_agent_factory_logs_agent_run(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _request(
+        tmp_path,
+        environment={
+            "CHAT_MODEL": "vertexai:claude-sonnet-4-6",
+        },
+    )
+
+    class Agent:
+        async def run(self) -> str:
+            return "done"
+
+    async def run_agent() -> str:
+        factory = _instrument_agent_factory(lambda *_args: Agent(), request=request, agent_name="x")
+        agent = await factory([], {})
+        return await agent.run()
+
+    assert asyncio.run(run_agent()) == "done"
+    stderr = capsys.readouterr().err
+    assert '"event": "agent_run_start"' in stderr
+    assert '"event": "agent_run_finished"' in stderr
+    assert '"chat_model": "vertexai:claude-sonnet-4-6"' in stderr
+
+
+def test_instrument_agent_factory_logs_chat_model_boundary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _request(tmp_path)
+
+    class ModelRun:
+        def middleware(self, _middleware) -> object:
+            async def await_response() -> str:
+                return "model response"
+
+            return await_response()
+
+    class Model:
+        def run(self, messages, **options) -> ModelRun:
+            assert messages == ["hello"]
+            assert options == {"temperature": 0.6}
+            return ModelRun()
+
+    class Agent:
+        def __init__(self) -> None:
+            self._llm = Model()
+
+        async def run(self) -> str:
+            return await self._llm.run(["hello"], temperature=0.6).middleware(object())
+
+    async def run_agent() -> str:
+        factory = _instrument_agent_factory(lambda *_args: Agent(), request=request, agent_name="x")
+        agent = await factory([], {})
+        return await agent.run()
+
+    assert asyncio.run(run_agent()) == "model response"
+    stderr = capsys.readouterr().err
+    assert '"event": "chat_model_run_start"' in stderr
+    assert '"message_count": 1' in stderr
+    assert '"option_keys": ["temperature"]' in stderr
+    assert '"event": "chat_model_run_created"' in stderr
+    assert '"event": "chat_model_middleware_start"' in stderr
+    assert '"event": "chat_model_awaitable_created"' in stderr
+    assert '"event": "chat_model_await_start"' in stderr
+    assert '"event": "chat_model_await_finished"' in stderr
+
+
+def test_instrument_agent_factory_times_out_agent_run(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _request(
+        tmp_path,
+        environment={
+            "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "0.01",
+        },
+    )
+
+    class Agent:
+        async def run(self) -> str:
+            await asyncio.sleep(1)
+            return "done"
+
+    async def run_agent() -> None:
+        factory = _instrument_agent_factory(lambda *_args: Agent(), request=request, agent_name="x")
+        agent = await factory([], {})
+        await agent.run()
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(run_agent())
+
+    stderr = capsys.readouterr().err
+    assert '"event": "agent_run_errored"' in stderr
+    assert '"error_type": "TimeoutError"' in stderr
+
+
+
+
+
 def _request(
     tmp_path: Path,
     *,
