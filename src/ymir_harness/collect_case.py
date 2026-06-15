@@ -788,19 +788,6 @@ def _derive_cve_ids(issue: Mapping[str, Any] | None, comments: Any) -> list[str]
     return list(dict.fromkeys(values))
 
 
-def _derive_mock_repo(
-    request: CollectCaseRequest,
-    fetched: FetchedEvidence,
-    *,
-    target_branch: str | None,
-    fix_version: str | None,
-) -> MockRepoInput | None:
-    if fetched.gitlab_mr is None:
-        return None
-
-    return None
-
-
 
 def _zstream_override(branch: str, expected_branch: str | None) -> dict[str, str]:
     if expected_branch is None or expected_branch == branch:
@@ -1524,13 +1511,6 @@ def _write_source_cache(
         )
 
 
-def _auto_source_project_urls(
-    request: CollectCaseRequest,
-    fetched: FetchedEvidence,
-) -> tuple[str, ...]:
-    return ()
-
-
 
 def _is_reserved_source_host(url: str) -> bool:
     hostname = (urlparse(url).hostname or "").lower()
@@ -1739,3 +1719,153 @@ def _load_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise CollectCaseError(f"cannot read JSON file {path}: {exc}") from exc
+
+
+def _gitlab_mr_url_from_jira_evidence(*values: Any) -> str | None:
+    for value in _string_values(values):
+        for candidate in _urls_from_text(value):
+            if "/-/merge_requests/" not in candidate:
+                continue
+            parsed = urlparse(candidate)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                return candidate.removesuffix(".patch")
+    return None
+
+def _gitlab_headers(token_env: str) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    token = _gitlab_token(token_env)
+    if token:
+        headers["PRIVATE-TOKEN"] = token
+    return headers
+
+
+def _private_gitlab_url_without_token(url: str, token_env: str) -> bool:
+    if _gitlab_token(token_env):
+        return False
+    parsed = urlparse(url)
+    return parsed.hostname == "gitlab.com" and parsed.path.startswith("/redhat/rhel/rpms/")
+
+
+@lru_cache(maxsize=None)
+def _gitlab_token(token_env: str) -> str | None:
+    token = os.environ.get(token_env)
+    if token and token.strip():
+        return token.strip()
+
+    try:
+        completed = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=gitlab.com\n\n",
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+
+    for line in completed.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key == "password" and value:
+            return value
+    return None
+def _run_git(command: Sequence[str], cwd: Path) -> None:
+    completed = subprocess.run(
+        ["git", *command],
+        cwd=cwd if cwd.is_dir() else None,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        detail = f": {stderr}" if stderr else ""
+        raise CollectCaseError(f"git {' '.join(_redacted_git_command(command))} failed{detail}")
+
+
+def _git_clone_command(source: str, destination: str, gitlab_token_env: str) -> list[str]:
+    command = ["clone", "--mirror", "--quiet", source, destination]
+    return _git_authenticated_command(source, command, gitlab_token_env)
+
+
+def _git_worktree_clone_command(source: str, destination: str, gitlab_token_env: str) -> list[str]:
+    command = ["clone", "--quiet", source, destination]
+    return _git_authenticated_command(source, command, gitlab_token_env)
+
+
+def _git_authenticated_command(
+    source: str,
+    command: list[str],
+    gitlab_token_env: str,
+) -> list[str]:
+    token = _gitlab_token(gitlab_token_env)
+    if token and _is_gitlab_https_url(source):
+        authorization = base64.b64encode(f"oauth2:{token}".encode("utf-8")).decode("ascii")
+        return [
+            "-c",
+            f"http.https://gitlab.com/.extraHeader=Authorization: Basic {authorization}",
+            *command,
+        ]
+    return command
+
+
+def _is_gitlab_https_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and parsed.hostname == "gitlab.com"
+
+
+def _redacted_git_command(command: Sequence[str]) -> list[str]:
+    redacted = []
+    for part in command:
+        if part.startswith("http.https://gitlab.com/.extraHeader=Authorization:"):
+            redacted.append("http.https://gitlab.com/.extraHeader=Authorization: <redacted>")
+        else:
+            redacted.append(part)
+    return redacted
+def _gitlab_remote_url_from_mr_url(url: str | None) -> str | None:
+    if url is None:
+        return None
+    parsed = urlparse(url)
+    marker = "/-/merge_requests/"
+    if not parsed.scheme or not parsed.netloc or marker not in parsed.path:
+        return None
+    project_path = parsed.path.split(marker, 1)[0].rstrip("/")
+    if not project_path:
+        return None
+    suffix = "" if project_path.endswith(".git") else ".git"
+    return f"{parsed.scheme}://{parsed.netloc}{project_path}{suffix}"
+
+
+def _gitlab_pre_fix_ref(mr: Mapping[str, Any], commits: Any) -> str | None:
+    diff_refs = mr.get("diff_refs")
+    if isinstance(diff_refs, Mapping):
+        for name in ("base_sha", "start_sha"):
+            if value := _nonempty_string(diff_refs.get(name)):
+                return value
+
+    if isinstance(commits, list) and commits:
+        first_commit = commits[0]
+        if isinstance(first_commit, Mapping):
+            parent_ids = first_commit.get("parent_ids")
+            if isinstance(parent_ids, list) and parent_ids:
+                return _nonempty_string(parent_ids[0])
+    return None
+
+
+
+def _gitlab_project_url_from_evidence_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    for marker in ("/-/merge_requests/", "/-/commit/"):
+        if marker not in parsed.path:
+            continue
+        project_path = parsed.path.split(marker, 1)[0].rstrip("/")
+        if not project_path:
+            return None
+        return f"{parsed.scheme}://{parsed.netloc}{project_path}"
+    return None
