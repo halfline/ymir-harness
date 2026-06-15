@@ -479,6 +479,120 @@ def _prepare_has_replay_candidates(results_dir: Path) -> bool:
         return False
 
 
+def _prepare_capture_missing(
+    args: argparse.Namespace,
+    results_dir: Path,
+    auto_allowed_hosts: list[str],
+) -> tuple[CaptureMissingResult, list[str]]:
+    aggregate_result: CaptureMissingResult | None = None
+    iteration_auto_allowed_hosts: list[str] = []
+
+    while True:
+        capture_result = capture_missing(
+            _prepare_capture_request(
+                args,
+                results_dir,
+                auto_allowed_hosts=auto_allowed_hosts,
+            )
+        )
+        aggregate_result = _merge_capture_results(aggregate_result, capture_result)
+        if capture_result.failed:
+            break
+
+        added_hosts = _prepare_auto_allowed_hosts(
+            capture_result,
+            user_allowed_hosts=args.allowed_hosts,
+            auto_allowed_hosts=auto_allowed_hosts,
+        )
+        if not added_hosts:
+            break
+        auto_allowed_hosts.extend(added_hosts)
+        iteration_auto_allowed_hosts.extend(added_hosts)
+
+    if aggregate_result is None:
+        raise CaptureMissingError(f"capture did not run for {results_dir}")
+    return aggregate_result, iteration_auto_allowed_hosts
+
+
+def _merge_capture_results(
+    base: CaptureMissingResult | None,
+    update: CaptureMissingResult,
+) -> CaptureMissingResult:
+    if base is None:
+        return update
+
+    base.candidate_urls = _dedupe_sequence([*base.candidate_urls, *update.candidate_urls])
+    base.candidate_jira_requests = _dedupe_json_objects(
+        [*base.candidate_jira_requests, *update.candidate_jira_requests]
+    )
+    base.captured.extend(update.captured)
+    base.captured_jira.extend(update.captured_jira)
+    base.captured_source.extend(update.captured_source)
+    base.captured_git_failures.extend(update.captured_git_failures)
+    base.skipped.extend(update.skipped)
+    base.failed.extend(update.failed)
+
+    captured_urls = {capture.url for capture in base.captured}
+    captured_urls.update(capture.url for capture in base.captured_jira)
+    captured_urls.update(capture.url for capture in base.captured_source)
+    captured_urls.update(capture.url for capture in base.captured_git_failures)
+    base.skipped = [skip for skip in base.skipped if skip.url not in captured_urls]
+    return base
+
+
+def _prepare_auto_allowed_hosts(
+    capture_result: CaptureMissingResult,
+    *,
+    user_allowed_hosts: Sequence[str],
+    auto_allowed_hosts: Sequence[str],
+) -> list[str]:
+    known_hosts = {host.lower() for host in (*DEFAULT_ALLOWED_HOSTS, *user_allowed_hosts)}
+    known_hosts.update(host.lower() for host in auto_allowed_hosts)
+    remaining_slots = MAX_PREPARE_AUTO_ALLOWED_HOSTS - len(auto_allowed_hosts)
+    if remaining_slots <= 0:
+        return []
+
+    added_hosts: list[str] = []
+    for skipped in capture_result.skipped:
+        if skipped.reason != "host is not allowed":
+            continue
+        host = _prepare_safe_auto_allowed_host(skipped.url)
+        if host is None or host in known_hosts:
+            continue
+        known_hosts.add(host)
+        added_hosts.append(host)
+        if len(added_hosts) >= remaining_slots:
+            break
+    return added_hosts
+
+
+def _prepare_safe_auto_allowed_host(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return None
+
+    host = parsed.hostname.rstrip(".").lower()
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return None
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+
+    if not address.is_global:
+        return None
+    return host
+
+
+def _dedupe_sequence(values: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _dedupe_json_objects(values):
+    return list({json.dumps(value, sort_keys=True): value for value in values}.values())
+
+
 def _prepare_should_collect(args: argparse.Namespace) -> bool:
     return any((args.jira_url, args.jira_base_url, args.gitlab_mr_url))
 
