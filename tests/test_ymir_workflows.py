@@ -20,6 +20,45 @@ from ymir_harness.ymir_workflows import (
 
 
 
+def test_ymir_triage_executor_logs_workflow_progress(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def workflow(*_args, **_kwargs):
+        await workflow_module.asyncio.sleep(0.01)
+        return _State(
+            triage_result=_TriageResult(
+                {
+                    "resolution": "not_affected",
+                    "data": {
+                        "jira_issue": "RHEL-12345",
+                        "package": "dnsmasq",
+                    },
+                }
+            )
+        )
+
+    executor = make_ymir_triage_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(
+        _request(
+            tmp_path,
+            environment={
+                "DRY_RUN": "true",
+                "YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL": "0.001",
+            },
+        )
+    )
+
+    assert execution.status == "passed"
+    stderr = capsys.readouterr().err
+    assert '"event": "workflow_started"' in stderr
+    assert '"event": "workflow_waiting"' in stderr
+    assert '"event": "workflow_finished"' in stderr
+
 def _request(
     tmp_path: Path,
     *,
