@@ -225,10 +225,12 @@ class CollectCaseResult:
 
 
 def collect_case(request: CollectCaseRequest) -> CollectCaseResult:
-    _validate_request(request, require_metadata=True)
+    _validate_request(request, require_metadata=False)
     cases_dir = request.cases_dir.resolve()
     result = CollectCaseResult(case_id=request.case_id, cases_dir=cases_dir)
     fetched = _fetch_evidence(request, result)
+    request = _complete_request(request, fetched)
+    _validate_request(request, require_metadata=True)
     cases_dir.mkdir(parents=True, exist_ok=True)
 
     _write_cases_manifest(cases_dir / "cases.yaml", request.case_id, request.overwrite, result)
@@ -240,6 +242,7 @@ def collect_case(request: CollectCaseRequest) -> CollectCaseResult:
 
     _append_completion_warnings(request, fetched, result)
     return result
+
 
 def parse_key_value_items(items: Sequence[str], *, option_name: str) -> dict[str, str]:
     parsed = {}
@@ -1177,6 +1180,38 @@ def _internal_rhel_project_url(package: str) -> str:
     return f"https://gitlab.com/api/v4/projects/{project}"
 
 
+def _complete_request(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> CollectCaseRequest:
+    issue = _evidence_issue(request, fetched)
+    comments = _evidence_comments(request, fetched)
+    resolution = request.resolution or _derive_resolution(issue, comments)
+    package = request.package or _derive_package(issue)
+    fix_version = request.fix_version or _derive_fix_version(issue)
+    target_branch = request.target_branch
+    mock_repo = request.mock_repo or _derive_mock_repo(
+        request,
+        fetched,
+        target_branch=target_branch,
+        fix_version=fix_version,
+    )
+    if target_branch is None and mock_repo is not None:
+        target_branch = mock_repo.branch
+
+    return replace(
+        request,
+        case_type=request.case_type or _derive_case_type(resolution),
+        resolution=resolution,
+        package=package,
+        expected_basis=request.expected_basis
+        or ("historical_jira_state" if issue is not None else "manual_review"),
+        network_mode=request.network_mode or _derive_network_mode(request, fetched),
+        target_branch=target_branch,
+        fix_version=fix_version,
+        cve_ids=request.cve_ids or tuple(_derive_cve_ids(issue, comments)),
+        mock_repo=mock_repo,
+    )
 
 
 
@@ -1241,12 +1276,49 @@ def _redacted_git_command(command: Sequence[str]) -> list[str]:
     return redacted
 
 
+def _evidence_issue(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> Mapping[str, Any] | None:
+    if fetched.jira_issue is not None:
+        return fetched.jira_issue
+    if request.jira_issue_json is None:
+        return None
+    data = _load_json(request.jira_issue_json)
+    return data if isinstance(data, Mapping) else None
 
 
+def _evidence_comments(request: CollectCaseRequest, fetched: FetchedEvidence) -> Any:
+    if fetched.jira_comments is not None:
+        return fetched.jira_comments
+    if request.jira_comments_json is None:
+        return None
+    return _load_json(request.jira_comments_json)
 
 
+def _derive_resolution(issue: Mapping[str, Any] | None, comments: Any) -> str | None:
+    for label in _issue_labels(issue):
+        resolution = RESOLUTION_LABELS.get(label)
+        if resolution is not None:
+            return resolution
+
+    for body in _comment_bodies(comments):
+        if resolution := _comment_resolution(body):
+            return resolution
+    return None
 
 
+def _derive_case_type(resolution: str | None) -> str | None:
+    if resolution is None:
+        return None
+    return {
+        "backport": "cve_backport",
+        "rebase": "rebase",
+        "rebuild": "dependency_rebuild",
+        "not_affected": "not_affected",
+        "postponed": "postponed",
+        "clarification_needed": "clarification_needed",
+    }.get(resolution)
 
 
 def _derive_package(issue: Mapping[str, Any] | None) -> str | None:
@@ -1294,8 +1366,45 @@ def _derive_cve_ids(issue: Mapping[str, Any] | None, comments: Any) -> list[str]
     return list(dict.fromkeys(values))
 
 
+def _derive_network_mode(request: CollectCaseRequest, fetched: FetchedEvidence) -> str:
+    if (
+        request.gitlab_mr_url
+        or fetched.gitlab_patch_url
+        or fetched.jira_patch_urls
+        or _historical_result_patch_urls(_evidence_comments(request, fetched))
+        or fetched.web_records
+        or request.patch_urls
+        or request.web_records
+    ):
+        return "replay_only"
+    return "network_denied"
 
 
+def _derive_mock_repo(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+    *,
+    target_branch: str | None,
+    fix_version: str | None,
+) -> MockRepoInput | None:
+    if fetched.gitlab_mr is None:
+        return None
+
+    mr_url = _nonempty_string(fetched.gitlab_mr.get("web_url")) or fetched.gitlab_mr_url
+    remote_url = _gitlab_remote_url_from_mr_url(mr_url)
+    pre_fix_ref = _gitlab_pre_fix_ref(fetched.gitlab_mr, fetched.gitlab_commits)
+    branch = _nonempty_string(fetched.gitlab_mr.get("target_branch"))
+    if remote_url is None or pre_fix_ref is None or branch is None:
+        return None
+
+    expected_branch = target_branch or fix_version
+    return MockRepoInput(
+        remote_url=remote_url,
+        pre_fix_ref=pre_fix_ref,
+        branch=branch,
+        agent=request.mock_agent,
+        zstream_override=_zstream_override(branch, expected_branch),
+    )
 
 
 def _gitlab_remote_url_from_mr_url(url: str | None) -> str | None:
@@ -2110,7 +2219,20 @@ def _expected_patch_urls(
     request: CollectCaseRequest,
     fetched: FetchedEvidence,
 ) -> tuple[str, ...]:
+    if request.patch_urls:
+        return tuple(dict.fromkeys(request.patch_urls))
+
+    historical_urls = _historical_result_patch_urls(_evidence_comments(request, fetched))
+    if historical_urls:
+        valid_evidence_urls = set(fetched.jira_patch_urls)
+        if valid_evidence_urls:
+            filtered = [url for url in historical_urls if url in valid_evidence_urls]
+            if filtered:
+                return tuple(filtered)
+        return tuple(historical_urls)
+
     return _effective_patch_urls(request, fetched)
+
 
 def _infer_backport_source(resolution: str | None, patch_urls: Sequence[str]) -> str | None:
     if resolution != "backport" or not patch_urls:
