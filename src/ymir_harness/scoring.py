@@ -101,6 +101,11 @@ def _score_case_once(
         _required_artifacts_metric(expected, actual),
         _compare("case_id", expected.get("case_id"), actual.get("case_id") or case_id),
         _compare(
+            "jira_issue",
+            _expected_jira_issue(expected, case_id),
+            _actual_jira_issue(actual, case_id),
+        ),
+        _compare(
             "case_type",
             expected.get("case_type"),
             actual.get("case_type"),
@@ -327,6 +332,18 @@ def _required_artifacts_metric(
         expected=required,
         actual=generated,
         notes=f"missing required artifacts: {', '.join(missing)}" if missing else None,
+    )
+
+
+def _expected_jira_issue(expected: Mapping[str, Any], case_id: str) -> str | None:
+    return _string_or_none(expected.get("jira_issue")) or _string_or_none(case_id)
+
+
+def _actual_jira_issue(actual: Mapping[str, Any], case_id: str) -> str | None:
+    return (
+        _string_or_none(_actual_result_field(actual, "jira_issue"))
+        or _string_or_none(actual.get("case_id"))
+        or _string_or_none(case_id)
     )
 
 
@@ -686,8 +703,7 @@ def _backport_source_for_url(url: str) -> str | None:
     hostname = (parsed.hostname or "").lower()
     path = parsed.path
     if hostname == "gitlab.com" and (
-        path.startswith("/redhat/rhel/rpms/")
-        or path.startswith("/redhat/centos-stream/rpms/")
+        path.startswith("/redhat/rhel/rpms/") or path.startswith("/redhat/centos-stream/rpms/")
     ):
         return "distgit"
     if hostname == "src.fedoraproject.org" and path.startswith("/rpms/"):
