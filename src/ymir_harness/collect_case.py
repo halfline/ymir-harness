@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import configparser
 import copy
 import hashlib
 import json
@@ -137,6 +138,12 @@ class FetchedRecord:
     relative_path: str
     body: bytes
 
+
+@dataclass(frozen=True)
+class LookasideSource:
+    filename: str
+    algorithm: str
+    checksum: str
 
 
 @dataclass(frozen=True)
@@ -2342,6 +2349,7 @@ def _write_source_cache(
             overwrite=request.overwrite,
             result=result,
         )
+    _cache_mock_repo_lookaside_sources(cases_dir, request, result)
 
 
 
@@ -2359,7 +2367,214 @@ def _is_reserved_source_host(url: str) -> bool:
 
 
 
+def _cache_mock_repo_lookaside_sources(
+    cases_dir: Path,
+    request: CollectCaseRequest,
+    result: CollectCaseResult,
+) -> None:
+    if request.mock_repo is None or request.package is None:
+        return
+    source = request.mock_repo.source_url or request.mock_repo.remote_url
+    if _is_reserved_source_host(source):
+        return
 
+    with tempfile.TemporaryDirectory(prefix="ymir-harness-lookaside-") as tmp:
+        checkout = Path(tmp) / "distgit"
+        try:
+            _run_git(
+                _git_worktree_clone_command(source, str(checkout), request.gitlab_token_env),
+                checkout,
+            )
+            _run_git(["-C", str(checkout), "checkout", request.mock_repo.pre_fix_ref], checkout)
+        except CollectCaseError as exc:
+            result.warnings.append(f"skipped lookaside source cache for {request.package}: {exc}")
+            return
+
+        source_entries = _sources_file_entries(checkout / "sources")
+        source_names = tuple(entry.filename for entry in source_entries)
+        if not source_names:
+            return
+
+        missing_before = [name for name in source_names if not (checkout / name).is_file()]
+        if missing_before:
+            warning = _run_package_sources_command(
+                checkout,
+                package=request.package,
+                branch=request.mock_repo.branch,
+            )
+            if warning is not None and not _download_lookaside_sources(
+                checkout,
+                package=request.package,
+                branch=request.mock_repo.branch,
+                sources=source_entries,
+                timeout=request.http_timeout,
+            ):
+                result.warnings.append(
+                    f"skipped lookaside source cache for {request.package}: {warning}; "
+                    "direct lookaside download failed"
+                )
+                return
+
+        copied = False
+        for name in source_names:
+            source_path = checkout / name
+            if not source_path.is_file():
+                continue
+            _copy_file(
+                source_path,
+                cases_dir / "source_cache" / request.case_id / "lookaside" / source_path.name,
+                overwrite=request.overwrite,
+                result=result,
+            )
+            copied = True
+        if not copied:
+            result.warnings.append(
+                f"skipped lookaside source cache for {request.package}: "
+                "package tool did not download declared source archives"
+            )
+
+
+def _run_package_sources_command(
+    checkout: Path,
+    *,
+    package: str,
+    branch: str,
+) -> str | None:
+    package_tool = "centpkg" if _is_cs_branch(branch) else "rhpkg"
+    try:
+        completed = subprocess.run(
+            [
+                package_tool,
+                f"--name={package}",
+                "--namespace=rpms",
+                f"--release={branch}",
+                "sources",
+            ],
+            cwd=checkout,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError:
+        return f"{package_tool} is not installed"
+    if completed.returncode == 0:
+        return None
+    detail = (completed.stderr or completed.stdout).strip()
+    return f"{package_tool} sources failed" + (f": {detail}" if detail else "")
+
+
+def _download_lookaside_sources(
+    checkout: Path,
+    *,
+    package: str,
+    branch: str,
+    sources: Sequence[LookasideSource],
+    timeout: float,
+) -> bool:
+    base_url = _lookaside_base_url(branch)
+    if base_url is None:
+        return False
+
+    success = False
+    for source in sources:
+        destination = checkout / source.filename
+        if destination.is_file():
+            success = True
+            continue
+        url = _lookaside_source_url(base_url, package, source)
+        request = Request(url, headers={"User-Agent": "ymir-harness"})
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                body = response.read()
+        except OSError:
+            continue
+        if not _lookaside_checksum_matches(body, source):
+            continue
+        destination.write_bytes(body)
+        success = True
+    return success and all((checkout / source.filename).is_file() for source in sources)
+
+
+def _lookaside_base_url(branch: str) -> str | None:
+    tool = "centpkg" if _is_cs_branch(branch) else "rhpkg"
+    config_path = Path("/etc/rpkg") / f"{tool}.conf"
+    if not config_path.is_file():
+        return None
+    parser = configparser.ConfigParser()
+    parser.read(config_path)
+    try:
+        return parser[tool]["lookaside"].rstrip("/")
+    except KeyError:
+        return None
+
+
+def _lookaside_source_url(base_url: str, package: str, source: LookasideSource) -> str:
+    filename = quote(source.filename, safe="")
+    package_path = quote(package, safe="")
+    checksum = quote(source.checksum, safe="")
+    algorithm = quote(source.algorithm.lower(), safe="")
+    return f"{base_url}/rpms/{package_path}/{filename}/{algorithm}/{checksum}/{filename}"
+
+
+def _lookaside_checksum_matches(body: bytes, source: LookasideSource) -> bool:
+    try:
+        digest = hashlib.new(source.algorithm.lower())
+    except ValueError:
+        return False
+    digest.update(body)
+    return digest.hexdigest().lower() == source.checksum.lower()
+
+
+def _is_cs_branch(branch: str) -> bool:
+    return re.fullmatch(r"c\d+s", branch) is not None
+
+
+def _sources_file_filenames(path: Path) -> tuple[str, ...]:
+    return tuple(entry.filename for entry in _sources_file_entries(path))
+
+
+def _sources_file_entries(path: Path) -> tuple[LookasideSource, ...]:
+    if not path.is_file():
+        return ()
+    entries = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        entry = _parse_sources_file_line(line)
+        if entry is not None:
+            entries.append(entry)
+    return tuple({entry.filename: entry for entry in entries}.values())
+
+
+def _parse_sources_file_line(line: str) -> LookasideSource | None:
+    line = line.strip()
+    if not line:
+        return None
+    modern = re.fullmatch(r"([A-Za-z0-9_+.-]+)\s+\(([^)]+)\)\s+=\s*([0-9A-Fa-f]+)", line)
+    if modern is not None:
+        return LookasideSource(
+            filename=modern.group(2).strip(),
+            algorithm=modern.group(1).strip(),
+            checksum=modern.group(3).strip(),
+        )
+    tagged = re.fullmatch(
+        r"([A-Za-z0-9_+.-]+)\s*\(([^)]+)\)\s*=\s*([0-9A-Fa-f]+)",
+        line,
+    )
+    if tagged is not None:
+        return LookasideSource(
+            filename=tagged.group(2).strip(),
+            algorithm=tagged.group(1).strip(),
+            checksum=tagged.group(3).strip(),
+        )
+    legacy = line.split()
+    if len(legacy) >= 2 and re.fullmatch(r"[0-9A-Fa-f]+", legacy[0]):
+        algorithm = "sha512" if len(legacy[0]) == 128 else "md5"
+        return LookasideSource(
+            filename=legacy[-1].strip(),
+            algorithm=algorithm,
+            checksum=legacy[0].strip(),
+        )
+    return None
 
 
 
