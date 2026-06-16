@@ -1197,7 +1197,7 @@ def test_ymir_backport_executor_collects_artifacts_and_scope(tmp_path: Path) -> 
     )
     artifact_path = Path(request.environment["YMIR_BENCHMARK_ARTIFACT_DIR"]) / "fix.patch"
     artifact_path.parent.mkdir(parents=True)
-    artifact_path.write_text("diff --git a/source.c b/source.c\n", encoding="utf-8")
+    artifact_path.write_text(_source_patch_text(), encoding="utf-8")
     _write_expected(
         request,
         {
@@ -1268,7 +1268,7 @@ def test_ymir_backport_executor_captures_git_artifacts(tmp_path: Path) -> None:
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, check=True)
 
     spec_path.write_text("Name: dnsmasq\nVersion: 1\nPatch0001: fix.patch\n", encoding="utf-8")
-    (repo_path / "fix.patch").write_text("diff --git a/source.c b/source.c\n", encoding="utf-8")
+    (repo_path / "fix.patch").write_text(_source_patch_text(), encoding="utf-8")
     (repo_path / "README.md").write_text("unrelated change\n", encoding="utf-8")
     subprocess.run(
         ["git", "add", "dnsmasq.spec", "fix.patch", "README.md"], cwd=repo_path, check=True
@@ -1333,6 +1333,7 @@ def test_ymir_backport_executor_captures_git_artifacts(tmp_path: Path) -> None:
     ] == str(srpm_path)
     manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
     assert set(manifest["touched_files"]) == {"README.md", "dnsmasq.spec", "fix.patch"}
+    assert manifest["patch_touched_files"] == ["source.c"]
     assert manifest["spec_patches"] == ["Patch0001: fix.patch"]
     assert manifest["unrelated_source_changes"] == ["README.md"]
     assert set(execution.actual_result["touched_files"]) == {
@@ -1340,6 +1341,7 @@ def test_ymir_backport_executor_captures_git_artifacts(tmp_path: Path) -> None:
         "dnsmasq.spec",
         "fix.patch",
     }
+    assert execution.actual_result["patch_touched_files"] == ["source.c"]
     assert execution.actual_result["spec_patches"] == ["Patch0001: fix.patch"]
     assert execution.actual_result["unrelated_source_changes"] == ["README.md"]
     assert execution.actual_result["artifact_manifest"] == str(artifact_dir / "manifest.json")
@@ -1974,6 +1976,18 @@ def _request(
 def _write_expected(request: RunCaseRequest, payload: dict[str, object]) -> None:
     request.expected_path.parent.mkdir(parents=True, exist_ok=True)
     request.expected_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _source_patch_text(path: str = "source.c") -> str:
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "index 5d308e1..85c3040 100644\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
 
 
 def _install_fake_ymir_agent(
