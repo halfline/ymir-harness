@@ -1234,13 +1234,204 @@ def test_ymir_backport_executor_collects_artifacts_and_scope(tmp_path: Path) -> 
 
     assert execution.status == "passed"
     assert execution.actual_result is not None
-    assert execution.actual_result["generated_artifacts"] == [
+    assert set(execution.actual_result["generated_artifacts"]) == {
         "/tmp/build/dnsmasq.src.rpm",
         str(artifact_path),
-    ]
+        str(Path(request.environment["YMIR_BENCHMARK_ARTIFACT_DIR"]) / "backport_result.json"),
+        str(Path(request.environment["YMIR_BENCHMARK_ARTIFACT_DIR"]) / "manifest.json"),
+    }
+    assert execution.actual_result["artifact_manifest"] == str(
+        Path(request.environment["YMIR_BENCHMARK_ARTIFACT_DIR"]) / "manifest.json"
+    )
     assert execution.actual_result["touched_files"] == ["SOURCES/fix.patch"]
     assert execution.actual_result["spec_patches"] == ["Patch0001: fix.patch"]
     assert execution.actual_result["changelog_entries"] == ["- Resolves: RHEL-12345"]
+
+
+def test_ymir_backport_executor_captures_git_artifacts(tmp_path: Path) -> None:
+    repo_path = tmp_path / "dist-git"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ymir-harness@example.invalid"],
+        cwd=repo_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Ymir Harness"],
+        cwd=repo_path,
+        check=True,
+    )
+    spec_path = repo_path / "dnsmasq.spec"
+    spec_path.write_text("Name: dnsmasq\nVersion: 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "dnsmasq.spec"], cwd=repo_path, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, check=True)
+
+    spec_path.write_text("Name: dnsmasq\nVersion: 1\nPatch0001: fix.patch\n", encoding="utf-8")
+    (repo_path / "fix.patch").write_text("diff --git a/source.c b/source.c\n", encoding="utf-8")
+    (repo_path / "README.md").write_text("unrelated change\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "dnsmasq.spec", "fix.patch", "README.md"], cwd=repo_path, check=True
+    )
+    subprocess.run(["git", "commit", "-m", "backport"], cwd=repo_path, check=True)
+
+    srpm_path = tmp_path / "dnsmasq.src.rpm"
+    srpm_path.write_text("srpm\n", encoding="utf-8")
+    artifact_dir = tmp_path / "artifacts" / "RHEL-12345"
+    request = _request(
+        tmp_path,
+        environment={
+            "DRY_RUN": "true",
+            "YMIR_BENCHMARK_ARTIFACT_DIR": str(artifact_dir),
+        },
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+        },
+    )
+
+    async def workflow(**_kwargs):
+        return _State(
+            package="dnsmasq",
+            local_clone=repo_path,
+            backport_result=_BackportResult(
+                {
+                    "success": True,
+                    "status": "built",
+                    "srpm_path": str(srpm_path),
+                }
+            ),
+        )
+
+    executor = make_ymir_backport_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(request)
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    assert (artifact_dir / "commit.diff").read_text(encoding="utf-8")
+    assert (artifact_dir / "spec_file.spec").read_text(encoding="utf-8") == spec_path.read_text(
+        encoding="utf-8"
+    )
+    assert (artifact_dir / "patches" / "fix.patch").read_text(encoding="utf-8") == (
+        repo_path / "fix.patch"
+    ).read_text(encoding="utf-8")
+    assert (artifact_dir / "srpms" / "dnsmasq.src.rpm").read_text(encoding="utf-8") == "srpm\n"
+    assert json.loads((artifact_dir / "backport_result.json").read_text(encoding="utf-8"))[
+        "srpm_path"
+    ] == str(srpm_path)
+    manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert set(manifest["touched_files"]) == {"README.md", "dnsmasq.spec", "fix.patch"}
+    assert manifest["spec_patches"] == ["Patch0001: fix.patch"]
+    assert manifest["unrelated_source_changes"] == ["README.md"]
+    assert set(execution.actual_result["touched_files"]) == {
+        "README.md",
+        "dnsmasq.spec",
+        "fix.patch",
+    }
+    assert execution.actual_result["spec_patches"] == ["Patch0001: fix.patch"]
+    assert execution.actual_result["unrelated_source_changes"] == ["README.md"]
+    assert execution.actual_result["artifact_manifest"] == str(artifact_dir / "manifest.json")
+    assert (
+        str(artifact_dir / "srpms" / "dnsmasq.src.rpm")
+        in execution.actual_result["generated_artifacts"]
+    )
+    assert (
+        str(artifact_dir / "patches" / "fix.patch")
+        in execution.actual_result["generated_artifacts"]
+    )
+
+
+def test_ymir_backport_executor_captures_dirty_spec_referenced_patch(
+    tmp_path: Path,
+) -> None:
+    repo_path = tmp_path / "dist-git"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ymir-harness@example.invalid"],
+        cwd=repo_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Ymir Harness"],
+        cwd=repo_path,
+        check=True,
+    )
+    spec_path = repo_path / "dnsmasq.spec"
+    spec_path.write_text(
+        "Name: dnsmasq\nVersion: 1\nPatch0001: existing.patch\n",
+        encoding="utf-8",
+    )
+    (repo_path / "existing.patch").write_text(_source_patch_text("existing.c"), encoding="utf-8")
+    subprocess.run(["git", "add", "dnsmasq.spec", "existing.patch"], cwd=repo_path, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, check=True)
+
+    spec_path.write_text(
+        "Name: dnsmasq\nVersion: 1\n"
+        "Patch0001: existing.patch\n"
+        "Patch0002: fix.patch\n",
+        encoding="utf-8",
+    )
+    (repo_path / "fix.patch").write_text(_source_patch_text(), encoding="utf-8")
+
+    artifact_dir = tmp_path / "artifacts" / "RHEL-12345"
+    request = _request(
+        tmp_path,
+        environment={
+            "DRY_RUN": "true",
+            "YMIR_BENCHMARK_ARTIFACT_DIR": str(artifact_dir),
+        },
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+        },
+    )
+
+    async def workflow(**_kwargs):
+        return _State(
+            package="dnsmasq",
+            local_clone=repo_path,
+            backport_result=_BackportResult({"success": True, "status": "built"}),
+        )
+
+    executor = make_ymir_backport_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(request)
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    assert (artifact_dir / "patches" / "fix.patch").read_text(encoding="utf-8") == (
+        repo_path / "fix.patch"
+    ).read_text(encoding="utf-8")
+    assert not (artifact_dir / "patches" / "existing.patch").exists()
+    assert "new file mode" in (artifact_dir / "commit.diff").read_text(encoding="utf-8")
+    manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["touched_files"] == ["dnsmasq.spec", "fix.patch"]
+    assert manifest["patch_touched_files"] == ["source.c"]
+    assert manifest["spec_patches"] == ["Patch0002: fix.patch"]
 
 
 def test_ymir_rebase_executor_runs_workflow_with_expected_inputs(
