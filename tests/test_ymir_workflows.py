@@ -209,6 +209,7 @@ def test_ymir_triage_executor_runs_workflow_with_no_write_environment(
     assert execution.actual_result == {
         "schema_version": 1,
         "case_id": "RHEL-12345",
+        "jira_issue": "RHEL-12345",
         "case_type": "cve_backport",
         "workflow": "ymir-triage",
         "resolution": "backport",
@@ -295,6 +296,7 @@ def test_ymir_triage_executor_accepts_typed_backport_output(tmp_path: Path) -> N
         "fix_version": "rhel-8.10.z",
     }
     assert execution.actual_result["package"] == "dnsmasq"
+    assert execution.actual_result["jira_issue"] == "RHEL-12345"
     assert execution.actual_result["patch_urls"] == ["https://example.invalid/fix.patch"]
     assert execution.actual_result["cve_id"] == "CVE-2026-0001"
     assert execution.actual_result["fix_version"] == "rhel-8.10.z"
@@ -337,6 +339,7 @@ def test_ymir_triage_executor_accepts_typed_rebase_output(tmp_path: Path) -> Non
         "fix_version": "rhel-9.0.z",
     }
     assert execution.actual_result["package"] == "dnsmasq"
+    assert execution.actual_result["jira_issue"] == "RHEL-12345"
     assert execution.actual_result["version"] == "2.91"
     assert execution.actual_result["fix_version"] == "rhel-9.0.z"
     assert execution.actual_result["target_branch"] == "rhel-9.0.z"
@@ -943,6 +946,7 @@ def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
     assert execution.actual_result == {
         "schema_version": 1,
         "case_id": "RHEL-12345",
+        "jira_issue": "RHEL-12345",
         "case_type": "cve_backport",
         "workflow": "ymir-backport",
         "resolution": "backport",
@@ -1694,6 +1698,7 @@ def test_ymir_rebase_executor_runs_workflow_with_expected_inputs(
     assert execution.actual_result == {
         "schema_version": 1,
         "case_id": "RHEL-12345",
+        "jira_issue": "RHEL-12345",
         "case_type": "rebase",
         "workflow": "ymir-rebase",
         "resolution": "rebase",
@@ -1969,6 +1974,7 @@ def test_ymir_rebuild_executor_runs_workflow_with_expected_inputs(
     assert execution.actual_result == {
         "schema_version": 1,
         "case_id": "RHEL-12345",
+        "jira_issue": "RHEL-12345",
         "case_type": "dependency_rebuild",
         "workflow": "ymir-rebuild",
         "resolution": "rebuild",
