@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -122,6 +123,12 @@ def _score_case_once(
             optional=True,
         ),
         _touched_files_metric(expected, actual),
+        _patch_touched_files_metric(
+            expected,
+            actual,
+            cases_dir=cases_dir,
+            case_id=case_id,
+        ),
         _compare_list(
             "spec_patches",
             expected.get("spec_patches"),
@@ -347,6 +354,42 @@ def _touched_files_metric(expected: Mapping[str, Any], actual: Mapping[str, Any]
     )
 
 
+def _patch_touched_files_metric(
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    *,
+    cases_dir: Path | None,
+    case_id: str,
+) -> ScoreMetric:
+    expected_files = _normalize_file_list(expected.get("patch_touched_files"))
+    if not expected_files and cases_dir is not None:
+        expected_files = _reference_patch_touched_files(cases_dir, case_id)
+
+    actual_files = _normalize_file_list(_actual_result_field(actual, "patch_touched_files"))
+    if not actual_files:
+        actual_files = _actual_generated_patch_touched_files(actual)
+
+    if not expected_files:
+        return ScoreMetric(
+            name="patch_touched_files",
+            status="skipped",
+            expected=expected_files,
+            actual=actual_files,
+            notes="expected result declares no patch touched-file scope",
+        )
+
+    missing = [path for path in expected_files if path not in actual_files]
+    unexpected = [path for path in actual_files if path not in expected_files]
+    notes = _file_scope_notes(missing, unexpected)
+    return ScoreMetric(
+        name="patch_touched_files",
+        status="pass" if not notes else "fail",
+        expected=expected_files,
+        actual=actual_files,
+        notes=notes,
+    )
+
+
 def _patch_urls_metric(
     expected: Mapping[str, Any],
     actual: Any,
@@ -369,6 +412,157 @@ def _patch_urls_metric(
             notes="actual patch URLs include the expected patch commit IDs",
         )
     return exact_metric
+
+
+def _reference_patch_touched_files(cases_dir: Path, case_id: str) -> list[str]:
+    paths: list[str] = []
+    for patch_path in sorted(
+        (cases_dir / "mock_data").glob(f"*/reference_patches/{case_id}.patch")
+    ):
+        nested_patch_paths = _nested_patch_touched_files(patch_path)
+        if nested_patch_paths:
+            paths.extend(nested_patch_paths)
+            continue
+        touched_paths = _patch_file_touched_paths(patch_path)
+        if touched_paths is not None:
+            paths.extend(touched_paths)
+    return _normalize_file_list(paths)
+
+
+def _actual_generated_patch_touched_files(actual: Mapping[str, Any]) -> list[str]:
+    manifest_patch_artifacts = _manifest_patch_artifacts(actual)
+    if manifest_patch_artifacts:
+        return _patch_artifacts_touched_files(manifest_patch_artifacts)
+    return _patch_artifacts_touched_files(_generated_patch_artifacts(actual))
+
+
+def _manifest_patch_artifacts(actual: Mapping[str, Any]) -> list[Path]:
+    manifest_path = _path_or_none(_actual_result_field(actual, "artifact_manifest"))
+    if manifest_path is None:
+        return []
+    manifest = _load_optional_json_object(manifest_path)
+    if manifest is None:
+        return []
+    captured_files = manifest.get("captured_files")
+    if not isinstance(captured_files, Mapping):
+        return []
+    return [Path(path) for path in _normalize_list(captured_files.get("patch_files"))]
+
+
+def _generated_patch_artifacts(actual: Mapping[str, Any]) -> list[Path]:
+    artifacts = []
+    for artifact in _normalize_list(_actual_result_field(actual, "generated_artifacts")):
+        artifact_path = Path(artifact)
+        if artifact_path.name == "commit.diff":
+            continue
+        if artifact_path.suffix in {".patch", ".diff"}:
+            artifacts.append(artifact_path)
+    return artifacts
+
+
+def _patch_artifacts_touched_files(artifact_paths: list[Path]) -> list[str]:
+    paths: list[str] = []
+    for artifact_path in artifact_paths:
+        if not artifact_path.is_file():
+            continue
+        touched_paths = _patch_file_touched_paths(artifact_path)
+        if touched_paths is not None:
+            paths.extend(touched_paths)
+    return _normalize_file_list(paths)
+
+
+def _patch_file_touched_paths(patch_path: Path) -> list[str] | None:
+    try:
+        completed = subprocess.run(
+            ["git", "apply", "--numstat", str(patch_path)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return _numstat_touched_paths(completed.stdout)
+
+
+def _nested_patch_touched_files(patch_path: Path) -> list[str]:
+    paths: list[str] = []
+    for patch_text in _nested_patch_texts(patch_path):
+        touched_paths = _patch_text_touched_paths(patch_text)
+        if touched_paths is not None:
+            paths.extend(touched_paths)
+    return _normalize_file_list(paths)
+
+
+def _nested_patch_texts(patch_path: Path) -> list[str]:
+    try:
+        lines = patch_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+    patch_texts = []
+    current: list[str] | None = None
+    in_hunk = False
+    for line in lines:
+        if line.startswith("diff --git "):
+            if current:
+                patch_texts.append("\n".join(current) + "\n")
+            current = [] if _diff_git_target_is_patch(line) else None
+            in_hunk = False
+            continue
+        if current is None:
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk or line.startswith("\\"):
+            continue
+        if line.startswith("+"):
+            current.append(line[1:])
+        elif line.startswith(" "):
+            current.append(line[1:])
+    if current:
+        patch_texts.append("\n".join(current) + "\n")
+    return patch_texts
+
+
+def _diff_git_target_is_patch(line: str) -> bool:
+    match = re.match(r"^diff --git a/(.+) b/(.+)$", line)
+    if match is None:
+        return False
+    return match.group(2).endswith((".patch", ".diff"))
+
+
+def _patch_text_touched_paths(patch_text: str) -> list[str] | None:
+    try:
+        completed = subprocess.run(
+            ["git", "apply", "--numstat", "-"],
+            check=False,
+            input=patch_text,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return _numstat_touched_paths(completed.stdout)
+
+
+def _numstat_touched_paths(numstat_output: str) -> list[str] | None:
+    paths = []
+    for line in numstat_output.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            return None
+        path = parts[2].strip()
+        if not path:
+            return None
+        paths.append(path)
+    return paths
 
 
 def _actual_patch_urls_cover_expected_commits(
@@ -433,6 +627,14 @@ def _load_optional_json_object(path: Path) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _path_or_none(value: Any) -> Path | None:
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str) and value:
+        return Path(value)
+    return None
 
 
 def _file_scope_notes(missing: list[str], unexpected: list[str]) -> str | None:
