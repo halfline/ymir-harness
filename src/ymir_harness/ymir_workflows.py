@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ymir_harness.artifacts import capture_backport_artifacts, merge_artifact_fields
+from ymir_harness.llm_judge import evaluate_backport_llm_judge
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseRequest
 from ymir_harness.scoring import load_json_file
@@ -221,9 +222,23 @@ async def _run_ymir_backport(
             reason="ymir backport workflow returned no backport result",
         )
 
+    actual_result = _backport_actual_result(request, inputs, state, backport_result)
+    judge_advisory = await evaluate_backport_llm_judge(
+        actual_result=actual_result,
+        cases_dir=request.cases_dir,
+        environment=request.environment,
+    )
+    if judge_advisory:
+        actual_result.update(judge_advisory)
+        judge_artifact = judge_advisory.get("llm_judge_artifact")
+        if isinstance(judge_artifact, str) and judge_artifact:
+            actual_result["generated_artifacts"] = _unique_strings(
+                [*_string_list(actual_result.get("generated_artifacts")), judge_artifact]
+            )
+
     return RunCaseExecution(
         status="passed",
-        actual_result=_backport_actual_result(request, inputs, state, backport_result),
+        actual_result=actual_result,
     )
 
 
