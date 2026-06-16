@@ -531,352 +531,6 @@ def test_ymir_triage_executor_starts_managed_gateway_by_default(
     ]
 
 
-def test_patch_no_write_candidate_build_lookup_replays_brewhub(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pytest.importorskip("ymir")
-    from ymir.common import utils as utils_module
-    from ymir.tools.unprivileged import specfile as specfile_module
-
-    async def fail_lookup(_package: str, _dist_git_branch: str):
-        raise AssertionError("live candidate build lookup should not run")
-
-    manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "recorded_files": {},
-                "koji_candidate_builds": {
-                    "redis|rhel-9.6.0": {
-                        "evr": {
-                            "epoch": 1,
-                            "version": "6.2.20",
-                            "release": "3.el9",
-                        },
-                        "source_ref": "real-source-ref",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setenv("DRY_RUN", "true")
-    monkeypatch.setenv("YMIR_BENCHMARK_REPLAY_MANIFEST", str(manifest_path))
-    monkeypatch.delattr(specfile_module, "_ymir_harness_candidate_build_patched", raising=False)
-    monkeypatch.setattr(specfile_module, "get_latest_candidate_build", fail_lookup)
-    monkeypatch.setattr(utils_module, "get_latest_candidate_build", fail_lookup)
-
-    _patch_no_write_candidate_build_lookup()
-
-    evr, source_ref = asyncio.run(specfile_module.get_latest_candidate_build("redis", "rhel-9.6.0"))
-
-    assert evr.epoch == 1
-    assert evr.version == "6.2.20"
-    assert evr.release == "3.el9"
-    assert source_ref == "real-source-ref"
-
-
-
-def test_instrument_agent_factory_logs_agent_run(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    request = _request(
-        tmp_path,
-        environment={
-            "CHAT_MODEL": "vertexai:claude-sonnet-4-6",
-        },
-    )
-
-    class Agent:
-        async def run(self) -> str:
-            return "done"
-
-    async def run_agent() -> str:
-        factory = _instrument_agent_factory(lambda *_args: Agent(), request=request, agent_name="x")
-        agent = await factory([], {})
-        return await agent.run()
-
-    assert asyncio.run(run_agent()) == "done"
-    stderr = capsys.readouterr().err
-    assert '"event": "agent_run_start"' in stderr
-    assert '"event": "agent_run_finished"' in stderr
-    assert '"chat_model": "vertexai:claude-sonnet-4-6"' in stderr
-
-
-def test_instrument_agent_factory_logs_chat_model_boundary(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    request = _request(tmp_path)
-
-    class ModelRun:
-        def middleware(self, _middleware) -> object:
-            async def await_response() -> str:
-                return "model response"
-
-            return await_response()
-
-    class Model:
-        def run(self, messages, **options) -> ModelRun:
-            assert messages == ["hello"]
-            assert options == {"temperature": 0.6}
-            return ModelRun()
-
-    class Agent:
-        def __init__(self) -> None:
-            self._llm = Model()
-
-        async def run(self) -> str:
-            return await self._llm.run(["hello"], temperature=0.6).middleware(object())
-
-    async def run_agent() -> str:
-        factory = _instrument_agent_factory(lambda *_args: Agent(), request=request, agent_name="x")
-        agent = await factory([], {})
-        return await agent.run()
-
-    assert asyncio.run(run_agent()) == "model response"
-    stderr = capsys.readouterr().err
-    assert '"event": "chat_model_run_start"' in stderr
-    assert '"message_count": 1' in stderr
-    assert '"option_keys": ["temperature"]' in stderr
-    assert '"event": "chat_model_run_created"' in stderr
-    assert '"event": "chat_model_middleware_start"' in stderr
-    assert '"event": "chat_model_awaitable_created"' in stderr
-    assert '"event": "chat_model_await_start"' in stderr
-    assert '"event": "chat_model_await_finished"' in stderr
-
-
-def test_instrument_agent_factory_times_out_agent_run(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    request = _request(
-        tmp_path,
-        environment={
-            "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "0.01",
-        },
-    )
-
-    class Agent:
-        async def run(self) -> str:
-            await asyncio.sleep(1)
-            return "done"
-
-    async def run_agent() -> None:
-        factory = _instrument_agent_factory(lambda *_args: Agent(), request=request, agent_name="x")
-        agent = await factory([], {})
-        await agent.run()
-
-    with pytest.raises(TimeoutError):
-        asyncio.run(run_agent())
-
-    stderr = capsys.readouterr().err
-    assert '"event": "agent_run_errored"' in stderr
-    assert '"error_type": "TimeoutError"' in stderr
-
-
-
-
-
-def _request(
-    tmp_path: Path,
-    *,
-    case_type: str | None = "cve_backport",
-    environment: dict[str, str] | None = None,
-    features: tuple[str, ...] = (),
-) -> RunCaseRequest:
-    cases_dir = tmp_path / "benchmark_cases"
-    results_dir = tmp_path / "results"
-    return RunCaseRequest(
-        case_id="RHEL-12345",
-        case_type=case_type,
-        repetition=1,
-        cases_dir=cases_dir,
-        results_dir=results_dir,
-        expected_path=cases_dir / "expected" / "RHEL-12345.expected.json",
-        actual_path=results_dir / "repeat-1" / "actual-results" / "RHEL-12345.actual.json",
-        environment=environment or {},
-        variant="baseline",
-        features=features,
-    )
-
-
-def _write_expected(request: RunCaseRequest, payload: dict[str, object]) -> None:
-    request.expected_path.parent.mkdir(parents=True, exist_ok=True)
-    request.expected_path.write_text(json.dumps(payload), encoding="utf-8")
-
-
-def _source_patch_text(path: str = "source.c") -> str:
-    return (
-        f"diff --git a/{path} b/{path}\n"
-        "index 5d308e1..85c3040 100644\n"
-        f"--- a/{path}\n"
-        f"+++ b/{path}\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-    )
-
-
-def _install_fake_ymir_agent(
-    monkeypatch,
-    module_basename: str,
-    *,
-    workflow_class: type | None = None,
-    module_run_workflow=None,
-) -> None:
-    ymir_module = types.ModuleType("ymir")
-    ymir_module.__path__ = []
-    agents_module = types.ModuleType("ymir.agents")
-    agents_module.__path__ = []
-    agent_module = types.ModuleType(f"ymir.agents.{module_basename}")
-
-    if workflow_class is not None:
-        setattr(agent_module, workflow_class.__name__, workflow_class)
-    if module_run_workflow is not None:
-        agent_module.run_workflow = module_run_workflow
-
-    ymir_module.agents = agents_module
-    setattr(agents_module, module_basename, agent_module)
-
-    monkeypatch.setitem(sys.modules, "ymir", ymir_module)
-    monkeypatch.setitem(sys.modules, "ymir.agents", agents_module)
-    monkeypatch.setitem(sys.modules, f"ymir.agents.{module_basename}", agent_module)
-
-
-class _State:
-    def __init__(self, **attributes):
-        for name, value in attributes.items():
-            setattr(self, name, value)
-
-
-class _TriageResult:
-    def __init__(self, payload: dict[str, object]):
-        self._payload = payload
-
-    def model_dump(self, *, mode: str):
-        assert mode == "json"
-        return self._payload
-
-
-def test_fixture_search_results_returns_known_jira_links(tmp_path: Path) -> None:
-    cases_dir = tmp_path / "benchmark_cases"
-    jira_dir = cases_dir / "jiras" / "RHEL-12345"
-    jira_dir.mkdir(parents=True)
-    (jira_dir / "links.json").write_text(
-        json.dumps(
-            {
-                "links": [
-                    {
-                        "object": {
-                            "title": "Redis security advisory",
-                            "url": "https://github.com/redis/redis/security/advisories/GHSA-c8h9-259x-jff4",
-                        }
-                    },
-                    {
-                        "object": {
-                            "title": "Unrelated link",
-                            "url": "https://example.invalid/unrelated",
-                        }
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    (jira_dir / "comments.json").write_text(
-        json.dumps(
-            [
-                {
-                    "body": (
-                        "MR: [https://gitlab.example/pkg/-/merge_requests/7|"
-                        "https://gitlab.example/pkg/-/merge_requests/7|smart-link]"
-                    )
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    results = _fixture_search_results(
-        _request(tmp_path),
-        "CVE-2026-25243 redis security advisory merge request",
-        max_results=10,
-    )
-
-    assert [result["url"] for result in results] == [
-        "https://github.com/redis/redis/security/advisories/GHSA-c8h9-259x-jff4",
-        "https://gitlab.example/pkg/-/merge_requests/7",
-    ]
-
-
-def test_fixture_search_results_includes_recorded_urls_and_source_remotes(
-    tmp_path: Path,
-) -> None:
-    cases_dir = tmp_path / "benchmark_cases"
-    web_cache = cases_dir / "web_cache" / "RHEL-12345"
-    web_cache.mkdir(parents=True)
-    (web_cache / "manifest.json").write_text(
-        json.dumps(
-            {
-                "recorded_files": {
-                    "https://gitlab.com/redhat/rhel/rpms/redis/-/commit/abc.patch": "patches/abc.patch"
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    source_repo = cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "redis.git"
-    source_repo.mkdir(parents=True)
-    (source_repo / "config").write_text(
-        '[remote "origin"]\n\turl = https://github.com/redis/redis.git\n',
-        encoding="utf-8",
-    )
-
-    results = _fixture_search_results(
-        _request(tmp_path),
-        "redis upstream commit fix",
-        max_results=10,
-    )
-
-    assert [result["url"] for result in results] == [
-        "https://gitlab.com/redhat/rhel/rpms/redis/-/commit/abc.patch",
-        "https://github.com/redis/redis.git",
-    ]
-
-
-def test_fixture_search_results_returns_empty_for_unknown_query(tmp_path: Path) -> None:
-    cases_dir = tmp_path / "benchmark_cases"
-    jira_dir = cases_dir / "jiras" / "RHEL-12345"
-    jira_dir.mkdir(parents=True)
-    (jira_dir / "links.json").write_text(
-        json.dumps(
-            {
-                "links": [
-                    {
-                        "object": {
-                            "title": "Redis security advisory",
-                            "url": "https://github.com/redis/redis/security/advisories/GHSA-c8h9-259x-jff4",
-                        }
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    assert (
-        _fixture_search_results(
-            _request(tmp_path),
-            "postgres kerberos regression",
-            max_results=10,
-        )
-        == []
-    )
-
 def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
     tmp_path: Path,
     monkeypatch,
@@ -1092,6 +746,53 @@ def test_materialize_replay_unpacked_sources_uses_sources_file_fallback(
 
     assert source_dir == tmp_path / "custom-source"
     assert (tmp_path / "custom-source" / "source.c").read_text(encoding="utf-8") == "real source\n"
+
+
+def test_patch_no_write_candidate_build_lookup_replays_brewhub(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("ymir")
+    from ymir.common import utils as utils_module
+    from ymir.tools.unprivileged import specfile as specfile_module
+
+    async def fail_lookup(_package: str, _dist_git_branch: str):
+        raise AssertionError("live candidate build lookup should not run")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "recorded_files": {},
+                "koji_candidate_builds": {
+                    "redis|rhel-9.6.0": {
+                        "evr": {
+                            "epoch": 1,
+                            "version": "6.2.20",
+                            "release": "3.el9",
+                        },
+                        "source_ref": "real-source-ref",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("YMIR_BENCHMARK_REPLAY_MANIFEST", str(manifest_path))
+    monkeypatch.delattr(specfile_module, "_ymir_harness_candidate_build_patched", raising=False)
+    monkeypatch.setattr(specfile_module, "get_latest_candidate_build", fail_lookup)
+    monkeypatch.setattr(utils_module, "get_latest_candidate_build", fail_lookup)
+
+    _patch_no_write_candidate_build_lookup()
+
+    evr, source_ref = asyncio.run(specfile_module.get_latest_candidate_build("redis", "rhel-9.6.0"))
+
+    assert evr.epoch == 1
+    assert evr.version == "6.2.20"
+    assert evr.release == "3.el9"
+    assert source_ref == "real-source-ref"
 
 
 def test_fallback_update_release_text_bumps_stream_release(tmp_path: Path) -> None:
@@ -1624,6 +1325,9 @@ def test_ymir_backport_executor_records_llm_judge_advisory(
     assert prompts[0][0] == "fake:model"
     assert "reference patch" in prompts[0][1]
     assert "fix.patch" in prompts[0][1]
+    assert "Spec file correctness" in prompts[0][1]
+    assert "Similarity to reference patch" in prompts[0][1]
+    assert "File scope" in prompts[0][1]
     verdict = json.loads((artifact_dir / "judge_verdict.json").read_text(encoding="utf-8"))
     assert verdict["passed"] is True
     assert verdict["reasoning"] == "Patch and spec match the reference."
