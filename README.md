@@ -1,15 +1,49 @@
 # Ymir Harness
 
-Ymir Harness validates replayable benchmark fixtures and scores deterministic
-outputs from Ymir agent runs. It checks case fixtures, runs configured
-workflows in a no-write replay environment, and compares actual structured
-results against expected outcomes with field-level detail.
+Ymir is the Packit AI Workflows GitHub project
+([packit/ai-workflows](https://github.com/packit/ai-workflows)), mounted in
+this repository as the `ui-workflows` submodule for benchmark runs. It is an
+AI-powered RHEL package maintenance automation system, formerly known as Jotnar,
+that helps work through Jira issues and package-maintenance tasks.
 
-Benchmark replay is offline by default. It only checks `pre_fix_ref` resolution
-when a mock fixture points at a local repository path or `file://` URL, and it
-requires `replay_only` cases to declare recorded web-cache files. Fixture
-collection can make explicit read-only Jira and GitLab requests to build those
-offline fixtures when a Jira URL or GitLab MR URL is provided.
+The Ymir project contains two related workflow families. The packaging workflow
+triages incoming RHEL Jira issues, decides whether they are candidates for
+automation, and can prepare dist-git merge requests for rebases and backports.
+The testing and release workflow picks up after a merge request is merged and a
+candidate build exists, helping move the issue, build, and erratum through
+validation toward release. Ymir agents use the BeeAI orchestration framework,
+model access through Vertex AI in the current deployment, and service
+integrations such as Jira, GitLab dist-git, and build-system tooling. Because
+the workflows are AI-assisted, their output still needs review; incorrect patch
+selection, incomplete backports, build failures, and inaccurate generated text
+are real risks.
+
+Ymir Harness is the benchmark and replay layer around those agents. It is meant
+to answer a practical question: did this Ymir change make the agent better or
+worse on known cases? To do that, the harness validates case fixtures, runs
+configured Ymir workflows in a no-write replay environment, captures structured
+actual results, scores those results against expected outcomes, and compares
+benchmark runs with field-level detail.
+
+The harness is separate from the Ymir agents themselves. It provides:
+
+- Case fixtures that describe expected outcomes, Jira evidence, web responses,
+  mock repos, source cache, and reference patches.
+- Replay controls that keep benchmark runs offline or explicitly bounded to
+  recorded inputs.
+- Workflow adapters for `ymir-triage`, `ymir-backport`, `ymir-rebase`, and
+  `ymir-rebuild`.
+- Scoring reports that compare agent output such as `jira_issue`, resolution,
+  package, target branch, CVEs, patch URLs, touched files, generated artifacts,
+  and replay violations.
+- Run comparison reports that make baseline/candidate changes visible across a
+  case set.
+
+Benchmark replay is offline by default. The harness only checks `pre_fix_ref`
+resolution when a mock fixture points at a local repository path or `file://`
+URL, and it requires `replay_only` cases to declare recorded web-cache files.
+Fixture collection can make explicit read-only Jira and GitLab requests to build
+those offline fixtures when a Jira URL or GitLab MR URL is provided.
 
 ## Workflow
 
