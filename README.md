@@ -405,6 +405,11 @@ Actual results may include advisory diagnostics such as `runtime_seconds`,
 `total_cost_usd`, `diff_similarity`, `rationale_quality`, or
 `llm_judge_notes`. Scoring reports carry these as `advisory_metrics` without
 using them for pass/fail status.
+Set `YMIR_HARNESS_LLM_JUDGE=true` or `RUN_LLM_JUDGE=true` to run the optional
+backport LLM judge when artifact manifests are available. The judge uses
+`YMIR_HARNESS_LLM_JUDGE_MODEL`, `LLM_JUDGE_MODEL`, or `CHAT_MODEL`, writes a
+`judge_verdict.json` artifact, and evaluates patch correctness, RPM spec
+changes, unrelated changes, completeness, and reference-patch similarity/scope.
 
 Expected results may declare `alternate_acceptable_outcomes` as a list of
 partial expected-result overrides. If the primary expected result fails,
