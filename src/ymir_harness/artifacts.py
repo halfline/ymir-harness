@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Mapping
@@ -13,6 +14,7 @@ from typing import Any
 class BackportArtifactCapture:
     generated_artifacts: list[str] = field(default_factory=list)
     touched_files: list[str] = field(default_factory=list)
+    patch_touched_files: list[str] = field(default_factory=list)
     spec_patches: list[str] = field(default_factory=list)
     unrelated_source_changes: list[str] = field(default_factory=list)
     manifest_path: Path | None = None
@@ -58,7 +60,12 @@ def merge_artifact_fields(
     if touched_files:
         actual["touched_files"] = touched_files
 
-    for name in ("spec_patches", "changelog_entries", "unrelated_source_changes"):
+    for name in (
+        "patch_touched_files",
+        "spec_patches",
+        "changelog_entries",
+        "unrelated_source_changes",
+    ):
         values = _unique_strings(
             [
                 *_string_list(actual.get(name)),
@@ -91,6 +98,7 @@ def capture_backport_artifacts(
         "captured_files": {},
         "source_paths": {},
         "touched_files": [],
+        "patch_touched_files": [],
         "spec_patches": [],
         "unrelated_source_changes": [],
         "warnings": [],
@@ -135,6 +143,7 @@ def capture_backport_artifacts(
             capture.warnings.append(f"local_clone is not a directory: {local_clone}")
 
     manifest["touched_files"] = capture.touched_files
+    manifest["patch_touched_files"] = capture.patch_touched_files
     manifest["spec_patches"] = capture.spec_patches
     manifest["unrelated_source_changes"] = capture.unrelated_source_changes
     manifest["warnings"] = capture.warnings
@@ -153,16 +162,6 @@ def _capture_git_backport_files(
     capture: BackportArtifactCapture,
     manifest: dict[str, Any],
 ) -> None:
-    diff = _git_output(local_clone, "diff", "HEAD~1", "HEAD")
-    if diff is not None and diff.strip():
-        diff_path = artifact_dir / "commit.diff"
-        diff_path.write_text(diff, encoding="utf-8")
-        capture.generated_artifacts.append(str(diff_path))
-        manifest["captured_files"]["commit_diff"] = str(diff_path)
-
-    touched_files = _git_name_output(local_clone, "diff", "HEAD~1", "HEAD", "--name-only")
-    capture.touched_files.extend(touched_files)
-
     spec_path = local_clone / f"{package}.spec"
     spec_text = None
     if spec_path.is_file():
@@ -174,7 +173,36 @@ def _capture_git_backport_files(
     else:
         capture.warnings.append(f"spec file not found: {spec_path}")
 
-    patch_files = _changed_patch_files(local_clone, touched_files)
+    delta = _backport_git_delta(local_clone, spec_path=spec_path if spec_text is not None else None)
+    patch_files = _unique_paths(
+        [
+            *_changed_patch_files(local_clone, delta.touched_files),
+            *_spec_patch_file_paths(
+                local_clone,
+                spec_text,
+                patch_names=set(delta.added_spec_patch_names),
+            ),
+        ]
+    )
+    touched_files = _unique_strings(
+        [*delta.touched_files, *(_relative_repo_path(local_clone, path) for path in patch_files)]
+    )
+    if delta.diff is not None and delta.diff.strip():
+        diff = delta.diff
+        if delta.uses_worktree:
+            diff = _append_untracked_patch_diffs(
+                local_clone,
+                diff,
+                patch_files,
+                tracked_files=set(delta.touched_files),
+            )
+        diff_path = artifact_dir / "commit.diff"
+        diff_path.write_text(diff, encoding="utf-8")
+        capture.generated_artifacts.append(str(diff_path))
+        manifest["captured_files"]["commit_diff"] = str(diff_path)
+
+    capture.touched_files.extend(touched_files)
+
     if patch_files:
         patches_dir = artifact_dir / "patches"
         patches_dir.mkdir(parents=True, exist_ok=True)
@@ -189,8 +217,15 @@ def _capture_git_backport_files(
                 continue
             capture.generated_artifacts.append(str(copied_patch))
             copied_patch_paths.append(str(copied_patch))
+            patch_touched_files = _patch_file_touched_paths(patch_path)
+            if patch_touched_files is None:
+                capture.warnings.append(f"could not parse generated patch: {patch_path}")
+            else:
+                capture.patch_touched_files.extend(patch_touched_files)
         if copied_patch_paths:
             manifest["captured_files"]["patch_files"] = copied_patch_paths
+
+    capture.patch_touched_files = _unique_strings(capture.patch_touched_files)
 
     if spec_text is not None:
         patch_names = {path.name for path in patch_files}
@@ -308,6 +343,45 @@ def _git_name_output(repo_path: Path, *args: str) -> list[str]:
     return [line for line in output.splitlines() if line.strip()]
 
 
+@dataclass(frozen=True)
+class _BackportGitDelta:
+    diff: str | None
+    touched_files: list[str]
+    added_spec_patch_names: list[str]
+    uses_worktree: bool
+
+
+def _backport_git_delta(repo_path: Path, *, spec_path: Path | None) -> _BackportGitDelta:
+    worktree_files = _git_name_output(repo_path, "diff", "HEAD", "--name-only")
+    if worktree_files:
+        spec_diff = _spec_diff(repo_path, spec_path, base_args=("diff", "HEAD"))
+        return _BackportGitDelta(
+            diff=_git_output(repo_path, "diff", "HEAD"),
+            touched_files=worktree_files,
+            added_spec_patch_names=_added_spec_patch_names(spec_diff or ""),
+            uses_worktree=True,
+        )
+
+    spec_diff = _spec_diff(repo_path, spec_path, base_args=("diff", "HEAD~1", "HEAD"))
+    return _BackportGitDelta(
+        diff=_git_output(repo_path, "diff", "HEAD~1", "HEAD"),
+        touched_files=_git_name_output(repo_path, "diff", "HEAD~1", "HEAD", "--name-only"),
+        added_spec_patch_names=_added_spec_patch_names(spec_diff or ""),
+        uses_worktree=False,
+    )
+
+
+def _spec_diff(
+    repo_path: Path,
+    spec_path: Path | None,
+    *,
+    base_args: tuple[str, ...],
+) -> str | None:
+    if spec_path is None:
+        return None
+    return _git_output(repo_path, *base_args, "--", _relative_repo_path(repo_path, spec_path))
+
+
 def _changed_patch_files(repo_path: Path, changed_files: list[str]) -> list[Path]:
     patch_suffixes = (".patch", ".diff")
     return [
@@ -315,6 +389,116 @@ def _changed_patch_files(repo_path: Path, changed_files: list[str]) -> list[Path
         for path in changed_files
         if path.endswith(patch_suffixes) and (repo_path / path).is_file()
     ]
+
+
+def _spec_patch_file_paths(
+    repo_path: Path,
+    spec_text: str | None,
+    *,
+    patch_names: set[str],
+) -> list[Path]:
+    if spec_text is None or not patch_names:
+        return []
+    paths = []
+    for line in spec_text.splitlines():
+        patch_name = _patch_tag_filename(line)
+        if patch_name is None or patch_name not in patch_names:
+            continue
+        patch_path = repo_path / patch_name
+        if patch_path.is_file():
+            paths.append(patch_path)
+    return paths
+
+
+def _added_spec_patch_names(diff: str) -> list[str]:
+    names = []
+    for line in diff.splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        patch_name = _patch_tag_filename(line[1:])
+        if patch_name is not None:
+            names.append(patch_name)
+    return _unique_strings(names)
+
+
+def _append_untracked_patch_diffs(
+    repo_path: Path,
+    diff: str,
+    patch_files: list[Path],
+    *,
+    tracked_files: set[str],
+) -> str:
+    parts = [diff] if diff else []
+    for patch_path in patch_files:
+        relative_path = _relative_repo_path(repo_path, patch_path)
+        if relative_path in tracked_files or _is_tracked(repo_path, relative_path):
+            continue
+        patch_diff = _git_no_index_diff(repo_path, relative_path)
+        if patch_diff is not None and patch_diff.strip():
+            parts.append(patch_diff)
+    return "\n".join(part.rstrip() for part in parts if part.strip()) + "\n"
+
+
+def _git_no_index_diff(repo_path: Path, relative_path: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_path), "diff", "--no-index", "--", "/dev/null", relative_path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode not in {0, 1}:
+        return None
+    return completed.stdout
+
+
+def _is_tracked(repo_path: Path, relative_path: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_path), "ls-files", "--error-unmatch", "--", relative_path],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
+def _relative_repo_path(repo_path: Path, path: Path) -> str:
+    try:
+        return path.relative_to(repo_path).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _patch_file_touched_paths(patch_path: Path) -> list[str] | None:
+    try:
+        completed = subprocess.run(
+            ["git", "apply", "--numstat", str(patch_path)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+
+    paths = []
+    for line in completed.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            return None
+        path = parts[2].strip()
+        if not path:
+            return None
+        paths.append(path)
+    return paths
 
 
 def _spec_patch_lines(spec_text: str, patch_names: set[str]) -> list[str]:
@@ -342,6 +526,16 @@ def _patch_tag_line(line: str) -> str | None:
     return stripped if ":" in stripped else None
 
 
+def _patch_tag_filename(line: str) -> str | None:
+    match = re.match(r"^\s*Patch\d*:\s*(?P<filename>\S+)", line, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    filename = match.group("filename")
+    if "%" in filename:
+        return None
+    return filename
+
+
 def _unrelated_changed_files(changed_files: list[str], *, package: str) -> list[str]:
     allowed_names = {f"{package}.spec", "sources"}
     unrelated = []
@@ -361,4 +555,16 @@ def _unique_strings(values: list[str]) -> list[str]:
             continue
         seen.add(value)
         output.append(value)
+    return output
+
+
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    seen = set()
+    output = []
+    for path in paths:
+        key = path.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(path)
     return output

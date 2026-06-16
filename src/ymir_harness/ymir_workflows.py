@@ -1878,6 +1878,11 @@ def _backport_actual_result(
         ]
     if capture.touched_files:
         actual["touched_files"] = [*actual.get("touched_files", []), *capture.touched_files]
+    if capture.patch_touched_files:
+        actual["patch_touched_files"] = [
+            *actual.get("patch_touched_files", []),
+            *capture.patch_touched_files,
+        ]
     if capture.spec_patches:
         actual["spec_patches"] = [*actual.get("spec_patches", []), *capture.spec_patches]
     if capture.unrelated_source_changes:
