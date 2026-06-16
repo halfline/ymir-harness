@@ -187,6 +187,7 @@ class CollectCaseRequest:
     reference_patch_mode: str | None = None
     mock_repo: MockRepoInput | None = None
     mock_agent: str = "triage"
+    mock_repo_cache: Path | None = None
     jira_url: str | None = None
     jira_base_url: str | None = None
     jira_token_env: str = "JIRA_TOKEN"
@@ -230,6 +231,7 @@ def collect_case(request: CollectCaseRequest) -> CollectCaseResult:
     result = CollectCaseResult(case_id=request.case_id, cases_dir=cases_dir)
     fetched = _fetch_evidence(request, result)
     request = _complete_request(request, fetched)
+    request = _localize_mock_repo_cache(request)
     _validate_request(request, require_metadata=True)
     cases_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1344,8 +1346,35 @@ def _complete_request(
 
 
 
+def _localize_mock_repo_cache(request: CollectCaseRequest) -> CollectCaseRequest:
+    if request.mock_repo_cache is None or request.mock_repo is None:
+        return request
+
+    cache_dir = request.mock_repo_cache.expanduser().resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    mock_repo = request.mock_repo
+    source = mock_repo.source_url or mock_repo.remote_url
+    destination = cache_dir / _mock_repo_cache_name(mock_repo.remote_url)
+    if destination.exists():
+        _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
+    else:
+        _run_git(_git_clone_command(source, str(destination), request.gitlab_token_env), destination)
+
+    _run_git(
+        ["-C", str(destination), "cat-file", "-e", f"{mock_repo.pre_fix_ref}^{{commit}}"],
+        destination,
+    )
+    return replace(request, mock_repo=replace(mock_repo, source_url=str(destination)))
 
 
+def _mock_repo_cache_name(remote_url: str) -> str:
+    parsed = urlparse(remote_url)
+    source = parsed.path.rstrip("/").rsplit("/", 1)[-1] if parsed.path else "repo"
+    source = source.removesuffix(".git")
+    safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in source)
+    digest = hashlib.sha256(remote_url.encode("utf-8")).hexdigest()[:12]
+    return f"{safe or 'repo'}-{digest}.git"
 
 
 def _run_git(command: Sequence[str], cwd: Path) -> None:
