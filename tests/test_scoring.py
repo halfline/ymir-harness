@@ -339,6 +339,96 @@ def test_score_case_fails_missing_required_artifacts() -> None:
     assert failed["required_artifacts"].notes == "missing required artifacts: dnsmasq.spec"
 
 
+def test_score_case_accepts_required_artifact_kinds_from_manifest(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    manifest_path = artifact_dir / "manifest.json"
+    _write_json(
+        manifest_path,
+        {
+            "captured_files": {
+                "commit_diff": str(artifact_dir / "commit.diff"),
+                "spec_file": str(artifact_dir / "spec_file.spec"),
+                "patch_files": [str(artifact_dir / "patches" / "fix-cve.patch")],
+                "srpm": str(artifact_dir / "srpms" / "dnsmasq.src.rpm"),
+            }
+        },
+    )
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "required_artifact_kinds": ["commit_diff", "spec_file", "patch_files", "srpm"],
+        "patch_file_patterns": ["fix-cve"],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "artifact_manifest": str(manifest_path),
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["required_artifact_kinds"].actual == [
+        "commit_diff",
+        "patch_files",
+        "spec_file",
+        "srpm",
+    ]
+    assert metrics["patch_file_patterns"].actual == ["fix-cve.patch"]
+
+
+def test_score_case_reports_required_artifact_kind_and_patch_pattern_failures(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    manifest_path = artifact_dir / "manifest.json"
+    _write_json(
+        manifest_path,
+        {
+            "captured_files": {
+                "spec_file": str(artifact_dir / "spec_file.spec"),
+                "patch_files": [str(artifact_dir / "patches" / "wrong.patch")],
+            }
+        },
+    )
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "required_artifact_kinds": ["commit_diff", "spec_file", "srpm"],
+        "patch_file_pattern": "fix-cve",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "artifact_manifest": str(manifest_path),
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["required_artifact_kinds"].expected == [
+        "commit_diff",
+        "spec_file",
+        "srpm",
+    ]
+    assert failed["required_artifact_kinds"].actual == ["patch_files", "spec_file"]
+    assert failed["required_artifact_kinds"].notes == (
+        "missing required artifact kinds: commit_diff, srpm"
+    )
+    assert failed["patch_file_patterns"].actual == ["wrong.patch"]
+    assert failed["patch_file_patterns"].notes == "missing patch file patterns: fix-cve"
+
+
 def test_score_case_fails_unrelated_source_changes() -> None:
     expected = {
         "case_id": "RHEL-12345",
