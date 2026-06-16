@@ -34,6 +34,55 @@ def test_score_case_accepts_nested_triage_result() -> None:
     assert report.summary()["fail"] == 0
 
 
+def test_score_case_reports_jira_issue_mismatches() -> None:
+    expected = {
+        "schema_version": 1,
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "data": {"jira_issue": "RHEL-99999"},
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["jira_issue"].expected == "RHEL-12345"
+    assert failed["jira_issue"].actual == "RHEL-99999"
+
+
+def test_score_case_uses_explicit_expected_jira_issue() -> None:
+    expected = {
+        "schema_version": 1,
+        "case_id": "fixture-001",
+        "jira_issue": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "fixture-001",
+        "jira_issue": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["jira_issue"].expected == "RHEL-12345"
+    assert metrics["jira_issue"].actual == "RHEL-12345"
+
+
 def test_score_case_infers_distgit_backport_source_from_patch_urls() -> None:
     expected = {
         "case_id": "RHEL-12345",
