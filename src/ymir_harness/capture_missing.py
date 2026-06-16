@@ -13,6 +13,10 @@ from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from ymir_harness.jira_replay import (
+    JiraReplayMiss,
+    parse_jira_replay_misses,
+)
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.replay import canonicalize_replay_url
 from ymir_harness.scoring import load_json_file
@@ -114,6 +118,7 @@ class CaptureMissingResult:
     cases_dir: Path
     run_path: Path
     candidate_urls: list[str] = field(default_factory=list)
+    candidate_jira_requests: list[dict[str, Any]] = field(default_factory=list)
     captured: list[CapturedResponse] = field(default_factory=list)
     skipped: list[CaptureFailure] = field(default_factory=list)
     failed: list[CaptureFailure] = field(default_factory=list)
@@ -124,6 +129,7 @@ class CaptureMissingResult:
             "cases_dir": str(self.cases_dir),
             "run_path": str(self.run_path),
             "candidate_urls": self.candidate_urls,
+            "candidate_jira_requests": self.candidate_jira_requests,
             "captured": [capture.to_json() for capture in self.captured],
             "skipped": [skip.to_json() for skip in self.skipped],
             "failed": [failure.to_json() for failure in self.failed],
@@ -150,6 +156,8 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
     urls = list(dict.fromkeys(blocked.url for blocked in blocked_urls))
     url_reasons = _blocked_url_reasons(blocked_urls)
     result.candidate_urls.extend(urls)
+    jira_requests = _blocked_jira_requests_from_run_path(run_path)
+    result.candidate_jira_requests.extend(miss.to_json() for miss in jira_requests)
 
     manifest_path = cases_dir / "web_cache" / request.case_id / "manifest.json"
     manifest = _load_or_create_manifest(cases_dir, request.case_id, manifest_path)
@@ -217,6 +225,31 @@ def _blocked_url_reasons(blocked_urls: Sequence[BlockedUrl]) -> dict[str, tuple[
 
 
 
+
+def _blocked_jira_requests_from_run_path(run_path: Path) -> list[JiraReplayMiss]:
+    return list(
+        {
+            json.dumps(miss.to_json(), sort_keys=True): miss
+            for miss in jira_requests_from_run_path(run_path)
+        }.values()
+    )
+
+def jira_requests_from_run_path(run_path: Path) -> list[JiraReplayMiss]:
+    if run_path.is_file():
+        paths = [run_path]
+    elif run_path.is_dir():
+        paths = sorted(path for path in run_path.rglob("*") if _looks_like_text_artifact(path))
+    else:
+        raise CaptureMissingError(f"run path does not exist: {run_path}")
+
+    misses: list[JiraReplayMiss] = []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        misses.extend(parse_jira_replay_misses(text))
+    return misses
 
 def blocked_urls_from_run_path(run_path: Path) -> list[BlockedUrl]:
     if run_path.is_file():
