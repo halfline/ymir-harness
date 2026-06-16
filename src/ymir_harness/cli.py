@@ -4,8 +4,9 @@ import argparse
 import ipaddress
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from ymir_harness import __version__
@@ -1185,16 +1186,125 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.json:
         sys.stdout.write(payload)
     else:
-        summary = report.summary()
-        sys.stdout.write(
-            "benchmark run: "
-            f"{summary['not_run']} not run, "
-            f"{summary['skipped']} skipped, "
-            f"{summary['unsupported']} unsupported\n"
-        )
+        _write_run_summary(report)
         sys.stdout.write(f"run report written to {output_path}\n")
 
     return 1 if report.has_failures else 0
+
+
+def _write_run_summary(report: Any) -> None:
+    summary = report.summary()
+    sys.stdout.write(
+        "benchmark run: "
+        f"{summary['passed']} passed, "
+        f"{summary['failed']} failed, "
+        f"{int(summary.get('timeout', 0))} timeout, "
+        f"{summary['not_run']} not run, "
+        f"{summary['skipped']} skipped, "
+        f"{summary['unsupported']} unsupported\n"
+    )
+    metrics = _run_metric_summary(report)
+    if metrics:
+        sys.stdout.write(f"metrics: {metrics}\n")
+
+
+def _run_metric_summary(report: Any) -> str | None:
+    entries = list(getattr(report, "entries", []))
+    parts = []
+
+    runtimes = [
+        value
+        for value in (_number_or_none(getattr(entry, "runtime_seconds", None)) for entry in entries)
+        if value is not None
+    ]
+    if runtimes:
+        parts.append(
+            f"runtime {_format_seconds(sum(runtimes))} total / "
+            f"{_format_seconds(sum(runtimes) / len(runtimes))} avg"
+        )
+
+    token_counts = [
+        value for value in (_entry_token_count(entry) for entry in entries) if value is not None
+    ]
+    if token_counts:
+        parts.append(f"tokens {_format_number(sum(token_counts) / len(token_counts))} avg")
+
+    tool_calls = [
+        value
+        for value in (_entry_metric_number(entry, "tool_call_count") for entry in entries)
+        if value is not None
+    ]
+    if tool_calls:
+        parts.append(f"tool calls {_format_number(sum(tool_calls) / len(tool_calls))} avg")
+
+    costs = [
+        value
+        for value in (_entry_metric_number(entry, "total_cost_usd") for entry in entries)
+        if value is not None
+    ]
+    if costs:
+        parts.append(
+            f"cost ${_format_number(sum(costs))} total / "
+            f"${_format_number(sum(costs) / len(costs))} avg"
+        )
+
+    return "; ".join(parts) if parts else None
+
+
+def _entry_token_count(entry: Any) -> float | None:
+    direct = _entry_metric_number(entry, "token_count")
+    if direct is not None:
+        return direct
+
+    usage = _entry_advisory_metric(entry, "token_usage")
+    if isinstance(usage, Mapping):
+        token_values = [
+            _number_or_none(value) for key, value in usage.items() if "token" in str(key).lower()
+        ]
+        numbers = [value for value in token_values if value is not None]
+        if numbers:
+            return sum(numbers)
+        all_values = [_number_or_none(value) for value in usage.values()]
+        all_numbers = [value for value in all_values if value is not None]
+        if all_numbers:
+            return sum(all_numbers)
+    return _number_or_none(usage)
+
+
+def _entry_metric_number(entry: Any, name: str) -> float | None:
+    return _number_or_none(_entry_advisory_metric(entry, name))
+
+
+def _entry_advisory_metric(entry: Any, name: str) -> Any:
+    score = getattr(entry, "score", None)
+    if score is None:
+        return None
+    for metric in getattr(score, "advisory_metrics", []):
+        if getattr(metric, "name", None) == name:
+            return getattr(metric, "value", None)
+    return None
+
+
+def _number_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _format_seconds(value: float) -> str:
+    return f"{_format_number(value)}s"
+
+
+def _format_number(value: float) -> str:
+    text = f"{value:.4f}" if abs(value) < 1 else f"{value:.2f}"
+    return text.rstrip("0").rstrip(".")
 
 
 def _run_executor(workflow: str):
