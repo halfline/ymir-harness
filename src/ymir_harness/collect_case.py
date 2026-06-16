@@ -346,6 +346,133 @@ def _fetch_evidence(
             )
         )
 
+    auto_gitlab_mr_url = False
+    gitlab_mr_url = request.gitlab_mr_url
+    if gitlab_mr_url is None and request.network_mode != "network_denied":
+        gitlab_mr_url = _gitlab_mr_url_from_jira_evidence(
+            jira_links_source,
+            jira_issue_source,
+            jira_comments_source,
+        )
+        auto_gitlab_mr_url = gitlab_mr_url is not None
+
+    if (
+        gitlab_mr_url
+        and auto_gitlab_mr_url
+        and _private_gitlab_url_without_token(gitlab_mr_url, request.gitlab_token_env)
+    ):
+        result.warnings.append(
+            f"skipped auto-discovered GitLab MR {gitlab_mr_url}: "
+            f"{request.gitlab_token_env} is not configured"
+        )
+        gitlab_mr_url = None
+
+    if gitlab_mr_url:
+        try:
+            fetched_gitlab_mr, fetched_gitlab_commits, fetched_patch_url, fetched_patch_body, fetched_records = (
+                _fetch_gitlab_mr_evidence(gitlab_mr_url, request, result)
+            )
+        except CollectCaseError as exc:
+            if not auto_gitlab_mr_url:
+                raise
+            result.warnings.append(f"skipped auto-discovered GitLab MR {gitlab_mr_url}: {exc}")
+            gitlab_mr_url = None
+        else:
+            gitlab_mr = fetched_gitlab_mr
+            gitlab_commits = fetched_gitlab_commits
+            gitlab_patch_url = fetched_patch_url
+            gitlab_patch_body = fetched_patch_body
+            gitlab_records.extend(fetched_records)
+
+    gitlab_records.extend(
+        _gitlab_commit_patch_records_from_mr_patch(
+            gitlab_patch_url,
+            gitlab_patch_body,
+            request=request,
+            result=result,
+            skipped_urls=jira_patch_urls,
+        )
+    )
+
+    recorded_patch_urls = {
+        record.url for record in gitlab_records if _patch_url_candidate(record.url) is not None
+    }
+    valid_jira_patch_urls: list[str] = []
+    for index, patch_url in enumerate(jira_patch_urls, start=1):
+        if patch_url in recorded_patch_urls:
+            continue
+        if _private_gitlab_url_without_token(patch_url, request.gitlab_token_env):
+            result.warnings.append(
+                f"skipped Jira patch URL {patch_url}: {request.gitlab_token_env} is not configured"
+            )
+            continue
+        try:
+            patch_body = _fetch_bytes(
+                patch_url,
+                headers={"Accept": "*/*"},
+                request=request,
+                result=result,
+            )
+        except CollectCaseError as exc:
+            try:
+                patch_body = _gitlab_commit_api_diff_patch_body_for_url(
+                    patch_url,
+                    request=request,
+                    result=result,
+                )
+            except CollectCaseError:
+                result.warnings.append(f"skipped Jira patch URL {patch_url}: {exc}")
+                continue
+            result.warnings.append(f"used GitLab API diff for {patch_url}: {exc}")
+        if not _looks_like_patch(patch_body):
+            result.warnings.append(
+                f"skipped Jira patch URL {patch_url}: fetched content is not a patch"
+            )
+            continue
+        valid_jira_patch_urls.append(patch_url)
+        gitlab_records.append(
+            FetchedRecord(
+                url=patch_url,
+                relative_path=(
+                    f"jira/patches/{len(valid_jira_patch_urls):03d}{_patch_suffix(patch_url)}"
+                ),
+                body=patch_body,
+            )
+        )
+        gitlab_records.extend(
+            _gitlab_commit_patch_records_from_mr_patch(
+                patch_url,
+                patch_body,
+                request=request,
+                result=result,
+                skipped_urls=jira_patch_urls,
+            )
+        )
+    jira_patch_urls = tuple(valid_jira_patch_urls)
+
+    package = request.package or _derive_package(jira_issue_source)
+    fix_version = request.fix_version or _derive_fix_version(jira_issue_source)
+    if (
+        package is not None
+        and request.network_mode != "network_denied"
+        and (request.jira_url or request.jira_base_url or gitlab_mr_url)
+    ):
+        try:
+            gitlab_records.append(_fetch_maintainer_rules_record(package, request, result))
+        except CollectCaseError as exc:
+            result.warnings.append(f"skipped maintainer rules for {package}: {exc}")
+    if (
+        package is not None
+        and fix_version is not None
+        and request.network_mode != "network_denied"
+        and (request.jira_url or request.jira_base_url or jira_issue_source is not None)
+    ):
+        try:
+            gitlab_records.extend(
+                _fetch_internal_rhel_branch_records(package, fix_version, request, result)
+            )
+        except CollectCaseError as exc:
+            result.warnings.append(f"skipped internal RHEL branches for {package}: {exc}")
 
     return FetchedEvidence(
         jira_issue=jira_issue,
@@ -360,6 +487,7 @@ def _fetch_evidence(
         gitlab_patch_body=gitlab_patch_body,
         web_records=tuple(gitlab_records),
     )
+
 
 def _fetch_gitlab_mr_evidence(
     gitlab_mr_url: str,
