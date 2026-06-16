@@ -29,6 +29,9 @@ ADVISORY_RESULT_FIELDS = (
     "tool_call_count",
     "retry_count",
     "total_cost_usd",
+    "llm_judge_passed",
+    "llm_judge_error",
+    "llm_judge_artifact",
 )
 PATCH_COMMIT_RE = re.compile(r"(?m)^From ([0-9a-fA-F]{40}) ")
 CVE_ID_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
