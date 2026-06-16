@@ -1,0 +1,15 @@
+{
+  "case_id": "RHEL-00001",
+  "case_type": "not_affected",
+  "fields": {
+    "components": [
+      {
+        "name": "dnsmasq"
+      }
+    ],
+    "description": "Synthetic offline issue used to exercise the Ymir Harness fixture layout.",
+    "summary": "Synthetic not-affected benchmark seed"
+  },
+  "key": "RHEL-00001",
+  "schema_version": 1
+}
