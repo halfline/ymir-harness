@@ -88,20 +88,55 @@ def _build_backport_judge_prompt(
     manifest = _read_json_object(artifact_manifest)
     captured_files = manifest.get("captured_files")
     captured = captured_files if isinstance(captured_files, Mapping) else {}
+    case_id = str(actual_result.get("case_id") or "")
+    jira_issue = str(actual_result.get("jira_issue") or case_id or "unknown")
+    package = str(actual_result.get("package") or "unknown")
+    patch_urls = _list_value(
+        actual_result.get("patch_urls") or _actual_result_field(actual_result, "patch_urls")
+    )
+    cve_ids = _list_value(
+        actual_result.get("cve_ids")
+        or _actual_result_field(actual_result, "cve_ids")
+        or actual_result.get("cve_id")
+        or _actual_result_field(actual_result, "cve_id")
+    )
+    patch_url_lines = "\n".join(f"- {url}" for url in patch_urls) or "- (none recorded)"
+    cve_text = ", ".join(cve_ids) if cve_ids else "(none recorded)"
     sections = [
-        "You are evaluating an automated RPM backport.",
+        "You are a senior RPM packaging reviewer evaluating an automated backport.",
         "",
         "Return a JSON object with exactly these keys:",
         '- "passed": boolean',
         '- "reasoning": concise explanation of each criterion',
         "",
-        "Evaluation criteria:",
-        "1. The generated patch addresses the requested backport.",
-        "2. The spec file adds and applies the patch without unrelated packaging changes.",
-        "3. The generated patch only touches files in the reference patch scope when a reference patch is available.",
-        "4. The workflow reported success and produced the expected artifacts.",
-        "",
         "Task context:",
+        f"- Jira issue: {jira_issue}",
+        f"- CVE(s): {cve_text}",
+        f"- Package: {package}",
+        "- Upstream or expected patch URLs:",
+        patch_url_lines,
+        "",
+        "Evaluate all criteria and explain each one in `reasoning`:",
+        "1. Patch correctness: the generated patch must address the Jira issue or CVE "
+        "and contain the essential logic of the upstream fix.",
+        "2. Spec file correctness: the spec must add the new Patch tag correctly, apply "
+        "it in %prep with the appropriate -p argument, and leave existing patches intact.",
+        "3. No unrelated changes: the diff must not introduce unrelated packaging or "
+        "source changes such as Release bumps, changelog edits, documentation churn, "
+        "copyright churn, or unrelated patches.",
+        "4. Completeness: the workflow must report success and produce the expected "
+        "artifacts, including an SRPM when the result claims a successful build.",
+        "5. Similarity to reference patch, when provided: compare the generated patch "
+        "with the known-good production fix. The changed source lines and core logic "
+        "should be functionally equivalent. Different context line counts, patch "
+        "headers, path strip levels, and whitespace-only differences are acceptable.",
+        "6. File scope, when a reference patch is provided: the generated patch must "
+        "only modify the same source files as the reference patch. Extra source, "
+        "documentation, changelog, copyright, or metadata files are a failure.",
+        "",
+        "Set `passed` to true only if the backport passes all applicable criteria.",
+        "",
+        "Task output:",
         _json_block("actual_result", actual_result),
     ]
 
@@ -118,7 +153,7 @@ def _build_backport_judge_prompt(
         if text:
             sections.append(_text_block(Path(patch_path).name, text))
 
-    reference_patch = _reference_patch_text(cases_dir, str(actual_result.get("case_id") or ""))
+    reference_patch = _reference_patch_text(cases_dir, case_id)
     if reference_patch:
         sections.append(_text_block("reference patch", reference_patch))
 
@@ -204,6 +239,24 @@ def _read_text(path: Path) -> str | None:
     if not path.is_file():
         return None
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _actual_result_field(actual_result: Mapping[str, Any], name: str) -> Any:
+    data = actual_result.get("data")
+    nested = data if isinstance(data, Mapping) else {}
+    if actual_result.get(name) is not None:
+        return actual_result.get(name)
+    return nested.get(name)
+
+
+def _list_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list | tuple | set):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
 
 
 def _path_or_none(value: Any) -> Path | None:
