@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -1138,6 +1139,7 @@ def test_build_run_report_rewrites_source_cache_git_remotes(tmp_path: Path) -> N
         ],
         check=True,
     )
+    shutil.rmtree(cached_repo / "refs")
     _write_expected(
         cases_dir,
         "RHEL-12345",
