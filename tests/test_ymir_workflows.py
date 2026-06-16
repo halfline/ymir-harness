@@ -15,6 +15,7 @@ import pytest
 import ymir_harness.llm_judge as judge_module
 import ymir_harness.ymir_workflows as workflow_module
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseRequest
+from ymir_harness.ymir_source import ensure_ymir_source_path
 from ymir_harness.ymir_workflows import (
     _fallback_update_release_text,
     _fixture_search_results,
@@ -254,6 +255,91 @@ def test_ymir_triage_executor_reports_missing_triage_result(tmp_path: Path) -> N
     assert execution.status == "failed"
     assert execution.actual_result is None
     assert execution.reason == "ymir triage workflow returned no triage result"
+
+
+def test_ymir_triage_executor_accepts_typed_backport_output(tmp_path: Path) -> None:
+    models = _import_ymir_models()
+
+    async def workflow(*_args, **_kwargs):
+        return _State(
+            triage_result=models.TriageOutputSchema(
+                resolution=models.Resolution.BACKPORT,
+                data=models.BackportData(
+                    package="dnsmasq",
+                    patch_urls=["https://example.invalid/fix.patch"],
+                    justification="The patch fixes the vulnerable code path.",
+                    jira_issue="RHEL-12345",
+                    cve_id="CVE-2026-0001",
+                    fix_version="rhel-8.10.z",
+                ),
+            ),
+            target_branch="rhel-8.10.z",
+        )
+
+    executor = make_ymir_triage_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(_request(tmp_path))
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    assert execution.actual_result["resolution"] == "backport"
+    assert execution.actual_result["data"] == {
+        "package": "dnsmasq",
+        "patch_urls": ["https://example.invalid/fix.patch"],
+        "justification": "The patch fixes the vulnerable code path.",
+        "jira_issue": "RHEL-12345",
+        "cve_id": "CVE-2026-0001",
+        "fix_version": "rhel-8.10.z",
+    }
+    assert execution.actual_result["package"] == "dnsmasq"
+    assert execution.actual_result["patch_urls"] == ["https://example.invalid/fix.patch"]
+    assert execution.actual_result["cve_id"] == "CVE-2026-0001"
+    assert execution.actual_result["fix_version"] == "rhel-8.10.z"
+    assert execution.actual_result["target_branch"] == "rhel-8.10.z"
+
+
+def test_ymir_triage_executor_accepts_typed_rebase_output(tmp_path: Path) -> None:
+    models = _import_ymir_models()
+
+    async def workflow(*_args, **_kwargs):
+        return _State(
+            triage_result=models.TriageOutputSchema(
+                resolution=models.Resolution.REBASE,
+                data=models.RebaseData(
+                    package="dnsmasq",
+                    version="2.91",
+                    justification="The maintained fix is only in the new upstream release.",
+                    jira_issue="RHEL-12345",
+                    fix_version="rhel-9.0.z",
+                ),
+            ),
+            target_branch="rhel-9.0.z",
+        )
+
+    executor = make_ymir_triage_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(_request(tmp_path))
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    assert execution.actual_result["resolution"] == "rebase"
+    assert execution.actual_result["data"] == {
+        "package": "dnsmasq",
+        "version": "2.91",
+        "justification": "The maintained fix is only in the new upstream release.",
+        "jira_issue": "RHEL-12345",
+        "fix_version": "rhel-9.0.z",
+    }
+    assert execution.actual_result["package"] == "dnsmasq"
+    assert execution.actual_result["version"] == "2.91"
+    assert execution.actual_result["fix_version"] == "rhel-9.0.z"
+    assert execution.actual_result["target_branch"] == "rhel-9.0.z"
 
 
 def test_ymir_triage_executor_logs_workflow_progress(
@@ -2079,6 +2165,14 @@ def _request(
 def _write_expected(request: RunCaseRequest, payload: dict[str, object]) -> None:
     request.expected_path.parent.mkdir(parents=True, exist_ok=True)
     request.expected_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _import_ymir_models():
+    try:
+        ensure_ymir_source_path()
+    except ImportError as exc:
+        pytest.skip(str(exc))
+    return pytest.importorskip("ymir.common.models")
 
 
 def _source_patch_text(path: str = "source.c") -> str:
