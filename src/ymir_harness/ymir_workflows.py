@@ -1708,6 +1708,7 @@ def _triage_actual_result(
 
     for name in (
         "package",
+        "jira_issue",
         "patch_urls",
         "cve_id",
         "fix_version",
@@ -1717,6 +1718,9 @@ def _triage_actual_result(
     ):
         if name in data and data[name] is not None:
             actual[name] = data[name]
+
+    if "jira_issue" not in actual:
+        actual["jira_issue"] = request.case_id
 
     if "package" not in actual:
         expected = load_json_file(request.expected_path)
@@ -1864,6 +1868,7 @@ def _backport_actual_result(
     actual: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "case_id": request.case_id,
+        "jira_issue": inputs.jira_issue,
         "case_type": request.case_type,
         "workflow": "ymir-backport",
         "resolution": "backport",
@@ -1934,6 +1939,7 @@ def _rebase_actual_result(
     actual: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "case_id": request.case_id,
+        "jira_issue": inputs.jira_issue,
         "case_type": request.case_type,
         "workflow": "ymir-rebase",
         "resolution": "rebase",
@@ -2009,6 +2015,7 @@ def _rebuild_actual_result(
     actual: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "case_id": request.case_id,
+        "jira_issue": inputs.jira_issue,
         "case_type": request.case_type,
         "workflow": "ymir-rebuild",
         "resolution": "rebuild",
