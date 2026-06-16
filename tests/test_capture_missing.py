@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import urllib.request
 from pathlib import Path
 from urllib.error import HTTPError
@@ -221,6 +222,42 @@ def test_capture_missing_canonicalizes_escaped_newline_urls(
     assert [capture.url for capture in result.captured] == [clean_url]
 
 
+def test_capture_missing_canonicalizes_escaped_newline_context_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.json"
+    clean_url = "https://github.com/redis/redis.git"
+    escaped_url = clean_url + r"\\nContext"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(run_file, f'{{"reason": "external subprocess URL blocked: {escaped_url}"}}\n')
+
+    def fake_run(command, *args, **kwargs):
+        destination = Path(command[-1])
+        destination.mkdir(parents=True)
+        (destination / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (destination / "config").write_text(
+            '[remote "origin"]\n\turl = https://github.com/redis/redis.git\n',
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+        )
+    )
+
+    assert result.candidate_urls == [clean_url]
+    assert [capture.url for capture in result.captured_source] == [
+        "https://github.com/redis/redis"
+    ]
+    assert result.captured_git_failures == []
 
 
 def test_capture_missing_skips_disallowed_hosts(tmp_path: Path) -> None:
@@ -330,7 +367,6 @@ def test_capture_missing_records_transport_error_for_replay(
 
     assert exc_info.value.code == 599
     assert b"Remote end closed connection" in exc_info.value.read()
-
 
 
 def test_capture_missing_records_jira_search_with_as_of_filter(
@@ -504,6 +540,7 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
         {"url": "https://gitlab.example/group/glib/-/commit/abc123"}
     ]
 
+
 def test_capture_missing_records_jira_issue_miss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -577,6 +614,103 @@ def test_capture_missing_records_jira_issue_miss(
         }
     ]
     assert linked_starting["fields"]["status"] == {"name": "New"}
+
+
+def test_capture_missing_mirrors_blocked_git_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    url = "https://github.com/example/project"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}\n",
+    )
+
+    def fake_run(command, cwd, check, stdout, stderr, text):
+        assert command[:4] == ["git", "clone", "--mirror", "--quiet"]
+        assert command[4] == f"{url}.git"
+        destination = Path(command[5])
+        destination.mkdir(parents=True)
+        (destination / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (destination / "config").write_text(
+            f'[remote "origin"]\n\turl = {url}.git\n',
+            encoding="utf-8",
+        )
+        assert cwd == destination.parent
+        assert check is False
+        assert stdout == subprocess.PIPE
+        assert stderr == subprocess.PIPE
+        assert text is True
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+        )
+    )
+
+    assert [capture.kind for capture in result.captured_source] == ["git_mirror"]
+    captured = cases_dir / result.captured_source[0].relative_path
+    assert (captured / "HEAD").is_file()
+    assert (captured / "config").is_file()
+
+
+def test_capture_missing_records_git_source_failure_for_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    url = "https://gitlab.example/group/project.git"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}\n",
+    )
+
+    def fake_run(command, cwd, check, stdout, stderr, text):
+        assert command[:4] == ["git", "clone", "--mirror", "--quiet"]
+        assert command[4] == url
+        assert cwd == Path(command[5]).parent
+        assert check is False
+        assert stdout == subprocess.PIPE
+        assert stderr == subprocess.PIPE
+        assert text is True
+        return subprocess.CompletedProcess(
+            command,
+            128,
+            stdout="",
+            stderr="fatal: unable to access repository\n",
+        )
+
+    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            allowed_hosts=("gitlab.example",),
+        )
+    )
+
+    assert result.failed == []
+    assert [capture.url for capture in result.captured_git_failures] == [url]
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    failure = manifest["git_failures"][url]
+    assert failure["returncode"] == 128
+    assert "fatal: unable to access repository" in failure["stderr"]
+    assert "https://gitlab.example/group/project" in manifest["git_failures"]
+
 
 class _Response:
     def __init__(self, body: bytes, content_type: str):
