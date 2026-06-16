@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ymir-harness"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Fixture validation and deterministic scoring for Ymir benchmark runs"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -34,6 +34,21 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+
+[tool.hatch.metadata.hooks.custom]
+
+[[tool.uv.dependency-metadata]]
+name = "koji"
+requires-dist = [
+  "defusedxml",
+  "python-dateutil",
+  "requests",
+  "six",
+]
+
+[tool.uv.sources]
+ymir-common = { path = "ui-workflows/ymir/common", editable = true }
+ymir-tools = { path = "ui-workflows/ymir/tools", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ymir_harness"]
