@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from ymir_harness.artifacts import merge_artifact_fields
+from ymir_harness.artifacts import capture_backport_artifacts, merge_artifact_fields
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseRequest
 from ymir_harness.scoring import load_json_file
@@ -1863,6 +1863,30 @@ def _backport_actual_result(
     }
     if srpm_path:
         actual["generated_artifacts"] = [str(srpm_path)]
+
+    capture = capture_backport_artifacts(
+        case_id=request.case_id,
+        package=package,
+        state=state,
+        payload=payload,
+        request_artifact_dir=_request_artifact_dir(request),
+    )
+    if capture.generated_artifacts:
+        actual["generated_artifacts"] = [
+            *actual.get("generated_artifacts", []),
+            *capture.generated_artifacts,
+        ]
+    if capture.touched_files:
+        actual["touched_files"] = [*actual.get("touched_files", []), *capture.touched_files]
+    if capture.spec_patches:
+        actual["spec_patches"] = [*actual.get("spec_patches", []), *capture.spec_patches]
+    if capture.unrelated_source_changes:
+        actual["unrelated_source_changes"] = [
+            *actual.get("unrelated_source_changes", []),
+            *capture.unrelated_source_changes,
+        ]
+    if capture.manifest_path is not None:
+        actual["artifact_manifest"] = str(capture.manifest_path)
 
     merge_artifact_fields(
         actual,
