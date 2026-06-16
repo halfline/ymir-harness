@@ -832,8 +832,14 @@ def _git_remote_url(repository: Path) -> str | None:
 
 def _git_command(repository: Path, args: list[str]) -> list[str]:
     if _is_bare_git_repository(repository):
+        _ensure_bare_git_runtime_dirs(repository)
         return ["git", f"--git-dir={repository}", *args]
     return ["git", "-C", str(repository), *args]
+
+
+def _ensure_bare_git_runtime_dirs(repository: Path) -> None:
+    (repository / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+    (repository / "refs" / "tags").mkdir(parents=True, exist_ok=True)
 
 
 def _is_git_checkout(path: Path) -> bool:
