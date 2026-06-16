@@ -514,6 +514,23 @@ def test_collect_case_records_koji_candidate_builds(
     )
 
 
+def test_collect_case_auto_caches_package_distgit_when_cache_is_requested(
+    tmp_path: Path,
+) -> None:
+    request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-12345",
+        package="rpm-ostree",
+        network_mode="replay_only",
+        mock_repo_cache=tmp_path / "mock-repos",
+    )
+
+    assert collect_case_module._auto_source_project_urls(  # noqa: SLF001
+        request,
+        collect_case_module.FetchedEvidence(),
+    ) == ("https://gitlab.com/redhat/centos-stream/rpms/rpm-ostree",)
+
+
 def test_collect_case_rejects_network_denied_external_records(tmp_path: Path) -> None:
     with pytest.raises(CollectCaseError, match="network_denied cases must not declare"):
         collect_case(
@@ -1671,6 +1688,86 @@ def test_collect_case_caches_lookaside_sources_from_prefixed_mock_repo(
     assert cached_archive.read_bytes() == archive_body
     assert result.warnings == []
 
+
+def test_collect_case_caches_gitlab_project_source_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    gitconfig_path = tmp_path / "gitconfig"
+    gitconfig_path.write_text(
+        "\n".join(
+            [
+                f'[url "{source_repo.resolve().as_uri()}"]',
+                "\tinsteadOf = https://gitlab.com/group/pkg.git",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig_path))
+
+    mr_url = "https://gitlab.com/group/pkg/-/merge_requests/7"
+    rules_url = (
+        "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frules%2Fdnsmasq"
+        "/repository/files/AGENTS.md/raw?ref=main"
+    )
+    responses = {
+        "https://gitlab.com/api/v4/projects/group%2Fpkg/merge_requests/7": {
+            "iid": 7,
+            "target_branch": "c9s",
+            "web_url": mr_url,
+            "diff_refs": {
+                "base_sha": pre_fix_ref,
+                "head_sha": "head123",
+                "start_sha": pre_fix_ref,
+            },
+        },
+        "https://gitlab.com/api/v4/projects/group%2Fpkg/merge_requests/7/commits": [
+            {"id": "abc123", "title": "Fix CVE"}
+        ],
+        "https://gitlab.com/api/v4/projects/group%2Fpkg/merge_requests/7/changes": {
+            "changes": [{"old_path": "source.c", "new_path": "source.c"}]
+        },
+        f"{mr_url}.patch": "diff --git a/source.c b/source.c\n",
+        rules_url: "Follow dnsmasq maintainer rules.\n",
+    }
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(responses, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            gitlab_mr_url=mr_url,
+        )
+    )
+
+    upstream_dir = tmp_path / "benchmark_cases" / "source_cache" / "RHEL-12345" / "upstream"
+    cached_repos = list(upstream_dir.iterdir())
+    assert len(cached_repos) == 1
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repos[0]}",
+            "cat-file",
+            "-e",
+            f"{pre_fix_ref}^{{commit}}",
+        ],
+        check=True,
+    )
+    assert result.warnings == []
+    assert seen_urls == list(responses)
 
 
 def test_collect_case_overwrite_replaces_existing_files(tmp_path: Path) -> None:
