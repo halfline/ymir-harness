@@ -1,11 +1,25 @@
+from __future__ import annotations
+
 import base64
 import copy
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
 import tempfile
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, urlopen
+
+import yaml
 
 from ymir_harness.jira_replay import derive_as_of_from_comments, filter_comments_as_of
 from ymir_harness.koji_replay import (
@@ -209,9 +223,22 @@ class CollectCaseResult:
         }
 
 
+def collect_case(request: CollectCaseRequest) -> CollectCaseResult:
+    _validate_request(request, require_metadata=True)
+    cases_dir = request.cases_dir.resolve()
+    result = CollectCaseResult(case_id=request.case_id, cases_dir=cases_dir)
     fetched = _fetch_evidence(request, result)
-    _write_jira_fixtures(cases_dir, request, fetched, result)
+    cases_dir.mkdir(parents=True, exist_ok=True)
 
+    _write_cases_manifest(cases_dir / "cases.yaml", request.case_id, request.overwrite, result)
+    _write_expected(cases_dir, request, fetched, result)
+    _write_jira_fixtures(cases_dir, request, fetched, result)
+    _write_mock_data(cases_dir, request, fetched, result)
+    _write_web_cache(cases_dir, request, fetched, result)
+    _write_source_cache(cases_dir, request, fetched, result)
+
+    _append_completion_warnings(request, fetched, result)
+    return result
 
 def parse_key_value_items(items: Sequence[str], *, option_name: str) -> dict[str, str]:
     parsed = {}
@@ -1536,17 +1563,11 @@ def _effective_patch_urls(
         urls.append(fetched.gitlab_patch_url)
     return tuple(dict.fromkeys(urls))
 
-
-    historical_urls = _historical_result_patch_urls(_evidence_comments(request, fetched))
-    if historical_urls:
-        valid_evidence_urls = set(fetched.jira_patch_urls)
-        if valid_evidence_urls:
-            filtered = [url for url in historical_urls if url in valid_evidence_urls]
-            if filtered:
-                return tuple(filtered)
-        return tuple(historical_urls)
-
-
+def _expected_patch_urls(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> tuple[str, ...]:
+    return _effective_patch_urls(request, fetched)
 
 def _infer_backport_source(resolution: str | None, patch_urls: Sequence[str]) -> str | None:
     if resolution != "backport" or not patch_urls:
