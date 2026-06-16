@@ -1,161 +1,157 @@
 # Ymir Harness
 
-Ymir is the Packit AI Workflows GitHub project
-([packit/ai-workflows](https://github.com/packit/ai-workflows)), mounted in
-this repository as the `ui-workflows` submodule for benchmark runs. It is an
-AI-powered RHEL package maintenance automation system, formerly known as Jotnar,
-that helps work through Jira issues and package-maintenance tasks.
+Replay Ymir changes against known package-maintenance cases before they reach
+real Jira issues, dist-git branches, or release machinery.
 
-The Ymir project contains two related workflow families. The packaging workflow
-triages incoming RHEL Jira issues, decides whether they are candidates for
-automation, and can prepare dist-git merge requests for rebases and backports.
-The testing and release workflow picks up after a merge request is merged and a
-candidate build exists, helping move the issue, build, and erratum through
-validation toward release. Ymir agents use the BeeAI orchestration framework,
-model access through Vertex AI in the current deployment, and service
-integrations such as Jira, GitLab dist-git, and build-system tooling. Because
-the workflows are AI-assisted, their output still needs review; incorrect patch
-selection, incomplete backports, build failures, and inaccurate generated text
-are real risks.
+Ymir Harness is the benchmark layer around the
+[Packit AI Workflows](https://github.com/packit/ai-workflows) project. The Ymir
+agents live in this repository as the `ui-workflows` submodule. The harness
+gives those agents a controlled place to run:
 
-Ymir Harness is the benchmark and replay layer around those agents. It is meant
-to answer a practical question: did this Ymir change make the agent better or
-worse on known cases? To do that, the harness validates case fixtures, runs
-configured Ymir workflows in a no-write replay environment, captures structured
-actual results, scores those results against expected outcomes, and compares
-benchmark runs with field-level detail.
+- fixture data instead of live, drifting service state
+- no-write guardrails around Jira, GitLab, build systems, and shell tools
+- replayed web, Jira, Git, and source inputs
+- deterministic scoring against expected outcomes
+- reports that make candidate-vs-baseline changes reviewable
 
-The harness is separate from the Ymir agents themselves. It provides:
+The point is simple: when Ymir changes, we should be able to say which known
+cases got better, which got worse, and why.
 
-- Case fixtures that describe expected outcomes, Jira evidence, web responses,
-  mock repos, source cache, and reference patches.
-- Replay controls that keep benchmark runs offline or explicitly bounded to
-  recorded inputs.
-- Workflow adapters for `ymir-triage`, `ymir-backport`, `ymir-rebase`, and
-  `ymir-rebuild`.
-- Scoring reports that compare agent output such as `jira_issue`, resolution,
-  package, target branch, CVEs, patch URLs, touched files, generated artifacts,
-  and replay violations.
-- Run comparison reports that make baseline/candidate changes visible across a
-  case set.
+## Start here
 
-Benchmark replay is offline by default. The harness only checks `pre_fix_ref`
-resolution when a mock fixture points at a local repository path or `file://`
-URL, and it requires `replay_only` cases to declare recorded web-cache files.
-Fixture collection can make explicit read-only Jira and GitLab requests to build
-those offline fixtures when a Jira URL or GitLab MR URL is provided.
+Prerequisites:
 
-## Workflow
-
-Start by installing the harness and the checked-out Ymir submodule:
+- Python 3.13
+- `uv`
+- initialized submodules
+- model credentials only when running live Ymir workflows
+- Jira and GitLab read tokens only when collecting or refreshing fixture evidence
 
 ```bash
+git submodule update --init --recursive
 uv sync
 uv run ymir-harness --version
 ```
 
-For live Ymir runs, export the model credentials for the `CHAT_MODEL` you want
-to use. If `CHAT_MODEL` is unset, the harness defaults to
-`vertexai:claude-sonnet-4-6`.
-
-The default model uses Vertex AI. Authenticate with Google application-default
-credentials, then point the Vertex client at the Claude project:
+Run a fixture-only smoke check. This validates the checked-in synthetic example
+root, then writes the normal report layout for the model-free seed case without
+calling a live agent. The run entry is expected to be `not_run`; this is a
+plumbing check, not an agent benchmark.
 
 ```bash
-gcloud auth application-default login
-export GOOGLE_VERTEX_PROJECT="itpc-gcp-core-pe-eng-claude"
-export GOOGLE_VERTEX_LOCATION="global"
-export JIRA_TOKEN_FILE="/path/to/redhat-jira-api-token"
-export JIRA_EMAIL="you@example.com"
+uv run ymir-harness validate-cases examples/benchmark_cases --workflow ymir-triage
+uv run ymir-harness run \
+  --cases examples/benchmark_cases \
+  --case RHEL-00001 \
+  --variant fixture-smoke \
+  --run-id fixture-smoke
 ```
 
-To run with Gemini instead, set `CHAT_MODEL` and create or copy an API key from
-<https://console.cloud.google.com/apis/credentials> after selecting the
-`packit-automated-packaging` project.
+Reports appear under:
 
-```bash
-export CHAT_MODEL="gemini:gemini-2.5-pro"
-export GEMINI_API_KEY="..."
+```text
+examples/benchmark_cases/reports/
 ```
 
-To turn a completed Jira into a repeatable triage experiment, use
-`prepare-case`. It imports the Jira, writes replay fixtures, runs the selected
-workflow, captures any missing Jira searches or web requests, and repeats until
-the run succeeds or reaches the iteration limit.
-
-Collected replay fixtures live in the `ymir-harness-cases` submodule. Use the
-workflow directory as the cases root:
+Once model credentials are configured, use the real case submodule for a Ymir
+benchmark run:
 
 ```bash
 uv run ymir-harness run \
   --cases ymir-harness-cases/ymir-triage \
   --workflow ymir-triage \
-  --variant baseline
+  --variant baseline \
+  --run-id triage-baseline
 ```
 
+## What this repo is for
+
+Ymir automates RHEL package-maintenance work. Today that includes triage,
+backports, rebases, rebuilds, and the testing/release work that follows from
+those decisions. Those workflows use model calls plus integrations with Jira,
+GitLab dist-git, build tooling, and supporting services.
+
+That is exactly why a harness is needed. A live workflow can produce useful
+work, but it is hard to use as a regression test:
+
+- Jira state changes.
+- Web pages move or disappear.
+- Agents may try writes unless every path is guarded.
+- A passing-looking result can still choose the wrong package, branch, patch,
+  artifact, CVE, or source scope.
+- Model changes can improve one case while quietly regressing another.
+
+Ymir Harness turns those moving pieces into repeatable cases. It does not make
+agent output trusted by default. It makes the output inspectable.
+
+## The benchmark loop
+
+Most work follows the same loop:
+
+1. Prepare or update a case fixture.
+2. Run a baseline.
+3. Run a candidate with the Ymir change under test.
+4. Compare the reports.
+5. Promote only the cases whose ground truth has been reviewed.
+
+### 1. Prepare a case
+
+`prepare-case` is the easiest path for a new Jira issue. It can import read-only
+evidence, run the chosen workflow, capture missing replay inputs, and repeat
+until the case is replayable or the iteration limit is reached.
+
 ```bash
+export JIRA_TOKEN_FILE="/path/to/redhat-jira-api-token"
+export JIRA_EMAIL="you@example.com"
+export GITLAB_TOKEN="..."
+
 uv run ymir-harness prepare-case \
-  --cases examples/benchmark_cases \
+  --cases ymir-harness-cases/ymir-triage \
   --case RHEL-12345 \
   --jira-url https://redhat.atlassian.net/browse/RHEL-12345 \
   --jira-token-file "$JIRA_TOKEN_FILE" \
   --jira-email "$JIRA_EMAIL" \
   --mock-repo-cache .cache/mock-repos \
   --workflow ymir-triage \
-  --variant baseline \
-  --run-id RHEL-12345-baseline \
+  --variant prepare \
+  --run-id RHEL-12345-prepare \
   --max-iterations 3 \
   --overwrite \
   --json > prepare.json
 ```
 
-Inspect `prepare.json` first. Its `status` shows whether preparation succeeded,
-hit the iteration limit, or stopped on a capture problem. The last iteration's
-`run.run_json` points at the final report.
+Read `prepare.json` before trusting the fixture. The status tells you whether
+preparation succeeded, stopped on validation, hit the iteration limit, or failed
+while capturing evidence.
 
-```bash
-python -m json.tool prepare.json
-RUN_DIR="$(
-  python - <<'PY'
-import json
-from pathlib import Path
+For Jira Cloud instances such as `redhat.atlassian.net`, create an Atlassian API
+token from <https://id.atlassian.com/manage-profile/security/api-tokens>. Select
+`Create API token`, give it a descriptive name, choose an expiration date, copy
+the token, and save it somewhere outside the repository. Point
+`JIRA_TOKEN_FILE` at that file and set `JIRA_EMAIL` to the Atlassian account
+email for the token. The harness sends Jira credentials as Basic auth when
+`JIRA_EMAIL` is set; without an email, it treats `JIRA_TOKEN` or the token file
+as a bearer token.
 
-payload = json.load(open("prepare.json", encoding="utf-8"))
-print(Path(payload["iterations"][-1]["run"]["run_json"]).parent)
-PY
-)"
-python -m json.tool "$RUN_DIR/run.json"
-python -m json.tool "$RUN_DIR/repeat-1/actual-results/RHEL-12345.actual.json"
-```
+GitLab evidence collection uses `GITLAB_TOKEN` by default. That token is needed
+when `collect-case`, `prepare-case`, or `capture-missing` fetches GitLab merge
+request metadata, commits, changes, patches, or other recorded GitLab responses.
+Use `--gitlab-token-env NAME` if the token is stored in a different environment
+variable.
 
-After the fixture is prepared, rerun it without collecting new inputs:
+For GitLab.com, create a personal access token from your avatar menu:
+`Edit profile` -> `Access` -> `Personal access tokens` -> `Generate token`.
+Give it an expiration date and the narrow read scopes the harness needs:
+`read_api` for GitLab API evidence and `read_repository` for private repository
+reads or Git-over-HTTPS fixture collection. Save the token when GitLab displays
+it; it is not shown again.
 
-```bash
-uv run ymir-harness run \
-  --cases examples/benchmark_cases \
-  --case RHEL-12345 \
-  --workflow ymir-triage \
-  --variant baseline \
-  --run-id RHEL-12345-rerun
-```
-
-To test a Ymir change, check out the desired revision in `ui-workflows`, run
-`uv sync`, and run the same case with a different `--variant` and `--run-id`.
-Then compare the run reports:
-
-```bash
-uv run ymir-harness compare-results \
-  examples/benchmark_cases/reports/runs/RHEL-12345-rerun/run.json \
-  examples/benchmark_cases/reports/runs/RHEL-12345-candidate/run.json \
-  --markdown-output examples/benchmark_cases/reports/RHEL-12345-comparison.md
-```
-
-Use `collect-case` directly when you only want to import fixture data and do
-not want to run Ymir yet:
+When you only want to import fixture data and skip the workflow run, use
+`collect-case` directly:
 
 ```bash
 uv run ymir-harness collect-case \
-  --cases examples/benchmark_cases \
+  --cases ymir-harness-cases/ymir-triage \
   --case-id RHEL-12345 \
   --jira-url https://redhat.atlassian.net/browse/RHEL-12345 \
   --jira-token-file "$JIRA_TOKEN_FILE" \
@@ -164,357 +160,295 @@ uv run ymir-harness collect-case \
   --overwrite
 ```
 
-Validate fixture structure before relying on a case:
+New collected cases default to `case_status=quarantined`. That is intentional:
+fixtures should not count toward headline results until someone has reviewed
+the expected outcome.
+
+### 2. Run the baseline
+
+Live workflow runs need model credentials. The default model is
+`vertexai:claude-sonnet-4-6`, so Vertex users normally need:
 
 ```bash
-uv run ymir-harness validate-cases examples/benchmark_cases --workflow ymir-triage
+gcloud auth application-default login
+export GOOGLE_VERTEX_PROJECT="your-vertex-project"
+export GOOGLE_VERTEX_LOCATION="global"
 ```
 
-Use `--provenance KEY=VALUE` with `run` or `score-results` to add explicit
-run metadata such as `agentic_skills_sha`, `container_image_digest`, or model
-configuration.
-
-`collect-case` scaffolds replayable fixture files from either local evidence or
-read-only fetches. Pass `--jira-url` or `--jira-base-url` to import a completed
-Jira issue. When omitted, `case_type`, `resolution`, `package`, `fix_version`,
-CVEs, and `expected_basis` are derived from Jira fields, Ymir/Jotnar result
-labels, and agent result comments when possible. Patch URLs and GitLab MRs found
-in result comments are recorded into replay evidence but removed from
-`starting-issue.json`. Pass `--gitlab-mr` to fetch GitLab MR
-metadata, commits, changes, and patch content into `web_cache/CASE_ID/`; if no
-MR is passed, a GitLab MR remote link or comment URL in the fetched Jira is used
-automatically.
-When fetched GitLab MR metadata includes `diff_refs.base_sha` and
-`target_branch`, `collect-case` also derives `mock_data` from the MR: the repo
-URL comes from the MR project URL, `pre_fix_ref` comes from the MR base SHA, and
-the branch comes from the MR target branch. If the completed Jira fix version is
-a z-stream name such as `rhel-9.7.z` and the dist-git branch differs,
-`collect-case` writes the corresponding `zstream_override`.
-Supplying `--remote-url`, `--pre-fix-ref`, and `--branch` keeps using the
-manual mock repo metadata instead.
-Use `--mock-repo-cache DIR` to clone or refresh mock repos into a local bare
-repo cache during collection. Cached fixtures keep `remote_url` as the original
-URL for replay rewrites and blocked-network checks, and add `source_url` with
-the local cache path that `run` can clone offline.
-The MR patch is also copied to `mock_data/*/reference_patches/CASE_ID.patch`
-when mock repo metadata is provided and no local `--reference-patch` is
-supplied. Jira fetches use `JIRA_TOKEN` when it is set. Tokens are sent as
-bearer tokens by default; pass `--jira-email` or set `JIRA_EMAIL` /
-`ATLASSIAN_EMAIL` for Atlassian Basic auth, and use `--jira-token-file` when the
-token lives in a file. GitLab fetches use `GITLAB_TOKEN` as a private token when
-it is set. Override environment variable names with `--jira-token-env` or
-`--gitlab-token-env`.
-When `--network-mode` is omitted, `collect-case` keeps Jira-only cases
-`network_denied`, but switches to `replay_only` automatically for replay web
-evidence such as a GitLab MR, `--patch-url`, or `--web-record`.
-For backport cases, `collect-case` also records `backport_source` as
-`upstream`, `distgit`, or `mixed` based on the expected patch URLs. GitHub and
-other external project patches are treated as upstream source backports; Red Hat
-and CentOS Stream dist-git commit patches are treated as dist-git backports.
-
-`collect-case` still accepts pre-collected local files through
-`--jira-issue-json`, `--jira-comments-json`, `--jira-links-json`,
-`--reference-patch`, `--web-record`, and source-cache options. It writes
-`cases.yaml`, `expected/`, `jiras/`, optional `mock_data/`, optional
-`web_cache/`, and optional `source_cache/` entries. New cases default to
-`case_status=quarantined` so they do not enter headline results until reviewed.
-Use `--overwrite` when intentionally regenerating an existing case scaffold.
-Checked-in Jira fixtures stay structured under `jiras/CASE_ID/`; validation
-also verifies they can be materialized into the flat mock shape that Ymir reads.
-`issue.json`, `comments.json`, and `links.json` preserve the completed Jira
-evidence. `starting-issue.json` is a redacted triage starting point that removes
-obvious Ymir result labels, closed status, result comments, and final remote
-links so triage reruns must rederive the answer.
-
-The repository includes a synthetic offline seed fixture under
-`examples/benchmark_cases/`. It is not a historical benchmark case, but it gives
-new users a checked-in fixture layout to validate before adding real cases:
+Gemini runs can use:
 
 ```bash
-ymir-harness validate-cases examples/benchmark_cases/
-ymir-harness run --cases examples/benchmark_cases/ --variant example
+export CHAT_MODEL="gemini:gemini-2.5-pro"
+export GEMINI_API_KEY="..."
+```
+
+Run the baseline against a case root:
+
+```bash
+uv run ymir-harness run \
+  --cases ymir-harness-cases/ymir-triage \
+  --workflow ymir-triage \
+  --variant baseline \
+  --run-id triage-baseline \
+  --provenance agentic_skills_sha="$(git -C ui-workflows rev-parse HEAD)"
+```
+
+The run report is written to:
+
+```text
+ymir-harness-cases/ymir-triage/reports/runs/triage-baseline/run.json
+```
+
+Actual per-case results are written under:
+
+```text
+ymir-harness-cases/ymir-triage/reports/runs/triage-baseline/repeat-1/actual-results/
+```
+
+### 3. Run the candidate
+
+Check out or edit the Ymir revision under `ui-workflows`, then sync so the
+editable dependencies point at the revision you intend to test.
+
+```bash
+git -C ui-workflows checkout <candidate-ref>
+uv sync
+
+uv run ymir-harness run \
+  --cases ymir-harness-cases/ymir-triage \
+  --workflow ymir-triage \
+  --variant candidate \
+  --run-id triage-candidate \
+  --provenance agentic_skills_sha="$(git -C ui-workflows rev-parse HEAD)"
+```
+
+Use `--case RHEL-12345` one or more times to limit a run while iterating.
+
+### 4. Score and compare
+
+`run` scores each case as it executes. To get comparison-friendly aggregate
+reports, score the actual-result directories explicitly:
+
+```bash
+uv run ymir-harness score-results \
+  ymir-harness-cases/ymir-triage \
+  ymir-harness-cases/ymir-triage/reports/runs/triage-baseline/repeat-1/actual-results \
+  --run-id triage-baseline \
+  --variant baseline \
+  --output ymir-harness-cases/ymir-triage/reports/triage-baseline.results.json
+
+uv run ymir-harness score-results \
+  ymir-harness-cases/ymir-triage \
+  ymir-harness-cases/ymir-triage/reports/runs/triage-candidate/repeat-1/actual-results \
+  --run-id triage-candidate \
+  --variant candidate \
+  --output ymir-harness-cases/ymir-triage/reports/triage-candidate.results.json
+
+uv run ymir-harness compare-results \
+  ymir-harness-cases/ymir-triage/reports/triage-baseline.results.json \
+  ymir-harness-cases/ymir-triage/reports/triage-candidate.results.json \
+  --markdown-output ymir-harness-cases/ymir-triage/reports/triage-comparison.md
+```
+
+`compare-results` exits nonzero when a headline case regresses or disappears.
+That makes it suitable for CI gates once the case set is mature enough.
+
+## Case roots
+
+A case root is a directory that contains one workflow's fixtures. For example:
+
+```text
+ymir-harness-cases/ymir-triage/
+  cases.yaml
+  expected/
+  jiras/
+  mock_data/
+  web_cache/
+  source_cache/
+  reports/
+```
+
+The important pieces:
+
+| Path | Role |
+| --- | --- |
+| `cases.yaml` | Optional ordered case list. `run` uses it when no `--case` filter is supplied. |
+| `expected/*.expected.json` | Ground truth: case type, resolution, package, branch or fix version, CVEs, patch URLs, artifacts, and metadata. |
+| `jiras/CASE_ID/` | Structured Jira evidence. `starting-issue.json` is the redacted issue shown to triage replay. |
+| `mock_data/AGENT/CASE_ID.json` | Mock repository metadata for dist-git and implementation workflows. |
+| `web_cache/CASE_ID/` | Recorded HTTP responses plus `manifest.json` for `replay_only` cases. |
+| `source_cache/CASE_ID/` | Upstream source and lookaside inputs for implementation cases. |
+| `reports/` | Validation reports, run reports, actual results, traces, and comparisons. |
+
+The synthetic `examples/benchmark_cases/` root is useful for layout checks. It
+is not a historical Red Hat benchmark case.
+
+## Replay and safety
+
+Benchmark replay is built to let a live model reason over fixed evidence while
+keeping service data and side effects bounded.
+
+Network modes:
+
+| Mode | Meaning |
+| --- | --- |
+| `network_denied` | The case should not perform external fixture-data fetches. External HTTP activity is reported as a replay violation. |
+| `replay_only` | The case may read only URLs declared in `web_cache/CASE_ID/manifest.json`. Recorded responses are served from cache. |
+| `live_non_reproducible` | The case may depend on live data and should not be treated as a deterministic benchmark case. |
+
+During `run`, the harness:
+
+- strips known write credentials and Kerberos paths from the workflow
+  environment
+- forces dry-run flags such as `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`
+- materializes mock repos under the run directory and rewrites configured Git
+  remotes to local paths
+- materializes structured Jira fixtures into the flat mock shape that Ymir reads
+- blocks direct external sockets and unsupported shell download forms in replay
+  modes
+- serves recorded responses to common Python HTTP clients when the URL is in the
+  replay manifest
+- records unsafe operations and replay violations as hard scoring failures
+
+Configured model-provider HTTPS calls are still allowed. The model can run; the
+case evidence should not drift.
+
+## Scoring
+
+Scoring answers one question: did the actual structured output satisfy the
+expected outcome for this fixture?
+
+Hard failure gates:
+
+- `unsafe_operations` is nonempty
+- `replay_violations` is nonempty
+- `unrelated_source_changes` is nonempty
+- a required artifact or required artifact kind is missing
+- the workflow crashes or returns an error field
+
+Deterministic comparisons include:
+
+| Area | Examples |
+| --- | --- |
+| Identity | `case_id`, `jira_issue`, `case_type` |
+| Decision | `resolution`, `affectedness`, `package`, `target_branch`, `fix_version` |
+| Security data | `cve_ids`, `patch_urls`, `fix_sources`, `backport_source` |
+| Implementation scope | `touched_files`, reference-patch touched files, spec patches, changelog entries |
+| Build behavior | `prep_result`, `build_result`, reference-patch parse/apply status |
+| Issue handling | dependency issues and sibling issues |
+| Artifacts | generated files, patch filename patterns, semantic artifact kinds |
+
+Advisory metrics such as runtime, token usage, tool-call count, retry count,
+cost, diff similarity, and LLM judge notes are carried in reports. They do not
+decide pass/fail unless an explicit guardrail, such as a cost cap, says they
+should.
+
+Optional backport judging is available when artifact manifests exist:
+
+```bash
+export YMIR_HARNESS_LLM_JUDGE=true
+export YMIR_HARNESS_LLM_JUDGE_MODEL="$CHAT_MODEL"
+```
+
+The judge writes a `judge_verdict.json` artifact and reports advisory findings
+about patch correctness, RPM spec changes, unrelated changes, completeness, and
+reference-patch similarity.
+
+## Validation
+
+Validate fixtures before treating a case as signal:
+
+```bash
+uv run ymir-harness validate-cases ymir-harness-cases/ymir-triage --workflow ymir-triage
 ```
 
 Validation writes:
 
 ```text
-benchmark_cases/reports/fixture-validation.json
-benchmark_cases/reports/fixture-validation.md
-benchmark_cases/reports/fixture-validation-errors.md
+reports/fixture-validation.json
+reports/fixture-validation.md
+reports/fixture-validation-errors.md
 ```
 
-Pass `--workflow ymir-triage` when validating a triage-only run so validation
-does not require implementation-only source cache or reference patch artifacts.
-For runnable cases, validation checks that an expected `target_branch` or
-`fix_version` is declared by a mock repo `branch` or `zstream_override` value.
-Replay web cache manifests must list expected `patch_urls` in `required_urls`.
-Recorded web cache files must stay under `web_cache/CASE_ID/`.
-`network_denied` cases must not declare expected `patch_urls`.
-`network_denied` cases must not include `web_cache/CASE_ID/manifest.json`.
-Implementation cases must include `source_cache/CASE_ID/` unless the expected
-result sets `requires_source_cache` to `false`.
-Implementation source caches must include `source_cache/CASE_ID/upstream/` with
-a git clone or source archive.
-Upstream source archive files must be readable.
-Implementation source caches must include artifact files under
-`source_cache/CASE_ID/lookaside/`.
-Lookaside artifact files must be readable.
-Expected results may declare `required_source_cache_files` as a list of
-`source_cache/CASE_ID`-relative file paths.
-Expected results may declare `source_cache_checksums` as a mapping from
-`source_cache/CASE_ID`-relative paths to `sha256:<hex>` digests.
-Validation checks those cached files against their declared digests.
-When expected metadata declares `reference_patch_mode`, validation accepts
-`applies`, `scope_only`, or `semantic_reference`.
-Merged MR implementation cases must declare `reference_patch_mode`.
-Merged MR implementation cases must include
-`mock_data/*/reference_patches/CASE_ID.patch`.
-Reference patch files must parse as git patches.
-Validation also requires a touched-file list to be extractable from each
-reference patch.
-When `reference_patch_mode` is `applies`, the reference patch must apply to a
-local mock repo at `pre_fix_ref`.
-It must not reverse-apply to `pre_fix_ref`, which indicates the fix is already
-present.
+Validation catches common benchmark problems before an agent run burns model
+time:
 
-When a runnable case has local or `file://` mock repos in `mock_data/*`, `run`
-materializes those repos under the run directory, checks out `pre_fix_ref`,
-writes a per-case gitconfig with `insteadOf` URL rewrites, exposes that
-gitconfig through `GIT_CONFIG_GLOBAL`, and exports `MOCK_BLOCKED_URLS` for the
-original URLs.
-When a runnable case has structured Jira evidence under `jiras/CASE_ID/`, `run`
-generates flat Ymir Jira mock files under `reports/runs/RUN_ID/repeat-N/jira-mock`
-and points `JIRA_MOCK_FILES` at that generated directory. If
-`starting-issue.json` is present, that redacted issue is what Ymir sees during
-triage replay; the completed Jira evidence remains available only as fixture
-ground truth.
-Live Ymir workflow adapters start a managed MCP gateway when `MCP_GATEWAY_URL`
-is not already set. The managed gateway inherits the generated Jira mock
-directory, mock gitconfig/repo workspace, and replay/cache policy for the case.
-If `MCP_GATEWAY_URL` is set, the harness uses that external gateway instead;
-start external gateways with access to the same fixture paths and policy.
+- missing required metadata
+- invalid schema values
+- inconsistent mock repo branch or fix-version data
+- incomplete replay manifests
+- `network_denied` cases that declare web-cache evidence
+- implementation cases without required source cache inputs
+- reference patches that do not parse, do not apply when they must, or appear
+  already present at `pre_fix_ref`
+- structured Jira fixtures that cannot be materialized into Ymir's mock format
 
-`score-results` reads every `benchmark_cases/expected/*.expected.json` file and
-matches actual outputs named `CASE_ID.actual.json` or `CASE_ID.json` in the
-actual-results directory. It writes aggregate JSON to
-`benchmark_cases/reports/results.json` unless `--output` is provided. Use
-`--run-id`, `--ymir-sha`, and `--variant` to stamp the aggregate report with
-benchmark run metadata.
-Aggregate score reports also include the Ymir Harness version that produced
-the score.
-They include `fixture_checksum` for fixture inputs under `cases.yaml`,
-`expected/`, `jiras/`, `mock_data/`, `web_cache/`, and `source_cache/`.
-Non-headline aggregate entries include `headline_reason` when case metadata
-excludes them from headline correctness counts.
+Pass `--workflow ymir-triage` for triage-only validation. That keeps validation
+focused on triage requirements and avoids requiring implementation-only source
+cache artifacts.
 
-Scoring treats any `unsafe_operations` entries in an actual result as a hard
-failure gate. Use that field for blocked write attempts such as Jira mutation,
-GitLab push, or build-system submission calls captured during a run.
-The `run` command also derives `unsafe_operations` from actual-result
-`events`, `tool_events`, `tool_calls`, or `trace` entries before scoring.
+## Command map
 
-Scoring also treats any `replay_violations` entries as a hard failure gate. Use
-that field for unrecorded external fetches or replay cache misses reported by
-the replay layer. Replay violation detection can derive those entries from HTTP
-tool events and shell `curl` or `wget` commands whose target URLs are absent
-from the recorded replay URL set.
-For `replay_only` cases, `run` reads `web_cache/CASE_ID/manifest.json`, exposes
-the manifest path and recorded URL list in the case environment, and derives
-`replay_violations` from actual-result event traces. For `network_denied`
-cases, any external HTTP URL in the event trace is reported as a replay
-violation.
-During `run`, executors are also wrapped in a runtime boundary guard. The guard
-blocks unsafe subprocess commands, blocks external subprocess URLs in
-`network_denied` and `replay_only` modes, blocks direct external socket
-connections, and serves recorded responses from `web_cache` to common Python
-HTTP clients (`urllib`, `requests`, and `aiohttp`) when the URL is declared in
-the replay manifest. Recorded shell `curl`/`wget` downloads made through
-`subprocess.run(..., stdout=PIPE)` are satisfied from cache; unsupported shell
-download forms are blocked instead of falling through to live network.
-Configured model-provider HTTPS calls are allowed so live agents can run while
-fixture and service data still comes from replay inputs.
+| Command | Use it when |
+| --- | --- |
+| `validate-cases` | You want to know whether a case root is structurally safe to run. |
+| `collect-case` | You want to scaffold fixture files from Jira, GitLab, local files, or recorded web responses. |
+| `prepare-case` | You want the collect-run-capture loop for one replayable case. |
+| `capture-missing` | A run found replay misses and you want to capture allowed read-only evidence. |
+| `run` | You want to validate fixtures, execute a workflow, write actual results, and score each case. |
+| `score-result` | You want to compare one expected JSON file with one actual JSON file. |
+| `score-results` | You want an aggregate score report for a directory of actual results. |
+| `compare-results` | You want a baseline-vs-candidate delta report, optionally in Markdown. |
 
-Expected results may declare `required_artifacts`. Scoring compares that list
-with `generated_artifacts` in the actual result and fails the case when any
-required artifact is missing.
-Expected implementation results may also declare `required_artifact_kinds` with
-semantic artifact names such as `commit_diff`, `spec_file`, `patch_files`,
-`srpm`, `backport_result`, or `log_result`. Scoring checks the captured artifact
-manifest when present and falls back to generated artifact filenames. Expected
-backport results may declare `patch_file_patterns` or `patch_file_pattern` to
-require generated patch filenames containing specific substrings.
-Workflow adapters also expose `YMIR_BENCHMARK_ARTIFACT_DIR` and merge generated
-artifacts, touched files, spec patch declarations, changelog entries, and
-unrelated source change diagnostics from returned workflow payloads, workflow
-state, and files written to that artifact directory.
+All commands expose `--help`:
 
-Expected results may declare `fix_sources`. Scoring compares that list with
-`fix_sources` in the actual result to check required upstream commits,
-advisories, or other declared fix origins.
+```bash
+uv run ymir-harness run --help
+```
 
-Expected backport results may declare `backport_source` as `upstream`,
-`distgit`, or `mixed`. Scoring compares it with the actual result when present,
-and can infer the actual value from patch URLs when the workflow does not emit
-the field explicitly.
+## Provenance and budgets
 
-Expected results may declare `dependency_issues`. Scoring compares that list
-with `dependency_issues` in the actual result to check required dependency
-issue handling.
+Use `--provenance KEY=VALUE` on `run`, `prepare-case`, or `score-results` to
+record information reviewers need later, such as:
 
-Expected results may declare `sibling_issues`. Scoring compares that list with
-`sibling_issues` in the actual result to check required sibling issue
-handling.
+- `agentic_skills_sha`
+- `container_image_digest`
+- prompt configuration
+- model settings
 
-Expected results may declare `affectedness`. Scoring compares that value with
-`affectedness` in the actual result and accepts boolean or token values such as
-`affected` and `not_affected`.
+The harness also records recognized environment values such as `CHAT_MODEL`,
+`REASONING_EFFORT`, `BEEAI_MAX_ITERATIONS`, `BENCHMARK_PROMPT_CONFIG`, and
+`BENCHMARK_MODEL_SETTINGS`.
 
-Expected results may declare `touched_files`. Scoring compares that file list
-with `touched_files` or `changed_files` in the actual result and fails on
-missing or unexpected paths.
+Useful run controls:
 
-Scoring expects `unrelated_source_changes` in an actual result to be empty. Use
-that field for source paths changed outside the expected implementation scope.
+```bash
+export BENCHMARK_MAX_ITERATIONS_OVERRIDE=8
+export BENCHMARK_MAX_COST_PER_RUN=5.00
+export BENCHMARK_COST_ALERT_THRESHOLD=2.50
+```
 
-Expected results may declare `spec_patches`. Scoring compares that list with
-`spec_patches` in the actual result to check expected RPM spec patch
-declarations.
+`BENCHMARK_MAX_COST_PER_RUN` marks over-budget cases as `timeout`.
+`BENCHMARK_COST_ALERT_THRESHOLD` records a warning without failing the case.
 
-Expected results may declare `changelog_entries`. Scoring compares that list
-with `changelog_entries` in the actual result to check Jira, CVE, or NVR
-references captured from the spec changelog.
-
-Expected results may declare `build_result`. Scoring compares that token with
-`build_result` in the actual result to check local prep or build outcomes for
-implementation cases.
-
-Expected results may declare `prep_result`. Scoring compares that token with
-`prep_result` in the actual result to check local preparation outcomes before
-implementation cases build.
-
-Expected results may declare `reference_patch_parse_status`. Scoring compares
-that token with `reference_patch_parse_status` in the actual result to check
-whether the reference patch parsed as expected.
-
-Expected results may declare `reference_patch_apply_status`. Scoring compares
-that token with `reference_patch_apply_status` in the actual result to check
-whether the reference patch applied as expected.
-
-Actual results may include advisory diagnostics such as `runtime_seconds`,
-`token_usage`, `iteration_count`, `tool_call_count`, `retry_count`,
-`total_cost_usd`, `diff_similarity`, `rationale_quality`, or
-`llm_judge_notes`. Scoring reports carry these as `advisory_metrics` without
-using them for pass/fail status.
-Set `YMIR_HARNESS_LLM_JUDGE=true` or `RUN_LLM_JUDGE=true` to run the optional
-backport LLM judge when artifact manifests are available. The judge uses
-`YMIR_HARNESS_LLM_JUDGE_MODEL`, `LLM_JUDGE_MODEL`, or `CHAT_MODEL`, writes a
-`judge_verdict.json` artifact, and evaluates patch correctness, RPM spec
-changes, unrelated changes, completeness, and reference-patch similarity/scope.
-
-Expected results may declare `alternate_acceptable_outcomes` as a list of
-partial expected-result overrides. If the primary expected result fails,
-scoring tries each alternate and accepts the first deterministic pass while
-recording an `alternate_acceptable_outcome` metric.
-
-Runner reports use `run_id`, `variant`, optional `ymir_sha`,
-`harness_version`, `fixture_checksum`, `features`, and `repeat` metadata. Each
-case entry includes `case_id`, `case_type`, `status`, `repetition`, optional
-`expected_path`, optional `actual_path`, optional `score`, optional
-`runtime_seconds`, and optional `reason`. Case status values are `not_run`,
-`passed`, `failed`, `timeout`, `skipped`, and `unsupported`.
-The default `run` command writes validation reports first, then writes
-`benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
-Without `--json`, it also prints a concise status line and any available
-runtime, token, tool-call, and cost metrics.
-Without `--workflow`, it does not invoke Ymir workflows, so each runnable case
-repetition is marked `not_run`.
-Use `--workflow ymir-triage` to call Ymir's triage `run_workflow()` directly for
-each runnable case. The runner applies the per-case no-write environment,
-writes the returned structured triage result to the reserved actual result
-path, scores it against the expected result, and records the score in the run
-entry. A deterministic score mismatch marks the run entry failed.
-Use `prepare-case` for fixture preparation loops. It optionally imports the
-case first when `--jira-url`, `--jira-base-url`, or `--gitlab-mr` is supplied,
-then runs the selected workflow, captures missing replay evidence from the run
-artifacts, and repeats until the run succeeds, no new evidence is captured, or
-`--max-iterations` is reached. Each iteration writes a normal run report under
-`benchmark_cases/reports/runs/RUN_ID-iter-N/`.
-Live workflow adapters install Ymir from the checked-out `ui-workflows`
-submodule during `uv sync`. To benchmark a different Ymir revision, check out
-that revision inside `ui-workflows`, run `uv sync`, and commit the updated
-submodule pointer.
-Use `--workflow ymir-backport` to call Ymir's backport `run_workflow()` for
-implementation cases. The executor reads expected-result fields for the
-package, target branch, patch sources, CVE, justification, and fix version,
-then writes a normalized backport actual result with build status, backport
-status, errors, and generated artifacts for scoring.
-Use `--workflow ymir-rebase` to call Ymir's rebase `run_workflow()` for
-implementation cases. The executor reads expected-result fields for the
-package, target branch, target version, Jira issue, and justification, then
-writes a normalized rebase actual result with build status, rebase status,
-errors, generated artifacts, and touched files for scoring.
-Use `--workflow ymir-rebuild` to call Ymir's rebuild `run_workflow()` for
-implementation cases. The executor reads expected-result fields for the
-package, target branch, Jira issue, justification, dependency issue,
-dependency component, sibling issues, and consolidation summary, then writes a
-normalized rebuild actual result with build status, rebuild status, errors,
-merge request URL, dependency fields, and sibling issue fields for scoring.
-Programmatic runner integrations can pass a case executor to receive resolved
-case metadata, the reserved actual result path, enabled feature flags, and the
-per-case no-write environment before returning a run status.
-Executors may return an `actual_result` payload for the runner to write as JSON
-at the reserved actual result path.
-If the executor raises, the runner records a failed case entry with the reserved
-actual result path and the exception reason.
-Workflow adapters start from a no-write environment profile that forces
-`DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN`, disables auto-chaining, and strips
-known write credentials and Kerberos keytab paths from the process environment.
-Default live Ymir workflow adapters use `vertexai:claude-sonnet-4-6` when
-`CHAT_MODEL` is not set. Model provider credentials still need to come from
-the user environment. For the default Vertex Claude model, provide Google
-application-default credentials plus `GOOGLE_VERTEX_PROJECT` and
-`GOOGLE_VERTEX_LOCATION`. For Gemini models, provide `GEMINI_API_KEY`.
-Run reports include a `provenance` object populated from explicit
-`--provenance` entries and recognized environment variables such as
-`AGENTIC_SKILLS_SHA`, `AGENTIC_SKILLS_CHECKSUM`, `CONTAINER_IMAGE_DIGEST`,
-`CHAT_MODEL*`, `REASONING_EFFORT`, `BEEAI_MAX_ITERATIONS`,
-`BENCHMARK_PROMPT_CONFIG`, and `BENCHMARK_MODEL_SETTINGS`.
-Set `BENCHMARK_MAX_ITERATIONS_OVERRIDE` to pass a lower
-`BEEAI_MAX_ITERATIONS` value into each workflow environment. Set
-`BENCHMARK_MAX_COST_PER_RUN` to mark cases whose `total_cost_usd` exceeds the
-cap as `timeout`. Set `BENCHMARK_COST_ALERT_THRESHOLD` to record a run entry
-warning when a case exceeds an advisory cost threshold without exceeding the
-hard cap.
-Unsafe-operation detection currently classifies git push attempts, Jira write
-attempts, GitLab write attempts, Errata write attempts, Testing Farm
-submissions, GreenWave mutations, ResultsDB mutations, and `rhpkg` lookaside
-upload attempts from tool events. It also classifies `brew build`, `koji build`,
-`copr build`, and `konflux build` submissions.
-When `cases.yaml` is present, `run` uses it as the default case list. It accepts
-a top-level list of case ids or a `cases:` list containing case ids or objects
-with `case_id`.
-Use `--case CASE_ID` more than once to limit a run report to selected cases.
-Runnable entries reserve `actual_path` under
-`benchmark_cases/reports/runs/RUN_ID/repeat-N/actual-results/CASE_ID.actual.json`.
-
-`compare-results` reads two aggregate score reports and emits a per-case delta
-table in JSON. Use `--markdown-output` to also write a human-readable comparison
-report. A headline regression or missing candidate case returns a nonzero exit
-status.
-Comparison output carries `headline_reason` for non-headline cases when the
-aggregate inputs provide it.
-When score reports carry `total_cost_usd` advisory metrics, comparison output
-adds baseline cost, candidate cost, and cost delta fields. Markdown comparison
-tables include matching cost columns only when cost data is present.
-When comparison inputs include repeated case entries, `compare-results` groups
-them by `case_id`, reports repetition counts and stable/flaky status, and uses
-per-case mean runtime, token count, tool-call count, and cost values for
-candidate-minus-baseline deltas.
-
-## Development
+## Developing
 
 ```bash
 uv sync
+uv run ruff format --check src tests
+uv run ruff check
 uv run pytest
 uv run ymir-harness --version
 ```
+
+Use the local patterns already in the codebase:
+
+- keep validation, replay, scoring, and workflow adapters separate
+- prefer explicit structured records over loose dictionaries
+- keep benchmark behavior deterministic for the same fixtures and actual output
+- make new fixture requirements visible in validation before relying on them in
+  scoring or reports
+
+## License
+
+MIT. See [LICENSE](LICENSE).
