@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import ymir_harness.llm_judge as judge_module
 import ymir_harness.ymir_workflows as workflow_module
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseRequest
 from ymir_harness.ymir_workflows import (
@@ -1434,6 +1435,108 @@ def test_ymir_backport_executor_captures_dirty_spec_referenced_patch(
     assert manifest["touched_files"] == ["dnsmasq.spec", "fix.patch"]
     assert manifest["patch_touched_files"] == ["source.c"]
     assert manifest["spec_patches"] == ["Patch0002: fix.patch"]
+
+
+def test_ymir_backport_executor_records_llm_judge_advisory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts = []
+
+    async def fake_run_judge_model(model_name: str, prompt: str) -> str:
+        prompts.append((model_name, prompt))
+        return json.dumps(
+            {
+                "passed": True,
+                "reasoning": "Patch and spec match the reference.",
+            }
+        )
+
+    monkeypatch.setattr(judge_module, "_run_judge_model", fake_run_judge_model)
+    repo_path = tmp_path / "dist-git"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ymir-harness@example.invalid"],
+        cwd=repo_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Ymir Harness"],
+        cwd=repo_path,
+        check=True,
+    )
+    spec_path = repo_path / "dnsmasq.spec"
+    spec_path.write_text("Name: dnsmasq\nVersion: 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "dnsmasq.spec"], cwd=repo_path, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, check=True)
+
+    spec_path.write_text("Name: dnsmasq\nVersion: 1\nPatch0001: fix.patch\n", encoding="utf-8")
+    (repo_path / "fix.patch").write_text(_source_patch_text(), encoding="utf-8")
+    subprocess.run(["git", "add", "dnsmasq.spec", "fix.patch"], cwd=repo_path, check=True)
+    subprocess.run(["git", "commit", "-m", "backport"], cwd=repo_path, check=True)
+
+    artifact_dir = tmp_path / "artifacts" / "RHEL-12345"
+    request = _request(
+        tmp_path,
+        environment={
+            "DRY_RUN": "true",
+            "YMIR_BENCHMARK_ARTIFACT_DIR": str(artifact_dir),
+            "YMIR_HARNESS_LLM_JUDGE": "true",
+            "YMIR_HARNESS_LLM_JUDGE_MODEL": "fake:model",
+        },
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+        },
+    )
+    (request.cases_dir / "mock_data" / "triage" / "reference_patches").mkdir(parents=True)
+    (
+        request.cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch"
+    ).write_text(_source_patch_text(), encoding="utf-8")
+
+    async def workflow(**_kwargs):
+        return _State(
+            package="dnsmasq",
+            local_clone=repo_path,
+            backport_result=_BackportResult(
+                {
+                    "success": True,
+                    "status": "built",
+                }
+            ),
+        )
+
+    executor = make_ymir_backport_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(request)
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    assert execution.actual_result["llm_judge_passed"] is True
+    assert execution.actual_result["llm_judge_notes"] == "Patch and spec match the reference."
+    assert execution.actual_result["llm_judge_artifact"] == str(artifact_dir / "judge_verdict.json")
+    assert (
+        str(artifact_dir / "judge_verdict.json") in execution.actual_result["generated_artifacts"]
+    )
+    assert prompts
+    assert prompts[0][0] == "fake:model"
+    assert "reference patch" in prompts[0][1]
+    assert "fix.patch" in prompts[0][1]
+    verdict = json.loads((artifact_dir / "judge_verdict.json").read_text(encoding="utf-8"))
+    assert verdict["passed"] is True
+    assert verdict["reasoning"] == "Patch and spec match the reference."
 
 
 def test_ymir_rebase_executor_runs_workflow_with_expected_inputs(
