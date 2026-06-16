@@ -5,26 +5,45 @@ import io
 import json
 import os
 import shlex
+import socket
 import subprocess
+from contextvars import ContextVar
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlparse
+from urllib.request import Request
 
 from ymir_harness.replay import (
     ReplayCache,
     ReplayCacheError,
+    ReplayResponse,
     canonicalize_replay_url,
+    request_url,
 )
 from ymir_harness.safety import (
     detect_replay_violations,
     detect_unsafe_command,
+    detect_unsafe_http_request,
 )
 
 
 class BenchmarkBoundaryViolation(RuntimeError):
     """Raised when a benchmark run attempts forbidden I/O."""
+
+
+_MODEL_SOCKET_PASSTHROUGH = ContextVar("ymir_harness_model_socket_passthrough", default=False)
+MODEL_PROVIDER_HOSTS = {
+    "anthropic": ("api.anthropic.com",),
+    "gemini": ("generativelanguage.googleapis.com",),
+    "openai": ("api.openai.com",),
+    "vertexai": (
+        "aiplatform.googleapis.com",
+        "oauth2.googleapis.com",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +59,8 @@ def enforce_benchmark_boundaries(environment: Mapping[str, str]) -> Iterator[Non
     replay_cache = _replay_cache(environment)
     recorded_urls = _recorded_urls(environment, replay_cache)
     mock_git_urls = _mock_git_urls(environment)
+    model_hosts = _model_provider_hosts(environment)
+    active_network_guard = network_mode in {"replay_only", "network_denied"}
 
     originals = _PatchState.capture()
     try:
@@ -51,6 +72,11 @@ def enforce_benchmark_boundaries(environment: Mapping[str, str]) -> Iterator[Non
             recorded_urls,
             mock_git_urls,
         )
+        if active_network_guard:
+            _patch_socket(originals)
+            _patch_urllib(originals, network_mode, replay_cache, model_hosts)
+            _patch_requests(originals, network_mode, replay_cache, model_hosts)
+            _patch_aiohttp(originals, network_mode, replay_cache, model_hosts)
         yield
     finally:
         originals.restore()
@@ -58,20 +84,61 @@ def enforce_benchmark_boundaries(environment: Mapping[str, str]) -> Iterator[Non
 
 class _PatchState:
     def __init__(self) -> None:
+        self.socket_connect = socket.socket.connect
+        self.socket_connect_ex = socket.socket.connect_ex
         self.subprocess_run = subprocess.run
         self.subprocess_popen = subprocess.Popen
         self.asyncio_create_subprocess_exec = asyncio.create_subprocess_exec
         self.asyncio_create_subprocess_shell = asyncio.create_subprocess_shell
+        self.urllib_urlopen = None
+        self.requests_request = None
+        self.aiohttp_request = None
+        self.requests_session = None
+        self.aiohttp_client_session = None
 
     @classmethod
     def capture(cls) -> "_PatchState":
-        return cls()
+        state = cls()
+        import urllib.request
+
+        state.urllib_urlopen = urllib.request.urlopen
+
+        try:
+            import requests.sessions  # type: ignore[import-not-found]
+        except ImportError:
+            pass
+        else:
+            state.requests_session = requests.sessions.Session
+            state.requests_request = requests.sessions.Session.request
+
+        try:
+            import aiohttp  # type: ignore[import-not-found]
+        except ImportError:
+            pass
+        else:
+            state.aiohttp_client_session = aiohttp.ClientSession
+            state.aiohttp_request = aiohttp.ClientSession._request
+
+        return state
 
     def restore(self) -> None:
+        socket.socket.connect = self.socket_connect
+        socket.socket.connect_ex = self.socket_connect_ex
         subprocess.run = self.subprocess_run
         subprocess.Popen = self.subprocess_popen
         asyncio.create_subprocess_exec = self.asyncio_create_subprocess_exec
         asyncio.create_subprocess_shell = self.asyncio_create_subprocess_shell
+
+        import urllib.request
+
+        if self.urllib_urlopen is not None:
+            urllib.request.urlopen = self.urllib_urlopen
+
+        if self.requests_session is not None and self.requests_request is not None:
+            self.requests_session.request = self.requests_request
+
+        if self.aiohttp_client_session is not None and self.aiohttp_request is not None:
+            self.aiohttp_client_session._request = self.aiohttp_request
 
 
 def _patch_subprocess(
@@ -248,68 +315,72 @@ class _AsyncReplayProcess:
         replay: _SubprocessReplay,
         kwargs: Mapping[str, Any],
     ) -> None:
-        self.returncode = replay.returncode
-        self._command = command
-        self._replay = replay
-        self._kwargs = kwargs
         stdout_target = kwargs.get("stdout")
         stderr_target = kwargs.get("stderr")
-        self.stdout = _AsyncPipeReader(replay.stdout_body) if stdout_target == subprocess.PIPE else None
-        self.stderr = _AsyncPipeReader(replay.stderr_body) if stderr_target == subprocess.PIPE else None
-        self.stdin = None
-        self.pid = 0
+        stdout_body = replay.stdout_body
+        stderr_body = replay.stderr_body
+        if stderr_target == subprocess.STDOUT:
+            stdout_body += stderr_body
+            stderr_body = b""
 
-    async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
-        return self._replay.stdout_body, self._replay.stderr_body
+        self.args = command
+        self.pid = 0
+        self.returncode = replay.returncode
+        self.stdin = None
+        self.stdout = _AsyncPipeReader(stdout_body) if stdout_target == subprocess.PIPE else None
+        self.stderr = _AsyncPipeReader(stderr_body) if stderr_target == subprocess.PIPE else None
+        self._stdout_body = stdout_body if stdout_target == subprocess.PIPE else None
+        self._stderr_body = stderr_body if stderr_target == subprocess.PIPE else None
+        _write_async_redirect(stdout_target, stdout_body)
+        if stderr_target != subprocess.STDOUT:
+            _write_async_redirect(stderr_target, stderr_body)
+
+    async def communicate(self, input: bytes | None = None) -> tuple[bytes | None, bytes | None]:
+        del input
+        return self._stdout_body, self._stderr_body
 
     async def wait(self) -> int:
-        return self.returncode
+        return int(self.returncode)
 
-    def kill(self) -> None:
-        self.returncode = -9
+    def send_signal(self, signal: int) -> None:
+        self.returncode = -int(signal)
 
     def terminate(self) -> None:
         self.returncode = -15
 
+    def kill(self) -> None:
+        self.returncode = -9
+
 
 class _AsyncPipeReader:
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-        self._pos = 0
+    def __init__(self, body: bytes) -> None:
+        self._stream = io.BytesIO(body)
 
     async def read(self, n: int = -1) -> bytes:
-        if self._pos >= len(self._data):
-            return b""
-        if n < 0:
-            chunk = self._data[self._pos:]
-            self._pos = len(self._data)
-            return chunk
-        chunk = self._data[self._pos:self._pos + n]
-        self._pos += len(chunk)
-        return chunk
+        return self._stream.read(n)
 
     async def readline(self) -> bytes:
-        if self._pos >= len(self._data):
-            return b""
-        idx = self._data.find(b"\n", self._pos)
-        if idx == -1:
-            line = self._data[self._pos:]
-            self._pos = len(self._data)
-        else:
-            line = self._data[self._pos:idx + 1]
-            self._pos = idx + 1
-        return line
+        return self._stream.readline()
+
+    async def readexactly(self, n: int) -> bytes:
+        value = self._stream.read(n)
+        if len(value) != n:
+            raise asyncio.IncompleteReadError(value, n)
+        return value
 
     def at_eof(self) -> bool:
-        return self._pos >= len(self._data)
+        current = self._stream.tell()
+        self._stream.seek(0, io.SEEK_END)
+        end = self._stream.tell()
+        self._stream.seek(current)
+        return current >= end
 
 
 def _write_async_redirect(target: Any, body: bytes) -> None:
-    if target is not None and hasattr(target, "write"):
-        try:
-            target.write(body)
-        except TypeError:
-            pass
+    if target in {None, subprocess.PIPE, subprocess.DEVNULL, subprocess.STDOUT}:
+        return
+    if hasattr(target, "write"):
+        target.write(body)
 
 
 def _check_command(
@@ -516,9 +587,201 @@ def _can_replay_git_failure(
     return replay_cache.git_failure_for_urls(list(urls)) is not None
 
 
+def _patch_socket(originals: _PatchState) -> None:
+    def guarded_connect(sock: socket.socket, address: Any) -> Any:
+        _check_socket_address(address)
+        return originals.socket_connect(sock, address)
+
+    def guarded_connect_ex(sock: socket.socket, address: Any) -> int:
+        _check_socket_address(address)
+        return originals.socket_connect_ex(sock, address)
+
+    socket.socket.connect = guarded_connect
+    socket.socket.connect_ex = guarded_connect_ex
+
+
+def _check_socket_address(address: Any) -> None:
+    if _MODEL_SOCKET_PASSTHROUGH.get():
+        return
+    if not isinstance(address, tuple) or not address:
+        return
+    host = str(address[0])
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return
+    raise BenchmarkBoundaryViolation(f"external network connection blocked: {host}")
+
+
+def _patch_urllib(
+    originals: _PatchState,
+    network_mode: str | None,
+    replay_cache: ReplayCache | None,
+    model_hosts: Sequence[str],
+) -> None:
+    import urllib.request
+
+    def guarded_urlopen(url: str | Request, *args: Any, **kwargs: Any) -> Any:
+        request = url
+        target_url = (
+            request.full_url if isinstance(request, Request) else request_url(url, args, kwargs)
+        )
+        if target_url is None:
+            return originals.urllib_urlopen(url, *args, **kwargs)
+        target_url = canonicalize_replay_url(target_url)
+        method = request.get_method() if isinstance(request, Request) else "GET"
+        _check_http_operation(method, target_url, source="urllib")
+        if (
+            network_mode == "replay_only"
+            and replay_cache is not None
+            and replay_cache.has_url(target_url)
+        ):
+            return replay_cache.open_urllib_response(target_url)
+        if _is_model_provider_url(target_url, model_hosts):
+            with _model_socket_passthrough():
+                return originals.urllib_urlopen(url, *args, **kwargs)
+        if network_mode == "replay_only":
+            raise _replay_miss_http_error(target_url)
+        _raise_network_violation(network_mode, target_url)
+        return originals.urllib_urlopen(url, *args, **kwargs)
+
+    urllib.request.urlopen = guarded_urlopen
+
+
+def _patch_requests(
+    originals: _PatchState,
+    network_mode: str | None,
+    replay_cache: ReplayCache | None,
+    model_hosts: Sequence[str],
+) -> None:
+    if originals.requests_session is None or originals.requests_request is None:
+        return
+
+    def guarded_request(session: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+        target_url = canonicalize_replay_url(url)
+        _check_http_operation(method, target_url, source="requests")
+        if (
+            network_mode == "replay_only"
+            and replay_cache is not None
+            and replay_cache.has_url(target_url)
+        ):
+            import requests  # type: ignore[import-not-found]
+
+            body = replay_cache.read_bytes(target_url)
+            response = requests.Response()
+            response.status_code = replay_cache.status_code(target_url)
+            response.url = target_url
+            response._content = body
+            response.headers.update(replay_cache.response_headers(target_url, body))
+            response.request = requests.Request(method=method, url=target_url).prepare()
+            return response
+        if _is_model_provider_url(target_url, model_hosts):
+            with _model_socket_passthrough():
+                return originals.requests_request(session, method, url, *args, **kwargs)
+        if network_mode == "replay_only":
+            return _replay_miss_requests_response(method, target_url)
+        _raise_network_violation(network_mode, target_url)
+        return originals.requests_request(session, method, url, *args, **kwargs)
+
+    originals.requests_session.request = guarded_request
+
+
+def _patch_aiohttp(
+    originals: _PatchState,
+    network_mode: str | None,
+    replay_cache: ReplayCache | None,
+    model_hosts: Sequence[str],
+) -> None:
+    if originals.aiohttp_client_session is None or originals.aiohttp_request is None:
+        return
+
+    async def guarded_request(
+        session: Any, method: str, url: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        target_url = canonicalize_replay_url(url)
+        _check_http_operation(method, target_url, source="aiohttp")
+        if (
+            network_mode == "replay_only"
+            and replay_cache is not None
+            and replay_cache.has_url(target_url)
+        ):
+            return replay_cache.open_aiohttp_response(target_url)
+        if _is_model_provider_url(target_url, model_hosts):
+            with _model_socket_passthrough():
+                return await originals.aiohttp_request(session, method, url, *args, **kwargs)
+        if network_mode == "replay_only":
+            return ReplayResponse(
+                target_url,
+                _replay_miss_body(target_url),
+                headers=_replay_miss_headers(),
+                status=404,
+            )
+        _raise_network_violation(network_mode, target_url)
+        return await originals.aiohttp_request(session, method, url, *args, **kwargs)
+
+    originals.aiohttp_client_session._request = guarded_request
+
+
+@contextmanager
+def _model_socket_passthrough() -> Iterator[None]:
+    token = _MODEL_SOCKET_PASSTHROUGH.set(True)
+    try:
+        yield
+    finally:
+        _MODEL_SOCKET_PASSTHROUGH.reset(token)
+
+
+def _model_provider_hosts(environment: Mapping[str, str]) -> tuple[str, ...]:
+    model_name = environment.get("CHAT_MODEL", "")
+    prefix = model_name.split(":", 1)[0].lower()
+    return MODEL_PROVIDER_HOSTS.get(prefix, ())
+
+
+def _is_model_provider_url(url: str | None, allowed_hosts: Sequence[str]) -> bool:
+    if not url or not allowed_hosts:
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname is None:
+        return False
+    host = parsed.hostname.lower()
+    return any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts)
+
+
+def _check_http_operation(method: str, url: str, *, source: str) -> None:
+    operation = detect_unsafe_http_request(method, url, source=source)
+    if operation:
+        raise BenchmarkBoundaryViolation(f"unsafe operation blocked: {operation.detail}")
+
+
+def _replay_miss_requests_response(method: str, url: str) -> Any:
+    import requests  # type: ignore[import-not-found]
+
+    body = _replay_miss_body(url)
+    response = requests.Response()
+    response.status_code = 404
+    response.reason = "Replay miss"
+    response.url = url
+    response._content = body
+    response.headers.update(_replay_miss_headers())
+    response.request = requests.Request(method=method, url=url).prepare()
+    return response
+
+
+def _replay_miss_http_error(url: str) -> HTTPError:
+    body = _replay_miss_body(url)
+    return HTTPError(url, 404, "Replay miss", _replay_miss_headers(), io.BytesIO(body))
+
+
 def _replay_miss_body(url: str) -> bytes:
     url = canonicalize_replay_url(url)
     return f"replay miss: URL is not recorded in replay cache: {url}\n".encode("utf-8")
+
+
+def _replay_miss_headers() -> dict[str, str]:
+    return {"Content-Type": "text/plain; charset=utf-8"}
+
+
+def _raise_network_violation(network_mode: str | None, url: str) -> None:
+    if network_mode == "network_denied":
+        raise BenchmarkBoundaryViolation(f"external network access blocked: {url}")
 
 
 def _replay_cache(environment: Mapping[str, str]) -> ReplayCache | None:
