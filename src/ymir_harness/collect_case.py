@@ -379,9 +379,13 @@ def _fetch_evidence(
 
     if gitlab_mr_url:
         try:
-            fetched_gitlab_mr, fetched_gitlab_commits, fetched_patch_url, fetched_patch_body, fetched_records = (
-                _fetch_gitlab_mr_evidence(gitlab_mr_url, request, result)
-            )
+            (
+                fetched_gitlab_mr,
+                fetched_gitlab_commits,
+                fetched_patch_url,
+                fetched_patch_body,
+                fetched_records,
+            ) = _fetch_gitlab_mr_evidence(gitlab_mr_url, request, result)
         except CollectCaseError as exc:
             if not auto_gitlab_mr_url:
                 raise
@@ -876,11 +880,15 @@ def _gitlab_mr_api_diff_patch_body(
     if marker not in parsed.path:
         raise CollectCaseError(f"GitLab MR URL must contain {marker}: {mr_url}")
     project_path = parsed.path.strip("/").split(marker, 1)[0]
-    commit_ids = [
-        commit.get("id")
-        for commit in commits
-        if isinstance(commit, Mapping) and isinstance(commit.get("id"), str)
-    ] if isinstance(commits, list) else []
+    commit_ids = (
+        [
+            commit.get("id")
+            for commit in commits
+            if isinstance(commit, Mapping) and isinstance(commit.get("id"), str)
+        ]
+        if isinstance(commits, list)
+        else []
+    )
     if not commit_ids:
         raise CollectCaseError(f"GitLab MR has no commits for API diff fallback: {mr_url}")
     return b"".join(
@@ -1371,8 +1379,7 @@ def _fetch_koji_candidate_builds(
             record = fetch_candidate_build(request.package, branch)
         except Exception as exc:
             result.warnings.append(
-                "skipped Koji candidate build "
-                f"for {request.package} {branch}: {exc}"
+                f"skipped Koji candidate build for {request.package} {branch}: {exc}"
             )
             continue
         records[candidate_build_key(request.package, branch)] = record
@@ -1392,7 +1399,9 @@ def _localize_mock_repo_cache(request: CollectCaseRequest) -> CollectCaseRequest
     if destination.exists():
         _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
     else:
-        _run_git(_git_clone_command(source, str(destination), request.gitlab_token_env), destination)
+        _run_git(
+            _git_clone_command(source, str(destination), request.gitlab_token_env), destination
+        )
 
     _run_git(
         ["-C", str(destination), "cat-file", "-e", f"{mock_repo.pre_fix_ref}^{{commit}}"],
@@ -1869,6 +1878,12 @@ def _write_expected(
         expected["alternate_acceptable_outcomes"] = [
             dict(alternate) for alternate in request.alternate_acceptable_outcomes
         ]
+    required_artifact_kinds = _expected_required_artifact_kinds(request)
+    if required_artifact_kinds:
+        expected["required_artifact_kinds"] = list(required_artifact_kinds)
+    patch_file_patterns = _expected_patch_file_patterns(request)
+    if patch_file_patterns:
+        expected["patch_file_patterns"] = list(patch_file_patterns)
 
     _write_json(
         cases_dir / "expected" / f"{request.case_id}.expected.json",
@@ -2432,7 +2447,10 @@ def _cache_upstream_source_repo(
                 return
             _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
         else:
-            _run_git(_git_clone_command(remote_url, str(destination), request.gitlab_token_env), destination)
+            _run_git(
+                _git_clone_command(remote_url, str(destination), request.gitlab_token_env),
+                destination,
+            )
     except CollectCaseError as exc:
         if not destination.exists():
             result.warnings.append(f"skipped upstream source cache for {project_url}: {exc}")
@@ -2712,6 +2730,24 @@ def _expected_patch_urls(
     return _effective_patch_urls(request, fetched)
 
 
+def _expected_required_artifact_kinds(request: CollectCaseRequest) -> tuple[str, ...]:
+    if request.resolution != "backport":
+        return ()
+    if request.mock_repo is None or request.mock_repo.agent != "backport":
+        return ()
+    return ("commit_diff", "spec_file", "patch_files", "srpm")
+
+
+def _expected_patch_file_patterns(
+    request: CollectCaseRequest,
+) -> tuple[str, ...]:
+    if request.resolution != "backport":
+        return ()
+    if request.mock_repo is None or request.mock_repo.agent != "backport":
+        return ()
+    return (request.case_id,)
+
+
 def _infer_backport_source(resolution: str | None, patch_urls: Sequence[str]) -> str | None:
     if resolution != "backport" or not patch_urls:
         return None
@@ -2730,8 +2766,7 @@ def _backport_source_for_url(url: str) -> str | None:
     hostname = (parsed.hostname or "").lower()
     path = parsed.path
     if hostname == "gitlab.com" and (
-        path.startswith("/redhat/rhel/rpms/")
-        or path.startswith("/redhat/centos-stream/rpms/")
+        path.startswith("/redhat/rhel/rpms/") or path.startswith("/redhat/centos-stream/rpms/")
     ):
         return "distgit"
     if hostname == "src.fedoraproject.org" and path.startswith("/rpms/"):
