@@ -530,6 +530,73 @@ def test_cli_run_can_use_ymir_triage_workflow(
     assert Path(output["cases"][0]["actual_path"]).is_file()
 
 
+def test_cli_run_prints_concise_metrics_summary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+            "expected_basis": "maintainer_decision",
+            "ground_truth_confidence": "high",
+            "answer_leakage": "none",
+            "case_status": "active",
+            "network_mode": "network_denied",
+        },
+    )
+
+    def make_executor():
+        def executor(_request):
+            return RunCaseExecution(
+                status="passed",
+                actual_result={
+                    "case_id": "RHEL-12345",
+                    "case_type": "not_affected",
+                    "resolution": "not_affected",
+                    "package": "dnsmasq",
+                    "token_usage": {"input_tokens": 1200, "output_tokens": 300},
+                    "tool_call_count": 8,
+                    "total_cost_usd": 4.25,
+                },
+            )
+
+        return executor
+
+    monkeypatch.setattr(cli_module, "make_ymir_triage_executor", make_executor)
+
+    assert (
+        main(
+            [
+                "run",
+                "--cases",
+                str(cases_dir),
+                "--variant",
+                "baseline",
+                "--workflow",
+                "ymir-triage",
+            ]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "benchmark run: 1 passed, 0 failed, 0 timeout, 0 not run, 0 skipped, 0 unsupported"
+        in output
+    )
+    assert "metrics: runtime " in output
+    assert "tokens 1500 avg" in output
+    assert "tool calls 8 avg" in output
+    assert "cost $4.25 total / $4.25 avg" in output
+
+
 def test_cli_run_uses_strict_validation_for_selected_triage_workflow(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
