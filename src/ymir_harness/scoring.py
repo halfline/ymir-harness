@@ -99,6 +99,8 @@ def _score_case_once(
             "actual result reports unrelated source changes",
         ),
         _required_artifacts_metric(expected, actual),
+        _required_artifact_kinds_metric(expected, actual),
+        _patch_file_patterns_metric(expected, actual),
         _compare("case_id", expected.get("case_id"), actual.get("case_id") or case_id),
         _compare(
             "jira_issue",
@@ -335,6 +337,71 @@ def _required_artifacts_metric(
     )
 
 
+ARTIFACT_KIND_ALIASES = {
+    "srpm": "srpm",
+    "source_rpm": "srpm",
+    "commit_diff": "commit_diff",
+    "diff": "commit_diff",
+    "spec": "spec_file",
+    "spec_file": "spec_file",
+    "patch": "patch_files",
+    "patch_file": "patch_files",
+    "patch_files": "patch_files",
+    "backport_result": "backport_result",
+    "result_json": "backport_result",
+    "log_result": "log_result",
+    "log_json": "log_result",
+}
+
+
+def _required_artifact_kinds_metric(
+    expected: Mapping[str, Any], actual: Mapping[str, Any]
+) -> ScoreMetric:
+    required = _normalize_artifact_kinds(expected.get("required_artifact_kinds"))
+    actual_kinds = _actual_artifact_kinds(actual)
+    if not required:
+        return ScoreMetric(
+            name="required_artifact_kinds",
+            status="skipped",
+            expected=required,
+            actual=actual_kinds,
+            notes="expected result declares no required artifact kinds",
+        )
+
+    missing = [kind for kind in required if kind not in actual_kinds]
+    return ScoreMetric(
+        name="required_artifact_kinds",
+        status="pass" if not missing else "fail",
+        expected=required,
+        actual=actual_kinds,
+        notes=f"missing required artifact kinds: {', '.join(missing)}" if missing else None,
+    )
+
+
+def _patch_file_patterns_metric(
+    expected: Mapping[str, Any], actual: Mapping[str, Any]
+) -> ScoreMetric:
+    patterns = _expected_patch_file_patterns(expected)
+    patch_names = _actual_patch_file_names(actual)
+    if not patterns:
+        return ScoreMetric(
+            name="patch_file_patterns",
+            status="skipped",
+            expected=patterns,
+            actual=patch_names,
+            notes="expected result declares no patch file patterns",
+        )
+
+    missing = [pattern for pattern in patterns if not any(pattern in name for name in patch_names)]
+    return ScoreMetric(
+        name="patch_file_patterns",
+        status="pass" if not missing else "fail",
+        expected=patterns,
+        actual=patch_names,
+        notes=f"missing patch file patterns: {', '.join(missing)}" if missing else None,
+    )
+
+
 def _expected_jira_issue(expected: Mapping[str, Any], case_id: str) -> str | None:
     return _string_or_none(expected.get("jira_issue")) or _string_or_none(case_id)
 
@@ -456,16 +523,86 @@ def _actual_generated_patch_touched_files(actual: Mapping[str, Any]) -> list[str
     return _patch_artifacts_touched_files(_generated_patch_artifacts(actual))
 
 
-def _manifest_patch_artifacts(actual: Mapping[str, Any]) -> list[Path]:
+def _normalize_artifact_kinds(value: Any) -> list[str]:
+    kinds = []
+    for item in _normalize_list(value):
+        token = _normalize_token(item)
+        if token is not None:
+            kinds.append(ARTIFACT_KIND_ALIASES.get(token, token))
+    return sorted(dict.fromkeys(kinds))
+
+
+def _actual_artifact_kinds(actual: Mapping[str, Any]) -> list[str]:
+    kinds: set[str] = set()
+    captured = _artifact_manifest_captured_files(actual)
+    for key, value in captured.items():
+        canonical = ARTIFACT_KIND_ALIASES.get(_normalize_token(key) or "")
+        if canonical is not None and _artifact_value_present(value):
+            kinds.add(canonical)
+
+    for artifact in _normalize_list(_actual_result_field(actual, "generated_artifacts")):
+        artifact_path = Path(artifact)
+        name = artifact_path.name
+        if name == "commit.diff":
+            kinds.add("commit_diff")
+        elif name == "spec_file.spec" or name.endswith(".spec"):
+            kinds.add("spec_file")
+        elif name == "backport_result.json":
+            kinds.add("backport_result")
+        elif name == "log_result.json":
+            kinds.add("log_result")
+        elif name.endswith(".src.rpm"):
+            kinds.add("srpm")
+        elif artifact_path.suffix in {".patch", ".diff"}:
+            kinds.add("patch_files")
+    return sorted(kinds)
+
+
+def _expected_patch_file_patterns(expected: Mapping[str, Any]) -> list[str]:
+    values = [
+        *_normalize_list(expected.get("patch_file_patterns")),
+        *_normalize_list(expected.get("patch_file_pattern")),
+    ]
+    return sorted(dict.fromkeys(value for value in values if value))
+
+
+def _actual_patch_file_names(actual: Mapping[str, Any]) -> list[str]:
+    names = []
+    captured = _artifact_manifest_captured_files(actual)
+    for path in _normalize_list(captured.get("patch_files")):
+        names.append(Path(path).name)
+    for artifact in _normalize_list(_actual_result_field(actual, "generated_artifacts")):
+        artifact_path = Path(artifact)
+        if artifact_path.name == "commit.diff":
+            continue
+        if artifact_path.suffix in {".patch", ".diff"}:
+            names.append(artifact_path.name)
+    return sorted(dict.fromkeys(name for name in names if name))
+
+
+def _artifact_manifest_captured_files(actual: Mapping[str, Any]) -> Mapping[str, Any]:
     manifest_path = _path_or_none(_actual_result_field(actual, "artifact_manifest"))
     if manifest_path is None:
-        return []
+        return {}
     manifest = _load_optional_json_object(manifest_path)
     if manifest is None:
-        return []
+        return {}
     captured_files = manifest.get("captured_files")
-    if not isinstance(captured_files, Mapping):
-        return []
+    return captured_files if isinstance(captured_files, Mapping) else {}
+
+
+def _artifact_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value)
+    if isinstance(value, list | tuple | set | dict):
+        return bool(value)
+    return True
+
+
+def _manifest_patch_artifacts(actual: Mapping[str, Any]) -> list[Path]:
+    captured_files = _artifact_manifest_captured_files(actual)
     return [Path(path) for path in _normalize_list(captured_files.get("patch_files"))]
 
 
