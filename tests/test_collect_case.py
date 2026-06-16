@@ -111,6 +111,13 @@ def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
     assert expected["patch_urls"] == ["https://example.invalid/fix.patch"]
     assert expected["backport_source"] == "upstream"
     assert expected["reference_patch_mode"] == "scope_only"
+    assert expected["required_artifact_kinds"] == [
+        "commit_diff",
+        "spec_file",
+        "patch_files",
+        "srpm",
+    ]
+    assert expected["patch_file_patterns"] == ["RHEL-12345"]
     assert (cases_dir / "cases.yaml").read_text(encoding="utf-8") == "cases:\n  - RHEL-12345\n"
 
     mock = json.loads(
@@ -193,6 +200,44 @@ def test_collect_case_infers_mixed_backport_source(tmp_path: Path) -> None:
         (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
     )
     assert expected["backport_source"] == "mixed"
+
+
+def test_collect_case_uses_jira_issue_patch_file_pattern(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.z",
+            expected_basis="merged_mr",
+            network_mode="replay_only",
+            patch_urls=(
+                "https://gitlab.example/group/pkg/-/merge_requests/7.patch",
+                "https://gitlab.example/group/pkg/-/commit/" + ("a" * 40) + ".patch",
+            ),
+            mock_repo=MockRepoInput(
+                remote_url="https://gitlab.example/group/pkg.git",
+                pre_fix_ref="abc123",
+                branch="c9s",
+                agent="backport",
+            ),
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["required_artifact_kinds"] == [
+        "commit_diff",
+        "spec_file",
+        "patch_files",
+        "srpm",
+    ]
+    assert expected["patch_file_patterns"] == ["RHEL-12345"]
 
 
 def test_collect_case_warns_when_auto_discovered_gitlab_mr_is_private(
@@ -341,7 +386,9 @@ def test_collect_case_uses_gitlab_api_diff_when_mr_patch_is_forbidden(
     manifest = json.loads(
         (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
     )
-    recorded = cases_dir / "web_cache" / "RHEL-12345" / manifest["recorded_files"][f"{mr_url}.patch"]
+    recorded = (
+        cases_dir / "web_cache" / "RHEL-12345" / manifest["recorded_files"][f"{mr_url}.patch"]
+    )
     assert recorded.read_text(encoding="utf-8").startswith("diff --git a/redis.spec")
     assert any("used GitLab API diff" in warning for warning in result.warnings)
     assert diff_url in seen_urls
@@ -1276,6 +1323,8 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     )
     assert expected["patch_urls"] == ["https://gitlab.example/group/pkg/-/merge_requests/7.patch"]
     assert expected["fix_sources"] == ["https://gitlab.example/group/pkg/-/merge_requests/7"]
+    assert "required_artifact_kinds" not in expected
+    assert "patch_file_patterns" not in expected
     mock = json.loads(
         (cases_dir / "mock_data" / "triage" / "RHEL-12345.json").read_text(encoding="utf-8")
     )
@@ -1653,8 +1702,7 @@ def test_collect_case_caches_lookaside_sources_from_prefixed_mock_repo(
     bin_dir.mkdir()
     rhpkg = bin_dir / "rhpkg"
     rhpkg.write_text(
-        "#!/bin/sh\n"
-        "printf 'source archive\\n' > redis-6.2.20.tar.gz\n",
+        "#!/bin/sh\nprintf 'source archive\\n' > redis-6.2.20.tar.gz\n",
         encoding="utf-8",
     )
     rhpkg.chmod(0o755)
