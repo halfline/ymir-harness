@@ -341,6 +341,175 @@ def test_score_case_reports_touched_file_scope_failures() -> None:
     assert failed["touched_files"].notes == "unexpected touched files: README.md"
 
 
+def test_score_case_derives_patch_scope_from_reference_patch(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_text(
+        cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch",
+        _source_patch_text("source.c"),
+    )
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "patch_touched_files": ["source.c"],
+    }
+
+    report = score_case(expected, actual, cases_dir=cases_dir)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["patch_touched_files"].status == "pass"
+    assert metrics["patch_touched_files"].expected == ["source.c"]
+
+
+def test_score_case_derives_patch_scope_from_reference_patch_added_patch_file(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    nested_patch = _source_patch_text("src/option.c")
+    outer_patch = (
+        "diff --git a/fix.patch b/fix.patch\n"
+        "new file mode 100644\n"
+        "index 0000000..1111111\n"
+        "--- /dev/null\n"
+        "+++ b/fix.patch\n"
+        f"@@ -0,0 +1,{len(nested_patch.splitlines())} @@\n"
+        + "".join(f"+{line}\n" for line in nested_patch.splitlines())
+    )
+    _write_text(
+        cases_dir / "mock_data" / "backport" / "reference_patches" / "RHEL-12345.patch",
+        outer_patch,
+    )
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "patch_touched_files": ["src/option.c"],
+    }
+
+    report = score_case(expected, actual, cases_dir=cases_dir)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["patch_touched_files"].expected == ["src/option.c"]
+
+
+def test_score_case_reports_patch_scope_failures_from_reference_patch(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_text(
+        cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch",
+        _source_patch_text("source.c"),
+    )
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "patch_touched_files": ["README.md", "source.c"],
+    }
+
+    report = score_case(expected, actual, cases_dir=cases_dir)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["patch_touched_files"].expected == ["source.c"]
+    assert failed["patch_touched_files"].actual == ["README.md", "source.c"]
+    assert failed["patch_touched_files"].notes == "unexpected touched files: README.md"
+
+
+def test_score_case_parses_generated_patch_scope(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    generated_patch = tmp_path / "agent.patch"
+    _write_text(
+        cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch",
+        _source_patch_text("source.c"),
+    )
+    _write_text(generated_patch, _source_patch_text("source.c"))
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "generated_artifacts": [str(generated_patch)],
+    }
+
+    report = score_case(expected, actual, cases_dir=cases_dir)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["patch_touched_files"].status == "pass"
+    assert metrics["patch_touched_files"].actual == ["source.c"]
+
+
+def test_score_case_uses_manifest_patch_files_before_commit_diff(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    artifact_dir = tmp_path / "artifacts"
+    generated_patch = artifact_dir / "patches" / "fix.patch"
+    commit_diff = artifact_dir / "commit.diff"
+    manifest_path = artifact_dir / "manifest.json"
+    _write_text(
+        cases_dir / "mock_data" / "triage" / "reference_patches" / "RHEL-12345.patch",
+        _source_patch_text("source.c"),
+    )
+    _write_text(generated_patch, _source_patch_text("source.c"))
+    _write_text(commit_diff, _source_patch_text("dnsmasq.spec"))
+    _write_json(
+        manifest_path,
+        {
+            "captured_files": {
+                "commit_diff": str(commit_diff),
+                "patch_files": [str(generated_patch)],
+            }
+        },
+    )
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "artifact_manifest": str(manifest_path),
+        "generated_artifacts": [str(commit_diff), str(generated_patch)],
+    }
+
+    report = score_case(expected, actual, cases_dir=cases_dir)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["patch_touched_files"].actual == ["source.c"]
+
+
 def test_score_case_reports_spec_patch_failures() -> None:
     expected = {
         "case_id": "RHEL-12345",
@@ -861,3 +1030,15 @@ def _write_json(path: Path, data: object) -> None:
 def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _source_patch_text(path: str) -> str:
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "index 5d308e1..85c3040 100644\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
