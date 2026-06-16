@@ -424,6 +424,8 @@ case entry includes `case_id`, `case_type`, `status`, `repetition`, optional
 `passed`, `failed`, `timeout`, `skipped`, and `unsupported`.
 The default `run` command writes validation reports first, then writes
 `benchmark_cases/reports/runs/RUN_ID/run.json` unless `--output` is provided.
+Without `--json`, it also prints a concise status line and any available
+runtime, token, tool-call, and cost metrics.
 Without `--workflow`, it does not invoke Ymir workflows, so each runnable case
 repetition is marked `not_run`.
 Use `--workflow ymir-triage` to call Ymir's triage `run_workflow()` directly for
