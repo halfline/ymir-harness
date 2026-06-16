@@ -1,0 +1,36 @@
+{
+  "case_id": "RHEL-114059",
+  "case_type": "cve_backport",
+  "links": [
+    {
+      "application": {},
+      "id": 709321,
+      "object": {
+        "icon": {},
+        "status": {
+          "icon": {}
+        },
+        "summary": "glib2 update",
+        "title": "RHBA-2025:154625",
+        "url": "https://errata.engineering.redhat.com/advisory/154625"
+      },
+      "self": "https://redhat.atlassian.net/rest/api/2/issue/RHEL-114059/remotelink/709321"
+    },
+    {
+      "application": {},
+      "id": 5763259,
+      "object": {
+        "icon": {
+          "url16x16": "https://access.redhat.com/favicon.ico"
+        },
+        "status": {
+          "icon": {}
+        },
+        "title": "KCS: NetworkManager is stopped after sending a dbus message with an invalid header",
+        "url": "https://access.redhat.com/solutions/7130863"
+      },
+      "self": "https://redhat.atlassian.net/rest/api/2/issue/RHEL-114059/remotelink/5763259"
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,556 @@
+{
+  "case_id": "RHEL-114059",
+  "case_type": "cve_backport",
+  "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations,customfield_10010.requestTypePractice",
+  "fields": {
+    "aggregateprogress": {
+      "progress": 0,
+      "total": 0
+    },
+    "aggregatetimeestimate": null,
+    "aggregatetimeoriginalestimate": null,
+    "aggregatetimespent": null,
+    "assignee": {
+      "accountId": "712020:54e70ecf-6d8f-43e3-998f-3029691ecd8f",
+      "accountType": "atlassian",
+      "active": true,
+      "avatarUrls": {
+        "16x16": "https://secure.gravatar.com/avatar/37ae8e1d1b44d82288da3f8b809ccef5?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJP-3.png",
+        "24x24": "https://secure.gravatar.com/avatar/37ae8e1d1b44d82288da3f8b809ccef5?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJP-3.png",
+        "32x32": "https://secure.gravatar.com/avatar/37ae8e1d1b44d82288da3f8b809ccef5?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJP-3.png",
+        "48x48": "https://secure.gravatar.com/avatar/37ae8e1d1b44d82288da3f8b809ccef5?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJP-3.png"
+      },
+      "displayName": "J\u00f6tnar Project",
+      "emailAddress": "jotnar@redhat.com",
+      "self": "https://redhat.atlassian.net/rest/api/2/user?accountId=712020%3A54e70ecf-6d8f-43e3-998f-3029691ecd8f",
+      "timeZone": "Etc/GMT"
+    },
+    "attachment": [],
+    "comment": {
+      "comments": [],
+      "maxResults": 0,
+      "startAt": 0,
+      "total": 0
+    },
+    "components": [
+      {
+        "description": " A library of handy utility functions",
+        "id": "17411",
+        "name": "glib2",
+        "self": "https://redhat.atlassian.net/rest/api/2/component/17411"
+      }
+    ],
+    "created": "2025-09-10T13:09:05.524+0000",
+    "creator": {
+      "accountId": "712020:03587300-7fdd-41fa-9945-3ef508666e61",
+      "accountType": "atlassian",
+      "active": true,
+      "avatarUrls": {
+        "16x16": "https://secure.gravatar.com/avatar/d01ede95989eb5f38054dce9e54ea87f?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FWA-4.png",
+        "24x24": "https://secure.gravatar.com/avatar/d01ede95989eb5f38054dce9e54ea87f?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FWA-4.png",
+        "32x32": "https://secure.gravatar.com/avatar/d01ede95989eb5f38054dce9e54ea87f?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FWA-4.png",
+        "48x48": "https://secure.gravatar.com/avatar/d01ede95989eb5f38054dce9e54ea87f?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FWA-4.png"
+      },
+      "displayName": "Watson Automation",
+      "emailAddress": "watson-tool-maintainers@redhat.com",
+      "self": "https://redhat.atlassian.net/rest/api/2/user?accountId=712020%3A03587300-7fdd-41fa-9945-3ef508666e61",
+      "timeZone": "Etc/GMT"
+    },
+    "customfield_10000": "{pullrequest={dataType=pullrequest, state=MERGED, stateCount=2}, json={\"cachedValue\":{\"errors\":[],\"summary\":{\"pullrequest\":{\"overall\":{\"count\":2,\"lastUpdated\":\"2025-09-17T17:57:49.582+0000\",\"stateCount\":2,\"state\":\"MERGED\",\"dataType\":\"pullrequest\",\"open\":false},\"byInstanceType\":{\"oAuth-gitlab-jira-connect-gitlab.com\":{\"count\":1,\"name\":\"GitLab\"},\"GitLab\":{\"count\":1,\"name\":\"GitLab\"}}}}},\"isStale\":true}}",
+    "customfield_10001": null,
+    "customfield_10002": [],
+    "customfield_10003": null,
+    "customfield_10004": null,
+    "customfield_10005": null,
+    "customfield_10006": null,
+    "customfield_10007": null,
+    "customfield_10008": null,
+    "customfield_10009": null,
+    "customfield_10010": null,
+    "customfield_10014": null,
+    "customfield_10015": null,
+    "customfield_10016": null,
+    "customfield_10017": null,
+    "customfield_10019": "0|i47n4n:",
+    "customfield_10020": null,
+    "customfield_10021": null,
+    "customfield_10022": null,
+    "customfield_10023": null,
+    "customfield_10024": "2025-09-11T07:02:05.295+0000",
+    "customfield_10025": "3_*:*_1_*:*_514874142_*|*_6_*:*_1_*:*_0_*|*_10142_*:*_1_*:*_46493_*|*_10158_*:*_1_*:*_2933675123_*|*_10149_*:*_1_*:*_160621755_*|*_10435_*:*_1_*:*_1750215302",
+    "customfield_10028": null,
+    "customfield_10029": null,
+    "customfield_10030": null,
+    "customfield_10031": null,
+    "customfield_10032": null,
+    "customfield_10033": null,
+    "customfield_10035": null,
+    "customfield_10036": null,
+    "customfield_10254": null,
+    "customfield_10280": null,
+    "customfield_10281": null,
+    "customfield_10282": null,
+    "customfield_10283": null,
+    "customfield_10284": null,
+    "customfield_10285": null,
+    "customfield_10286": null,
+    "customfield_10287": null,
+    "customfield_10288": null,
+    "customfield_10289": null,
+    "customfield_10290": null,
+    "customfield_10291": null,
+    "customfield_10315": null,
+    "customfield_10316": null,
+    "customfield_10317": [],
+    "customfield_10318": null,
+    "customfield_10319": null,
+    "customfield_10320": null,
+    "customfield_10321": null,
+    "customfield_10322": null,
+    "customfield_10323": null,
+    "customfield_10324": null,
+    "customfield_10348": null,
+    "customfield_10381": [],
+    "customfield_10414": 0.0,
+    "customfield_10415": null,
+    "customfield_10416": null,
+    "customfield_10417": null,
+    "customfield_10418": null,
+    "customfield_10419": null,
+    "customfield_10420": null,
+    "customfield_10421": null,
+    "customfield_10422": null,
+    "customfield_10423": null,
+    "customfield_10424": null,
+    "customfield_10425": null,
+    "customfield_10426": null,
+    "customfield_10427": 15.0,
+    "customfield_10428": 2.0,
+    "customfield_10429": 0.0,
+    "customfield_10430": 25.0,
+    "customfield_10431": 0.0,
+    "customfield_10464": null,
+    "customfield_10466": null,
+    "customfield_10468": {
+      "accountId": "712020:4c352ca8-00b5-4d6b-92cb-f3d6195e3c35",
+      "accountType": "atlassian",
+      "active": true,
+      "avatarUrls": {
+        "16x16": "https://secure.gravatar.com/avatar/82b519b9789980718aa9432b48fe4407?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FMC-4.png",
+        "24x24": "https://secure.gravatar.com/avatar/82b519b9789980718aa9432b48fe4407?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FMC-4.png",
+        "32x32": "https://secure.gravatar.com/avatar/82b519b9789980718aa9432b48fe4407?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FMC-4.png",
+        "48x48": "https://secure.gravatar.com/avatar/82b519b9789980718aa9432b48fe4407?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FMC-4.png"
+      },
+      "displayName": "Michael Catanzaro",
+      "emailAddress": "mcatanza@redhat.com",
+      "self": "https://redhat.atlassian.net/rest/api/2/user?accountId=712020%3A4c352ca8-00b5-4d6b-92cb-f3d6195e3c35",
+      "timeZone": "America/Chicago"
+    },
+    "customfield_10470": {
+      "accountId": "712020:54e70ecf-6d8f-43e3-998f-3029691ecd8f",
+      "accountType": "atlassian",
+      "active": true,
+      "avatarUrls": {
+        "16x16": "https://secure.gravatar.com/avatar/37ae8e1d1b44d82288da3f8b809ccef5?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJP-3.png",
+        "24x24": "https://secure.gravatar.com/avatar/37ae8e1d1b44d82288da3f8b809ccef5?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJP-3.png",
+        "32x32": "https://secure.gravatar.com/avatar/37ae8e1d1b44d82288da3f8b809ccef5?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJP-3.png",
+        "48x48": "https://secure.gravatar.com/avatar/37ae8e1d1b44d82288da3f8b809ccef5?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FJP-3.png"
+      },
+      "displayName": "J\u00f6tnar Project",
+      "emailAddress": "jotnar@redhat.com",
+      "self": "https://redhat.atlassian.net/rest/api/2/user?accountId=712020%3A54e70ecf-6d8f-43e3-998f-3029691ecd8f",
+      "timeZone": "Etc/GMT"
+    },
+    "customfield_10471": null,
+    "customfield_10472": null,
+    "customfield_10473": null,
+    "customfield_10479": null,
+    "customfield_10482": null,
+    "customfield_10483": "None",
+    "customfield_10484": {
+      "id": "10472",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/10472",
+      "value": "False"
+    },
+    "customfield_10485": {
+      "id": "17125",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/17125",
+      "value": "Not Started"
+    },
+    "customfield_10487": null,
+    "customfield_10493": null,
+    "customfield_10503": null,
+    "customfield_10517": {
+      "id": "10853",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/10853",
+      "value": "False"
+    },
+    "customfield_10519": null,
+    "customfield_10548": null,
+    "customfield_10552": null,
+    "customfield_10553": null,
+    "customfield_10557": null,
+    "customfield_10567": null,
+    "customfield_10570": null,
+    "customfield_10578": "glib2-2.68.4-18.el9_7",
+    "customfield_10583": null,
+    "customfield_10606": {
+      "id": "13353",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/13353",
+      "value": "rhel-jotnar"
+    },
+    "customfield_10620": null,
+    "customfield_10622": null,
+    "customfield_10623": {
+      "id": "12490",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/12490",
+      "value": "No"
+    },
+    "customfield_10624": [
+      {
+        "id": "19308",
+        "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/19308",
+        "value": "ZStream"
+      }
+    ],
+    "customfield_10626": "https://errata.engineering.redhat.com/advisory/154625",
+    "customfield_10638": [
+      {
+        "id": "19232",
+        "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/19232",
+        "value": "RegressionOnly"
+      }
+    ],
+    "customfield_10648": null,
+    "customfield_10654": null,
+    "customfield_10656": null,
+    "customfield_10659": null,
+    "customfield_10665": null,
+    "customfield_10666": null,
+    "customfield_10670": null,
+    "customfield_10687": null,
+    "customfield_10689": null,
+    "customfield_10697": null,
+    "customfield_10701": "2025-10-08T14:58:00.000+0000",
+    "customfield_10718": null,
+    "customfield_10724": {
+      "id": "12635",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/12635",
+      "value": "Unspecified"
+    },
+    "customfield_10759": "2025-11-11",
+    "customfield_10766": null,
+    "customfield_10769": null,
+    "customfield_10772": null,
+    "customfield_10778": null,
+    "customfield_10783": null,
+    "customfield_10785": null,
+    "customfield_10787": null,
+    "customfield_10799": "2025-09-12T09:46:00.000+0000",
+    "customfield_10807": null,
+    "customfield_10812": null,
+    "customfield_10814": null,
+    "customfield_10820": null,
+    "customfield_10821": null,
+    "customfield_10825": null,
+    "customfield_10833": null,
+    "customfield_10840": {
+      "id": "19920",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/19920",
+      "value": "Low"
+    },
+    "customfield_10847": null,
+    "customfield_10849": null,
+    "customfield_10855": null,
+    "customfield_10868": null,
+    "customfield_10875": null,
+    "customfield_10877": null,
+    "customfield_10878": null,
+    "customfield_10879": {
+      "id": "20443",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/20443",
+      "value": "Pass"
+    },
+    "customfield_10888": {
+      "id": "20483",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/20483",
+      "value": "Unspecified"
+    },
+    "customfield_10890": {
+      "id": "20479",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/20479",
+      "value": "Unspecified"
+    },
+    "customfield_10894": null,
+    "customfield_10896": {
+      "id": "20469",
+      "self": "https://redhat.atlassian.net/rest/api/2/customFieldOption/20469",
+      "value": "Unspecified"
+    },
+    "customfield_10929": "2025-11-11",
+    "customfield_10930": null,
+    "customfield_10932": null,
+    "customfield_10933": null,
+    "customfield_10934": null,
+    "customfield_10935": null,
+    "customfield_10937": null,
+    "customfield_10939": null,
+    "customfield_10940": null,
+    "customfield_10941": null,
+    "customfield_10942": null,
+    "customfield_10945": null,
+    "customfield_10947": null,
+    "customfield_10948": null,
+    "customfield_10951": null,
+    "customfield_10952": null,
+    "customfield_10955": null,
+    "customfield_10956": null,
+    "customfield_10962": null,
+    "customfield_10963": null,
+    "customfield_10975": null,
+    "customfield_10977": null,
+    "customfield_10978": "FjFI4vRDXIGtYHewzEzZdegWZFCPvEft8UjeEYh/m5vWdsESbgdzj/pCpABF4hurOenNOguY2N+lYA38UHehQw==",
+    "customfield_10979": "FjFI4vRDXIGtYHewzEzZdbFliklbBzzfilubu2GZFZoCXxn3E6wqgsDgdS3NkmM/VzC0o9mb5C5eAZ2SscP+ATc7XXTLrEmeE/Ua5z8aQFg=",
+    "customfield_10980": null,
+    "customfield_10981": null,
+    "customfield_10984": null,
+    "customfield_10986": null,
+    "customfield_10987": null,
+    "customfield_10988": null,
+    "customfield_11003": "FjFI4vRDXIGtYHewzEzZddh6mt6YyKzIpr/vUTS2sTyTyWyg7R1HRkTYLdOys5vlEyDqry64VUPRX0MGw6lUYQ==",
+    "customfield_11046": null,
+    "customfield_11047": null,
+    "customfield_11048": null,
+    "customfield_11049": null,
+    "customfield_11083": null,
+    "customfield_11084": null,
+    "customfield_11085": null,
+    "customfield_11086": null,
+    "customfield_11087": null,
+    "customfield_11089": null,
+    "customfield_11091": null,
+    "dataclassification": {},
+    "description": "This is a clone of issue RHEL-4139 to use for version rhel-9.7.z\n--\nOriginal description:\nDescription of problem:\n\nIf Gnome terminal kept running for many days / months it is getting crashed and resulted in segfault. \n\nVersion-Release number of selected component (if applicable):\n\ngnome-terminal-3.28.2-3.el7.x86_64\n\nHow reproducible:\n\nFrequently\n\nSteps to Reproduce:\n1.Start the gnome-terminal\n2.Run the command / application like \"TOP\",\"HTOP\" for many weeks / months.\n3.Suddenly the gnome-terminal crashes\n\nActual results:\n\nGnome-terminal is crashing if kept running / used for longer period of time.\n\nExpected results:\n\nGnome-terminal should be able to run continuously without any issue. \n\nAdditional info:",
+    "duedate": null,
+    "environment": null,
+    "fixVersions": [
+      {
+        "archived": false,
+        "description": "PPSync [release:2888]",
+        "id": "27145",
+        "name": "rhel-9.7.z",
+        "releaseDate": "2026-05-05",
+        "released": true,
+        "self": "https://redhat.atlassian.net/rest/api/2/version/27145"
+      }
+    ],
+    "issuelinks": [
+      {
+        "id": "399703",
+        "outwardIssue": {
+          "fields": {
+            "issuetype": {
+              "avatarId": 10303,
+              "description": "A problem or error.",
+              "hierarchyLevel": 0,
+              "iconUrl": "https://redhat.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10303?size=medium",
+              "id": "10016",
+              "name": "Bug",
+              "self": "https://redhat.atlassian.net/rest/api/2/issuetype/10016",
+              "subtask": false
+            },
+            "priority": {
+              "iconUrl": "https://redhat.atlassian.net/images/icons/priorities/critical.svg",
+              "id": "10001",
+              "name": "Critical",
+              "self": "https://redhat.atlassian.net/rest/api/2/priority/10001"
+            },
+            "status": {
+              "description": "The work item is considered finished, the resolution is correct. work items which are closed can be reopened.",
+              "iconUrl": "https://redhat.atlassian.net/images/icons/statuses/closed.png",
+              "id": "6",
+              "name": "Closed",
+              "self": "https://redhat.atlassian.net/rest/api/2/status/6",
+              "statusCategory": {
+                "colorName": "green",
+                "id": 3,
+                "key": "done",
+                "name": "Done",
+                "self": "https://redhat.atlassian.net/rest/api/2/statuscategory/3"
+              }
+            },
+            "summary": "GDBusConnection does not handle serial number overflow (breaking gnome-terminal and NetworkManager)"
+          },
+          "id": "1802994",
+          "key": "RHEL-4139",
+          "self": "https://redhat.atlassian.net/rest/api/2/issue/1802994"
+        },
+        "self": "https://redhat.atlassian.net/rest/api/2/issueLink/399703",
+        "type": {
+          "id": "10001",
+          "inward": "is cloned by",
+          "name": "Cloners",
+          "outward": "clones",
+          "self": "https://redhat.atlassian.net/rest/api/2/issueLinkType/10001"
+        }
+      },
+      {
+        "id": "1710134",
+        "outwardIssue": {
+          "fields": {
+            "issuetype": {
+              "description": "A big user story that needs to be broken down. Created by Jira Software - do not edit or delete.",
+              "hierarchyLevel": 1,
+              "iconUrl": "https://redhat.atlassian.net/images/icons/issuetypes/epic.svg",
+              "id": "10000",
+              "name": "Epic",
+              "self": "https://redhat.atlassian.net/rest/api/2/issuetype/10000",
+              "subtask": false
+            },
+            "priority": {
+              "iconUrl": "https://redhat.atlassian.net/images/icons/priorities/trivial.svg",
+              "id": "10005",
+              "name": "Undefined",
+              "self": "https://redhat.atlassian.net/rest/api/2/priority/10005"
+            },
+            "status": {
+              "description": "Initial creation status. Implies nothing yet and should be very short lived; also can be a Bugzilla status.",
+              "iconUrl": "https://redhat.atlassian.net/images/icons/statuses/generic.png",
+              "id": "10142",
+              "name": "New",
+              "self": "https://redhat.atlassian.net/rest/api/2/status/10142",
+              "statusCategory": {
+                "colorName": "blue-gray",
+                "id": 2,
+                "key": "new",
+                "name": "To Do",
+                "self": "https://redhat.atlassian.net/rest/api/2/statuscategory/2"
+              }
+            },
+            "summary": "AIRTEL LIMITED"
+          },
+          "id": "261363",
+          "key": "CIPOE-2218",
+          "self": "https://redhat.atlassian.net/rest/api/2/issue/261363"
+        },
+        "self": "https://redhat.atlassian.net/rest/api/2/issueLink/1710134",
+        "type": {
+          "id": "10075",
+          "inward": "account is impacted by",
+          "name": "Account",
+          "outward": "impacts account",
+          "self": "https://redhat.atlassian.net/rest/api/2/issueLinkType/10075"
+        }
+      }
+    ],
+    "issuetype": {
+      "avatarId": 10303,
+      "description": "A problem or error.",
+      "hierarchyLevel": 0,
+      "iconUrl": "https://redhat.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10303?size=medium",
+      "id": "10016",
+      "name": "Bug",
+      "self": "https://redhat.atlassian.net/rest/api/2/issuetype/10016",
+      "subtask": false
+    },
+    "labels": [
+      "0day",
+      "MigratedToJIRA"
+    ],
+    "lastViewed": "2026-06-08T21:08:55.242+0000",
+    "priority": {
+      "iconUrl": "https://redhat.atlassian.net/images/icons/priorities/trivial.svg",
+      "id": "10005",
+      "name": "Undefined",
+      "self": "https://redhat.atlassian.net/rest/api/2/priority/10005"
+    },
+    "progress": {
+      "progress": 0,
+      "total": 0
+    },
+    "project": {
+      "avatarUrls": {
+        "16x16": "https://redhat.atlassian.net/rest/api/2/universal_avatar/view/type/project/avatar/10406?size=xsmall",
+        "24x24": "https://redhat.atlassian.net/rest/api/2/universal_avatar/view/type/project/avatar/10406?size=small",
+        "32x32": "https://redhat.atlassian.net/rest/api/2/universal_avatar/view/type/project/avatar/10406?size=medium",
+        "48x48": "https://redhat.atlassian.net/rest/api/2/universal_avatar/view/type/project/avatar/10406"
+      },
+      "id": "10390",
+      "key": "RHEL",
+      "name": "RHEL",
+      "projectCategory": {
+        "description": "Core Platforms Projects",
+        "id": "10013",
+        "name": "Core Platforms",
+        "self": "https://redhat.atlassian.net/rest/api/2/projectCategory/10013"
+      },
+      "projectTypeKey": "software",
+      "self": "https://redhat.atlassian.net/rest/api/2/project/10390",
+      "simplified": false
+    },
+    "reporter": {
+      "accountId": "712020:03587300-7fdd-41fa-9945-3ef508666e61",
+      "accountType": "atlassian",
+      "active": true,
+      "avatarUrls": {
+        "16x16": "https://secure.gravatar.com/avatar/d01ede95989eb5f38054dce9e54ea87f?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FWA-4.png",
+        "24x24": "https://secure.gravatar.com/avatar/d01ede95989eb5f38054dce9e54ea87f?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FWA-4.png",
+        "32x32": "https://secure.gravatar.com/avatar/d01ede95989eb5f38054dce9e54ea87f?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FWA-4.png",
+        "48x48": "https://secure.gravatar.com/avatar/d01ede95989eb5f38054dce9e54ea87f?d=https%3A%2F%2Favatar-management--avatars.us-west-2.prod.public.atl-paas.net%2Finitials%2FWA-4.png"
+      },
+      "displayName": "Watson Automation",
+      "emailAddress": "watson-tool-maintainers@redhat.com",
+      "self": "https://redhat.atlassian.net/rest/api/2/user?accountId=712020%3A03587300-7fdd-41fa-9945-3ef508666e61",
+      "timeZone": "Etc/GMT"
+    },
+    "resolution": null,
+    "resolutiondate": "2025-11-11T13:52:58.305+0000",
+    "security": {
+      "description": "Red Hat Employee and Contractors only",
+      "id": "10034",
+      "name": "Red Hat Employee",
+      "self": "https://redhat.atlassian.net/rest/api/2/securitylevel/10034"
+    },
+    "status": {
+      "name": "New"
+    },
+    "statusCategory": {
+      "colorName": "green",
+      "id": 3,
+      "key": "done",
+      "name": "Done",
+      "self": "https://redhat.atlassian.net/rest/api/2/statuscategory/3"
+    },
+    "statuscategorychangedate": "2025-10-08T14:58:23.216+0000",
+    "subtasks": [],
+    "summary": "GDBusConnection does not handle serial number overflow (breaking gnome-terminal and NetworkManager) [rhel-9.7.z]",
+    "timeestimate": null,
+    "timeoriginalestimate": null,
+    "timespent": null,
+    "timetracking": {},
+    "updated": "2026-04-24T02:35:03.890+0000",
+    "versions": [],
+    "votes": {
+      "hasVoted": false,
+      "self": "https://redhat.atlassian.net/rest/api/2/issue/RHEL-114059/votes",
+      "votes": 0
+    },
+    "watches": {
+      "isWatching": false,
+      "self": "https://redhat.atlassian.net/rest/api/2/issue/RHEL-114059/watchers",
+      "watchCount": 6
+    },
+    "worklog": {
+      "maxResults": 20,
+      "startAt": 0,
+      "total": 0,
+      "worklogs": []
+    },
+    "workratio": -1
+  },
+  "id": "1747923",
+  "key": "RHEL-114059",
+  "remote_links": [],
+  "schema_version": 1,
+  "self": "https://redhat.atlassian.net/rest/api/2/issue/1747923"
+}

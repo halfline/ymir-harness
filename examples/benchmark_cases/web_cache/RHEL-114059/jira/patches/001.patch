@@ -1,0 +1,69 @@
+From b94b44407a088e6e8278d9db8b59fb377e84bda4 Mon Sep 17 00:00:00 2001
+From: Philip Withnall <pwithnall@gnome.org>
+Date: Mon, 3 Feb 2025 18:27:21 +0000
+Subject: [PATCH] gdbusconnection: Prevent sending a serial of zero on overflow
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+It finally happened: someone managed to keep a process alive long
+enough, and using a single `GDBusConnection`, to overflow the
+`last_serial` counter in the connection and send an invalid message with
+serial of zero (which is disallowed by the D-Bus specification).
+
+Avoid that happening in future by skipping serials of zero on overflow,
+and wrapping straight back around to 1.
+
+This looks a little more confusing than it is, because `last_serial` is
+pre-incremented on use, so to skip zero, we explicitly set it to zero.
+This is exactly what happens when the `GDBusConnection` is initialised
+anyway.
+
+I can’t think of a way to add a unit test for this — there is no way to
+affect the value of `last_serial` except by sending messages (each one
+increments it), and in order to get it to overflow by sending messages
+at 1kHz, the test would have to run for 49 days.
+
+Instead, I tested this manually by temporarily modifying
+`GDBusConnection` to initialise `last_serial` to `G_MAXUINT32 - 3`, then
+checked that the unit tests all still passed, and that the overflow code
+was being executed.
+
+Signed-off-by: Philip Withnall <pwithnall@gnome.org>
+
+Fixes: #3592
+---
+ gio/gdbusconnection.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/gio/gdbusconnection.c b/gio/gdbusconnection.c
+index 1f6ca5745e..75371dca07 100644
+--- a/gio/gdbusconnection.c
++++ b/gio/gdbusconnection.c
+@@ -1763,9 +1763,22 @@ g_dbus_connection_send_message_unlocked (GDBusConnection   *connection,
+     return FALSE;
+
+   if (flags & G_DBUS_SEND_MESSAGE_FLAGS_PRESERVE_SERIAL)
+-    serial_to_use = g_dbus_message_get_serial (message);
++    {
++      serial_to_use = g_dbus_message_get_serial (message);
++    }
+   else
+-    serial_to_use = ++connection->last_serial; /* TODO: handle overflow */
++    {
++      /* The serial_to_use must not be zero, as per
++       * https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-messages. */
++      if (connection->last_serial == G_MAXUINT32)
++        connection->last_serial = 1;
++      else
++        connection->last_serial++;
++
++      serial_to_use = connection->last_serial;
++    }
++
++  g_assert (serial_to_use != 0);
+
+   switch (blob[0])
+     {
+--
+GitLab

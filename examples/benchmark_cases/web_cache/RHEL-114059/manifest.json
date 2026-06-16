@@ -1,0 +1,19 @@
+{
+  "case_id": "RHEL-114059",
+  "case_type": "cve_backport",
+  "recorded_files": {
+    "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frpms%2Fglib2/merge_requests/64": "gitlab/merge_request.json",
+    "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frpms%2Fglib2/merge_requests/64/changes": "gitlab/changes.json",
+    "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frpms%2Fglib2/merge_requests/64/commits": "gitlab/commits.json",
+    "https://gitlab.com/redhat/centos-stream/rpms/glib2/-/merge_requests/64.patch": "gitlab/merge_request.patch",
+    "https://gitlab.gnome.org/GNOME/glib/-/commit/b94b44407a088e6e8278d9db8b59fb377e84bda4.patch": "jira/patches/001.patch"
+  },
+  "required_urls": [
+    "https://gitlab.gnome.org/GNOME/glib/-/commit/b94b44407a088e6e8278d9db8b59fb377e84bda4.patch",
+    "https://gitlab.com/redhat/centos-stream/rpms/glib2/-/merge_requests/64.patch",
+    "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frpms%2Fglib2/merge_requests/64",
+    "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frpms%2Fglib2/merge_requests/64/commits",
+    "https://gitlab.com/api/v4/projects/redhat%2Fcentos-stream%2Frpms%2Fglib2/merge_requests/64/changes"
+  ],
+  "schema_version": 1
+}
