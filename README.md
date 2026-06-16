@@ -337,6 +337,12 @@ fixture and service data still comes from replay inputs.
 Expected results may declare `required_artifacts`. Scoring compares that list
 with `generated_artifacts` in the actual result and fails the case when any
 required artifact is missing.
+Expected implementation results may also declare `required_artifact_kinds` with
+semantic artifact names such as `commit_diff`, `spec_file`, `patch_files`,
+`srpm`, `backport_result`, or `log_result`. Scoring checks the captured artifact
+manifest when present and falls back to generated artifact filenames. Expected
+backport results may declare `patch_file_patterns` or `patch_file_pattern` to
+require generated patch filenames containing specific substrings.
 Workflow adapters also expose `YMIR_BENCHMARK_ARTIFACT_DIR` and merge generated
 artifacts, touched files, spec patch declarations, changelog entries, and
 unrelated source change diagnostics from returned workflow payloads, workflow
