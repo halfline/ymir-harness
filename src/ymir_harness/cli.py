@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from ymir_harness import __version__
 from ymir_harness.collect_case import (
@@ -50,6 +51,7 @@ from ymir_harness.runner import (
 )
 from ymir_harness.provenance import parse_provenance_items
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
+from ymir_harness.source_fixtures import resolve_source_cache_ref
 from ymir_harness.validation import validate_case_directory
 from ymir_harness.ymir_workflows import (
     make_ymir_backport_executor,
@@ -764,6 +766,8 @@ def _prepare_case(
     collected = None
     if _prepare_should_collect(args):
         collected = collect_case(_prepare_collect_request(args)).to_json()
+    else:
+        collected = _prepare_complete_existing_case(args)
 
     auto_allowed_hosts: list[str] = []
     payload: dict[str, object] = {
@@ -826,14 +830,160 @@ def _prepare_case(
             + len(capture_result.captured_git_failures)
         )
         if captured_count == 0:
+            if _prepare_has_only_recorded_replay_candidates(capture_result):
+                continue
             payload["status"] = "blocked"
             exit_code = run_exit_code or 1
             break
+        completion = _prepare_complete_existing_case(args)
+        if completion is not None:
+            iteration_payload["collected"] = completion
+            if collected is None:
+                collected = completion
     else:
         payload["status"] = "max_iterations"
         exit_code = 1
 
+    payload["collected"] = collected
     return payload, exit_code
+
+
+def _prepare_has_only_recorded_replay_candidates(capture_result: CaptureMissingResult) -> bool:
+    if not capture_result.skipped:
+        return False
+    recorded_reasons = {
+        "source repo is already recorded",
+        "URL is already recorded",
+        "URL is already recorded with successful content",
+    }
+    recorded_urls = {skip.url for skip in capture_result.skipped if skip.reason in recorded_reasons}
+    unresolved_skips = [
+        skip
+        for skip in capture_result.skipped
+        if skip.reason not in recorded_reasons and skip.url not in recorded_urls
+    ]
+    return not unresolved_skips
+
+
+def _prepare_complete_existing_case(args: argparse.Namespace) -> dict[str, object] | None:
+    expected = _prepare_load_expected(args.cases, args.case_id)
+    if expected is None:
+        return None
+
+    written_paths: list[Path] = []
+    warnings: list[str] = []
+    _prepare_write_inferred_mock_data(args, expected, written_paths, warnings)
+    if not written_paths and not warnings:
+        return None
+    return {
+        "case_id": args.case_id,
+        "cases_dir": str(args.cases.resolve()),
+        "written_paths": [str(path) for path in written_paths],
+        "warnings": warnings,
+        "fetched_urls": [],
+    }
+
+
+def _prepare_load_expected(cases_dir: Path, case_id: str) -> Mapping[str, Any] | None:
+    path = cases_dir / "expected" / f"{case_id}.expected.json"
+    if not path.is_file():
+        return None
+    loaded = load_json_file(path)
+    return loaded if isinstance(loaded, Mapping) else None
+
+
+def _prepare_write_inferred_mock_data(
+    args: argparse.Namespace,
+    expected: Mapping[str, Any],
+    written_paths: list[Path],
+    warnings: list[str],
+) -> None:
+    agent = _workflow_mock_agent(args.workflow)
+    if agent is None:
+        return
+
+    mock_path = args.cases / "mock_data" / agent / f"{args.case_id}.json"
+    if mock_path.exists() and not args.overwrite:
+        return
+
+    package = _string_or_none(expected.get("package"))
+    expected_branch = _string_or_none(expected.get("target_branch")) or _string_or_none(
+        expected.get("fix_version")
+    )
+    if package is None or expected_branch is None:
+        return
+
+    branch = _prepare_centos_stream_branch(expected_branch)
+    if branch is None:
+        warnings.append(
+            "mock_data fixture was not written; cannot infer CentOS Stream branch "
+            f"from {expected_branch!r}"
+        )
+        return
+
+    remote_url = _prepare_centos_stream_distgit_url(package)
+    pre_fix_ref = resolve_source_cache_ref(
+        args.cases,
+        args.case_id,
+        remote_url,
+        f"refs/heads/{branch}",
+    )
+    if pre_fix_ref is None:
+        warnings.append(
+            "mock_data fixture was not written; source_cache does not "
+            f"contain branch {branch!r} for {package}"
+        )
+        return
+
+    payload: dict[str, Any] = {
+        "case_id": args.case_id,
+        "case_type": expected.get("case_type"),
+        "repos": [
+            {
+                "branch": branch,
+                "package": package,
+                "pre_fix_ref": pre_fix_ref,
+                "remote_url": remote_url,
+            }
+        ],
+        "schema_version": 1,
+    }
+    zstream_override = _prepare_zstream_override(branch, expected_branch)
+    if zstream_override:
+        payload["zstream_override"] = zstream_override
+
+    mock_path.parent.mkdir(parents=True, exist_ok=True)
+    mock_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    written_paths.append(mock_path)
+
+
+def _prepare_centos_stream_branch(expected_branch: str) -> str | None:
+    if re.fullmatch(r"c\d+s", expected_branch):
+        return expected_branch
+    match = re.match(r"rhel-(\d+)(?:\.|$)", expected_branch)
+    if match is None:
+        return None
+    return f"c{match.group(1)}s"
+
+
+def _prepare_centos_stream_distgit_url(package: str) -> str:
+    return f"https://gitlab.com/redhat/centos-stream/rpms/{quote(package, safe='._+-')}.git"
+
+
+def _prepare_zstream_override(branch: str, expected_branch: str) -> dict[str, str]:
+    if expected_branch == branch:
+        return {}
+    match = re.search(r"\brhel-(\d+)", expected_branch)
+    if match is None:
+        return {}
+    return {match.group(1): expected_branch}
+
+
+def _string_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
 
 
 def _prepare_has_replay_candidates(results_dir: Path) -> bool:
