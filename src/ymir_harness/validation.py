@@ -33,6 +33,14 @@ from ymir_harness.models import (
     ValidationIssue,
     ValidationReport,
 )
+from ymir_harness.source_fixtures import (
+    source_cache_contains_object,
+    source_cache_repo_for_object,
+    source_fixture_gitlink_commit,
+    source_fixture_path,
+    source_fixture_repositories_with_errors,
+    source_fixture_submodule_url,
+)
 
 
 SOURCE_ARCHIVE_SUFFIXES = (
@@ -591,13 +599,14 @@ def _validate_source_cache(
                 category="source_cache_incomplete",
                 message=(
                     "implementation case source_cache upstream must include "
-                    "a git clone or source archive"
+                    "a source fixture manifest or source archive"
                 ),
                 case_id=result.case_id,
                 path=str(upstream_dir),
             )
         )
 
+    _validate_source_fixture_manifests(cases_dir, upstream_dir, result)
     _validate_upstream_source_archives(upstream_dir, result)
 
     if expected.get("backport_source") == "distgit":
@@ -863,6 +872,81 @@ def _validate_upstream_source_archives(
             )
 
 
+def _validate_source_fixture_manifests(
+    cases_dir: Path,
+    upstream_dir: Path,
+    result: CaseValidationResult,
+) -> None:
+    repositories, errors = source_fixture_repositories_with_errors(cases_dir, result.case_id)
+    for path, message in errors:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message=f"source fixture manifest is invalid: {message}",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+
+    for repository in repositories:
+        _validate_source_fixture_submodule(cases_dir, repository, result)
+
+    for path in sorted(upstream_dir.glob("*.json")):
+        if not path.is_file():
+            result.issues.append(
+                ValidationIssue(
+                    severity="error",
+                    category="source_cache_incomplete",
+                    message="source fixture manifest path must be a file",
+                    case_id=result.case_id,
+                    path=str(path),
+                )
+            )
+
+
+def _validate_source_fixture_submodule(
+    cases_dir: Path,
+    repository: Any,
+    result: CaseValidationResult,
+) -> None:
+    path = source_fixture_path(cases_dir, result.case_id, repository)
+    gitlink_commit = source_fixture_gitlink_commit(cases_dir, result.case_id, repository)
+    if gitlink_commit is None:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="source fixture must be recorded as a git submodule",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+
+    if repository.head_object is not None and gitlink_commit not in {None, repository.head_object}:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="source fixture submodule commit does not match manifest head_object",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+
+    submodule_url = source_fixture_submodule_url(cases_dir, result.case_id, repository)
+    if submodule_url != repository.remote_url:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="source_cache_incomplete",
+                message="source fixture submodule URL does not match manifest remote_url",
+                case_id=result.case_id,
+                path=str(path),
+            )
+        )
+
+
 def _validate_lookaside_artifacts(
     lookaside_dir: Path,
     result: CaseValidationResult,
@@ -885,13 +969,10 @@ def _lookaside_artifacts(lookaside_dir: Path) -> list[Path]:
 
 
 def _contains_upstream_source(upstream_dir: Path) -> bool:
-    if _is_git_checkout(upstream_dir) or _is_bare_git_repository(upstream_dir):
-        return True
-
     for child in upstream_dir.iterdir():
-        if child.is_file() and _is_source_archive(child):
+        if child.is_file() and child.suffix == ".json":
             return True
-        if child.is_dir() and (_is_git_checkout(child) or _is_bare_git_repository(child)):
+        if child.is_file() and _is_source_archive(child):
             return True
 
     return False
@@ -915,10 +996,6 @@ def _has_read_permission(path: Path) -> bool:
         return False
 
     return bool(mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH))
-
-
-def _is_git_checkout(path: Path) -> bool:
-    return (path / ".git").exists()
 
 
 def _is_bare_git_repository(path: Path) -> bool:
@@ -1293,16 +1370,26 @@ def _validate_local_pre_fix_ref(
 ) -> Path | None:
     repo_path = _local_repo_path(remote_url)
     if repo_path is None:
-        result.issues.append(
-            ValidationIssue(
-                severity="warning",
-                category="invalid_pre_fix_ref",
-                message="pre_fix_ref was not checked because remote_url is not local",
-                case_id=result.case_id,
-                path=str(mock_path),
+        cases_dir = _mock_fixture_cases_dir(mock_path)
+        repo_path = _source_cache_repo_path(mock_path, result.case_id, remote_url, pre_fix_ref)
+        if repo_path is None:
+            if cases_dir is not None and source_cache_contains_object(
+                cases_dir,
+                result.case_id,
+                remote_url,
+                pre_fix_ref,
+            ):
+                return None
+            result.issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="invalid_pre_fix_ref",
+                    message="pre_fix_ref was not checked because remote_url is not local",
+                    case_id=result.case_id,
+                    path=str(mock_path),
+                )
             )
-        )
-        return None
+            return None
 
     if not repo_path.exists():
         result.issues.append(
@@ -1316,7 +1403,7 @@ def _validate_local_pre_fix_ref(
         )
         return None
 
-    command = ["git", "-C", str(repo_path), "cat-file", "-e", f"{pre_fix_ref}^{{commit}}"]
+    command = ["git", *_git_command(repo_path, ["cat-file", "-e", f"{pre_fix_ref}^{{commit}}"])]
     completed = subprocess.run(
         command,
         check=False,
@@ -1337,6 +1424,34 @@ def _validate_local_pre_fix_ref(
         return None
 
     return repo_path
+
+
+def _source_cache_repo_path(
+    mock_path: Path,
+    case_id: str,
+    remote_url: str,
+    pre_fix_ref: str,
+) -> Path | None:
+    cases_dir = _mock_fixture_cases_dir(mock_path)
+    if cases_dir is None:
+        return None
+    return source_cache_repo_for_object(cases_dir, case_id, remote_url, pre_fix_ref)
+
+
+def _mock_fixture_cases_dir(mock_path: Path) -> Path | None:
+    if mock_path.parent.parent.name != "mock_data":
+        return None
+    return mock_path.parent.parent.parent
+
+
+def _git_command(repository: Path, args: list[str]) -> list[str]:
+    if _is_bare_git_repository(repository):
+        return ["--git-dir", str(repository), *args]
+    return ["-C", str(repository), *args]
+
+
+def _is_bare_git_repository(path: Path) -> bool:
+    return (path / "HEAD").is_file() and (path / "objects").is_dir()
 
 
 def _local_repo_path(remote_url: str) -> Path | None:
