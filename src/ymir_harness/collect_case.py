@@ -1332,7 +1332,11 @@ def _complete_request(
 ) -> CollectCaseRequest:
     issue = _evidence_issue(request, fetched)
     comments = _evidence_comments(request, fetched)
-    resolution = request.resolution or _derive_resolution(issue, comments)
+    resolution = (
+        request.resolution
+        or _derive_resolution(issue, comments)
+        or _derive_resolution_from_fix_evidence(request, fetched)
+    )
     package = request.package or _derive_package(issue)
     fix_version = request.fix_version or _derive_fix_version(issue)
     target_branch = request.target_branch
@@ -1504,6 +1508,22 @@ def _derive_resolution(issue: Mapping[str, Any] | None, comments: Any) -> str | 
     for body in _comment_bodies(comments):
         if resolution := _comment_resolution(body):
             return resolution
+    return None
+
+
+def _derive_resolution_from_fix_evidence(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> str | None:
+    if (
+        request.gitlab_mr_url
+        or request.patch_urls
+        or fetched.gitlab_mr is not None
+        or fetched.gitlab_mr_url
+        or fetched.gitlab_patch_url
+        or fetched.jira_patch_urls
+    ):
+        return "backport"
     return None
 
 
