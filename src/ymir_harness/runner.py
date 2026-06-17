@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import yaml
 
@@ -35,6 +33,11 @@ from ymir_harness.provenance import collect_provenance
 from ymir_harness.replay import canonicalize_replay_url
 from ymir_harness.safety import detect_replay_violations, detect_unsafe_operations
 from ymir_harness.scoring import _fixture_checksum, load_json_file, score_case
+from ymir_harness.source_fixtures import (
+    SourceFixtureError,
+    materialize_case_source_cache,
+    source_cache_git_rewrites,
+)
 
 RUNNER_NOT_WIRED_REASON = "workflow adapters are not wired yet"
 DEFAULT_CHAT_MODEL = "vertexai:claude-sonnet-4-6"
@@ -127,6 +130,7 @@ def build_no_write_environment(
     network_mode: str | None = None,
     replay_manifest_path: Path | None = None,
     recorded_urls: Sequence[str] = (),
+    source_cache_dir: Path | None = None,
 ) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
     for name in SENSITIVE_ENVIRONMENT_NAMES:
@@ -165,7 +169,7 @@ def build_no_write_environment(
         env["YMIR_BENCHMARK_CASE_ID"] = case_id
         env["YMIR_BENCHMARK_WEB_CACHE_DIR"] = str((cases_dir / "web_cache" / case_id).resolve())
         env["YMIR_BENCHMARK_SOURCE_CACHE_DIR"] = str(
-            (cases_dir / "source_cache" / case_id).resolve()
+            (source_cache_dir or cases_dir / "source_cache" / case_id).resolve()
         )
     else:
         env.pop("YMIR_BENCHMARK_CASE_ID", None)
@@ -495,7 +499,24 @@ def _run_case_result(
         expected = _load_expected_for_policy(expected_path)
         replay_policy = _replay_policy(cases_dir, case_id, expected)
         try:
-            mock_repo_env = _mock_repo_environment(cases_dir, results_dir, case_id, repetition)
+            source_cache_dir = _source_cache_directory(cases_dir, results_dir, case_id, repetition)
+            mock_repo_env = _mock_repo_environment(
+                cases_dir,
+                results_dir,
+                case_id,
+                repetition,
+                source_cache_dir=source_cache_dir,
+            )
+        except SourceFixtureError as exc:
+            return RunCaseResult(
+                case_id=case_id,
+                case_type=case_type,
+                status="failed",
+                repetition=repetition,
+                expected_path=expected_path if expected_path.is_file() else None,
+                actual_path=actual_path,
+                reason=_source_fixture_setup_failure_reason(exc),
+            )
         except MockRepoMaterializationError as exc:
             return RunCaseResult(
                 case_id=case_id,
@@ -527,11 +548,14 @@ def _run_case_result(
             network_mode=replay_policy.network_mode,
             replay_manifest_path=replay_policy.manifest_path,
             recorded_urls=replay_policy.recorded_urls,
+            source_cache_dir=source_cache_dir,
         )
         environment["YMIR_BENCHMARK_REPETITION"] = str(repetition)
         environment.update(artifact_environment(actual_path))
         environment.update(mock_repo_env)
-        _apply_source_cache_git_rewrites(environment, cases_dir, results_dir, case_id, repetition)
+        _apply_source_cache_git_rewrites(
+            environment, source_cache_dir, results_dir, case_id, repetition
+        )
         _write_gateway_gitconfig(environment, results_dir, case_id)
         request = RunCaseRequest(
             case_id=case_id,
@@ -667,6 +691,13 @@ def _mock_repo_setup_failure_reason(exc: Exception) -> str:
     return f"mock repo setup failed: {type(exc).__name__}"
 
 
+def _source_fixture_setup_failure_reason(exc: Exception) -> str:
+    detail = str(exc)
+    if detail:
+        return f"source fixture setup failed: {type(exc).__name__}: {detail}"
+    return f"source fixture setup failed: {type(exc).__name__}"
+
+
 def _jira_mock_setup_failure_reason(exc: Exception) -> str:
     detail = str(exc)
     if detail:
@@ -674,17 +705,33 @@ def _jira_mock_setup_failure_reason(exc: Exception) -> str:
     return f"Jira mock setup failed: {type(exc).__name__}"
 
 
+def _source_cache_directory(
+    cases_dir: Path,
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+) -> Path:
+    return materialize_case_source_cache(
+        cases_dir,
+        case_id,
+        results_dir / f"repeat-{repetition}" / "source-cache" / case_id,
+    )
+
+
 def _mock_repo_environment(
     cases_dir: Path,
     results_dir: Path,
     case_id: str,
     repetition: int,
+    *,
+    source_cache_dir: Path,
 ) -> dict[str, str]:
     materialized = materialize_case_mock_repos(
         cases_dir,
         results_dir,
         case_id,
         repetition=repetition,
+        source_cache_dir=source_cache_dir,
     )
     if materialized is None:
         return {}
@@ -693,12 +740,12 @@ def _mock_repo_environment(
 
 def _apply_source_cache_git_rewrites(
     environment: dict[str, str],
-    cases_dir: Path,
+    source_cache_dir: Path,
     results_dir: Path,
     case_id: str,
     repetition: int,
 ) -> None:
-    rewrites = _source_cache_git_rewrites(cases_dir, case_id)
+    rewrites = source_cache_git_rewrites(source_cache_dir)
     if not rewrites:
         return
 
@@ -737,56 +784,6 @@ def _write_gateway_gitconfig(environment: dict[str, str], results_dir: Path, cas
     destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
 
 
-def _source_cache_git_rewrites(cases_dir: Path, case_id: str) -> tuple[tuple[str, str], ...]:
-    upstream_dir = cases_dir / "source_cache" / case_id / "upstream"
-    if not upstream_dir.is_dir():
-        return ()
-
-    rewrites = []
-    for repository in _source_cache_git_repositories(upstream_dir):
-        remote_url = _git_remote_url(repository)
-        if remote_url is None:
-            continue
-        local_url = repository.resolve().as_uri()
-        rewrites.extend((alias, local_url) for alias in _source_cache_git_aliases(remote_url))
-    return tuple(dict.fromkeys(rewrites))
-
-
-def _source_cache_git_repositories(upstream_dir: Path) -> tuple[Path, ...]:
-    candidates = [upstream_dir, *sorted(upstream_dir.iterdir())]
-    return tuple(
-        candidate
-        for candidate in candidates
-        if candidate.is_dir()
-        and (_is_git_checkout(candidate) or _is_bare_git_repository(candidate))
-    )
-
-
-def _source_cache_git_aliases(remote_url: str) -> tuple[str, ...]:
-    remote_url = canonicalize_replay_url(remote_url)
-    aliases = [*_remote_git_aliases(remote_url)]
-    parsed = urlparse(remote_url)
-    if parsed.scheme in {"http", "https"}:
-        parts = [part for part in parsed.path.strip("/").removesuffix(".git").split("/") if part]
-        if len(parts) >= 2 and parts[-2] == "rpms":
-            fedora_url = f"https://src.fedoraproject.org/rpms/{parts[-1]}.git"
-            aliases.extend(_remote_git_aliases(fedora_url))
-        if parsed.hostname == "gitlab.gnome.org" and len(parts) >= 2:
-            github_url = f"https://github.com/{'/'.join(parts)}.git"
-            aliases.extend(_remote_git_aliases(github_url))
-    return tuple(dict.fromkeys(aliases))
-
-
-def _remote_git_aliases(remote_url: str) -> tuple[str, ...]:
-    remote_url = canonicalize_replay_url(remote_url)
-    aliases = [remote_url]
-    if remote_url.endswith(".git"):
-        aliases.append(remote_url.removesuffix(".git"))
-    else:
-        aliases.append(f"{remote_url}.git")
-    return tuple(dict.fromkeys(aliases))
-
-
 def _append_gitconfig_rewrites(path: Path, rewrites: Sequence[tuple[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
@@ -815,39 +812,6 @@ def _existing_gitconfig_instead_of_values(content: str) -> set[str]:
         if value:
             values.add(value)
     return values
-
-
-def _git_remote_url(repository: Path) -> str | None:
-    completed = subprocess.run(
-        _git_command(repository, ["config", "--get", "remote.origin.url"]),
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    if completed.returncode != 0:
-        return None
-    return completed.stdout.strip() or None
-
-
-def _git_command(repository: Path, args: list[str]) -> list[str]:
-    if _is_bare_git_repository(repository):
-        _ensure_bare_git_runtime_dirs(repository)
-        return ["git", f"--git-dir={repository}", *args]
-    return ["git", "-C", str(repository), *args]
-
-
-def _ensure_bare_git_runtime_dirs(repository: Path) -> None:
-    (repository / "refs" / "heads").mkdir(parents=True, exist_ok=True)
-    (repository / "refs" / "tags").mkdir(parents=True, exist_ok=True)
-
-
-def _is_git_checkout(path: Path) -> bool:
-    return (path / ".git").exists()
-
-
-def _is_bare_git_repository(path: Path) -> bool:
-    return (path / "HEAD").is_file() and (path / "objects").is_dir()
 
 
 def _jira_mock_directory(
