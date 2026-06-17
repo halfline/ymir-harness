@@ -459,13 +459,14 @@ def _cached_shell_download(
     if replay_cache is None or not _is_shell_download(command):
         return None
 
-    urls = _external_urls(_command_tokens(command))
+    urls = _shell_download_urls(command)
     if len(urls) != 1 or not replay_cache.has_url(urls[0]):
         return None
 
+    stdout_body = b"" if _is_compound_shell_download(command) else replay_cache.read_bytes(urls[0])
     return _SubprocessReplay(
         returncode=0,
-        stdout_body=replay_cache.read_bytes(urls[0]),
+        stdout_body=stdout_body,
         stderr_body=b"",
     )
 
@@ -832,11 +833,27 @@ def _command_tokens(command: Any) -> list[str]:
 
 
 def _is_shell_download(command: Any) -> bool:
+    return bool(_shell_download_urls(command))
+
+
+def _shell_download_urls(command: Any) -> list[str]:
     tokens = _command_tokens(command)
     if not tokens:
-        return False
+        return []
+    urls: list[str] = []
+    for segment in _shell_command_segments(tokens):
+        command_tokens = _tokens_after_env(segment)
+        if command_tokens and PathName(command_tokens[0]).name in {"curl", "wget"}:
+            urls.extend(_external_urls(command_tokens))
+    return urls
+
+
+def _is_compound_shell_download(command: Any) -> bool:
+    tokens = _command_tokens(command)
     command_tokens = _tokens_after_env(tokens)
-    return bool(command_tokens) and PathName(command_tokens[0]).name in {"curl", "wget"}
+    if not command_tokens or PathName(command_tokens[0]).name not in {"curl", "wget"}:
+        return True
+    return any(token in {"&&", "||", ";", "|"} for token in command_tokens)
 
 
 def _is_mock_git_command(
