@@ -907,6 +907,7 @@ def _backport_dependencies(
 
     _patch_backport_no_write_subprocesses(backport_module)
     _patch_backport_workflow_step_logging(backport_module)
+    _patch_backport_source_changelog(backport_module)
     _patch_fixture_duckduckgo_search(backport_module)
     _patch_no_write_candidate_build_lookup()
 
@@ -1009,6 +1010,28 @@ def _patch_backport_workflow_step_logging(backport_module: Any) -> None:
 
     workflow_class.add_step = harness_add_step
     backport_module._ymir_harness_workflow_step_logging_patched = True
+
+
+def _patch_backport_source_changelog(backport_module: Any) -> None:
+    if getattr(backport_module, "_ymir_harness_source_changelog_patched", False):
+        return
+
+    original_extract_source_changelog = backport_module.extract_source_changelog
+
+    async def harness_extract_source_changelog(
+        local_clone: Path,
+        upstream_patches: list[str],
+        package: str,
+    ) -> str | None:
+        source_changelog = await _maybe_await(
+            original_extract_source_changelog(local_clone, upstream_patches, package)
+        )
+        if source_changelog or os.getenv("DRY_RUN", "False").lower() != "true":
+            return source_changelog
+        return _source_changelog_from_replay_patch_files(local_clone, package)
+
+    backport_module.extract_source_changelog = harness_extract_source_changelog
+    backport_module._ymir_harness_source_changelog_patched = True
 
 
 def _restore_backport_release_from_head(state: Any) -> None:
@@ -1125,6 +1148,72 @@ def _spec_patch_filenames(spec_text: str) -> list[str]:
         if "%" not in filename:
             filenames.append(filename)
     return list(dict.fromkeys(filenames))
+
+
+def _source_changelog_from_replay_patch_files(local_clone: Path, package: str) -> str | None:
+    case_id = os.getenv("YMIR_BENCHMARK_CASE_ID")
+    if not case_id:
+        return None
+
+    collected: list[str] = []
+    seen: set[str] = set()
+    for patch_path in sorted(local_clone.glob(f"{case_id}-*.patch")):
+        try:
+            patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in _source_changelog_from_patch_text(patch_text, package):
+            if line in seen:
+                continue
+            seen.add(line)
+            collected.append(line)
+
+    return "\n".join(collected) if collected else None
+
+
+def _source_changelog_from_patch_text(patch_text: str, package: str) -> list[str]:
+    spec_name = f"{package}.spec"
+    in_spec_diff = False
+    in_changelog = False
+    collecting_entry = False
+    collected: list[str] = []
+
+    for line in patch_text.splitlines():
+        if line.startswith("diff --git "):
+            in_spec_diff = _diff_git_mentions_file(line, spec_name)
+            in_changelog = False
+            collecting_entry = False
+            continue
+        if not in_spec_diff:
+            continue
+        if line.startswith("+++ "):
+            in_spec_diff = line == f"+++ b/{spec_name}" or line.endswith(f"/{spec_name}")
+            continue
+
+        content = line[1:] if line[:1] in {" ", "+", "-"} else line
+        if content.strip() == "%changelog":
+            in_changelog = True
+            collecting_entry = False
+            continue
+        if not in_changelog:
+            continue
+
+        if line.startswith("+* "):
+            collecting_entry = True
+            continue
+        if collecting_entry and line.startswith("+"):
+            entry_line = line[1:].rstrip()
+            if entry_line:
+                collected.append(entry_line)
+            continue
+        if collecting_entry and line.startswith(" ") and line[1:].startswith("* "):
+            break
+
+    return collected
+
+
+def _diff_git_mentions_file(line: str, file_name: str) -> bool:
+    return f" a/{file_name} " in line and f" b/{file_name}" in line
 
 
 def _set_field(value: Any, name: str, item: Any) -> None:
