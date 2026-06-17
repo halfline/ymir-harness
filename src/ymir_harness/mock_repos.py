@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+from ymir_harness.source_fixtures import find_source_cache_repository, remote_git_aliases
 
 
 class MockRepoMaterializationError(RuntimeError):
@@ -67,6 +69,7 @@ def materialize_case_mock_repos(
     case_id: str,
     *,
     repetition: int,
+    source_cache_dir: Path | None = None,
 ) -> MockRepoEnvironment | None:
     mock_paths = sorted((cases_dir / "mock_data").glob(f"*/{case_id}.json"))
     if not mock_paths:
@@ -96,6 +99,7 @@ def materialize_case_mock_repos(
                 workdir,
                 cases_dir=cases_dir,
                 case_id=case_id,
+                source_cache_dir=source_cache_dir,
             )
             if materialized is None:
                 continue
@@ -154,6 +158,7 @@ def _materialize_repo(
     *,
     cases_dir: Path,
     case_id: str,
+    source_cache_dir: Path | None,
 ) -> MaterializedRepo | None:
     package = _required_string(repo_config, "package", mock_path, index)
     branch = _required_string(repo_config, "branch", mock_path, index)
@@ -162,7 +167,9 @@ def _materialize_repo(
     source_url = _optional_string(repo_config, "source_url", mock_path, index)
 
     source = _cloneable_source(
-        source_url or _source_cache_clone_source(cases_dir, case_id, remote_url) or remote_url
+        source_url
+        or _source_cache_clone_source(cases_dir, case_id, remote_url, source_cache_dir)
+        or remote_url
     )
     if source is None:
         return None
@@ -224,56 +231,19 @@ def _cloneable_source(remote_url: str) -> str | None:
     return None
 
 
-def _source_cache_clone_source(cases_dir: Path, case_id: str, remote_url: str) -> str | None:
-    upstream_dir = cases_dir / "source_cache" / case_id / "upstream"
-    if not upstream_dir.is_dir():
-        return None
-
-    expected_aliases = set(_remote_url_aliases(remote_url))
-    for repository in _source_cache_git_repositories(upstream_dir):
-        cached_remote = _git_remote_url(repository)
-        if cached_remote is None:
-            continue
-        if expected_aliases & set(_remote_url_aliases(cached_remote)):
-            return str(repository)
-    return None
-
-
-def _source_cache_git_repositories(upstream_dir: Path) -> tuple[Path, ...]:
-    candidates = [upstream_dir, *sorted(upstream_dir.iterdir())]
-    return tuple(
-        candidate
-        for candidate in candidates
-        if candidate.is_dir()
-        and (_is_git_checkout(candidate) or _is_bare_git_repository(candidate))
+def _source_cache_clone_source(
+    cases_dir: Path,
+    case_id: str,
+    remote_url: str,
+    source_cache_dir: Path | None,
+) -> str | None:
+    repository = find_source_cache_repository(
+        source_cache_dir or cases_dir / "source_cache" / case_id,
+        remote_url,
     )
-
-
-def _git_remote_url(repository: Path) -> str | None:
-    completed = subprocess.run(
-        ["git", *_git_command(repository, ["config", "--get", "remote.origin.url"])],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    if completed.returncode != 0:
+    if repository is None:
         return None
-    return completed.stdout.strip() or None
-
-
-def _git_command(repository: Path, args: Sequence[str]) -> list[str]:
-    if _is_bare_git_repository(repository):
-        return ["--git-dir", str(repository), *args]
-    return ["-C", str(repository), *args]
-
-
-def _is_git_checkout(path: Path) -> bool:
-    return (path / ".git").exists()
-
-
-def _is_bare_git_repository(path: Path) -> bool:
-    return (path / "HEAD").is_file() and (path / "objects").is_dir()
+    return str(repository)
 
 
 def _repo_dir_name(package: str, index: int) -> str:
@@ -318,12 +288,7 @@ def _remote_url_aliases(remote_url: str) -> tuple[str, ...]:
     parsed = urlparse(remote_url)
     if parsed.scheme not in {"http", "https", "ssh", "git"}:
         return (remote_url,)
-    aliases = [remote_url]
-    if remote_url.endswith(".git"):
-        aliases.append(remote_url.removesuffix(".git"))
-    else:
-        aliases.append(f"{remote_url}.git")
-    return tuple(dict.fromkeys(aliases))
+    return remote_git_aliases(remote_url)
 
 
 def _string_list(value: Any) -> list[str]:
