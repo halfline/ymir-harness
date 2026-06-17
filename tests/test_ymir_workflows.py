@@ -817,6 +817,55 @@ def test_fallback_update_release_text_bumps_stream_release(tmp_path: Path) -> No
     )
 
 
+def test_restore_backport_release_from_head_discards_agent_release_bump(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "dist-git"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ymir-harness@example.invalid"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Ymir Harness"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+    spec_path = repo_path / "dnsmasq.spec"
+    spec_path.write_text(
+        "Name:           dnsmasq\n"
+        "Version:        2.79\n"
+        "Release:        31%{?dist}\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "dnsmasq.spec"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=repo_path,
+        check=True,
+        capture_output=True,
+    )
+    spec_path.write_text(
+        "Name:           dnsmasq\n"
+        "Version:        2.79\n"
+        "Release:        32%{?dist}\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("DRY_RUN", "true")
+
+    workflow_module._restore_backport_release_from_head(
+        _State(local_clone=repo_path, package="dnsmasq")
+    )
+
+    assert "Release:        31%{?dist}\n" in spec_path.read_text(encoding="utf-8")
+
+
 def test_recover_backport_stage_changes_stages_spec_patch_files_from_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
