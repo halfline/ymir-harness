@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 import traceback
-from configparser import ConfigParser
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, is_dataclass
@@ -1328,10 +1327,11 @@ def _fixture_search_candidates(request: RunCaseRequest) -> list[dict[str, str]]:
             add(str(url), str(url), "Required fixture URL.")
 
     source_cache = request.cases_dir / "source_cache" / request.case_id / "upstream"
-    for config_path in sorted(source_cache.glob("**/config")):
-        url = _git_remote_url(config_path)
+    for manifest_path in sorted(source_cache.glob("*.json")):
+        manifest = _read_json_object(manifest_path)
+        url = _string_value(manifest.get("remote_url"))
         if url:
-            add(url, url, "Cached source repository.")
+            add(url, url, "Cached source fixture.")
 
     return candidates
 
@@ -1382,18 +1382,6 @@ def _urls_from_value(value: Any) -> list[str]:
 
 def _normalize_fixture_url(url: str) -> str:
     return url.split("|", 1)[0].rstrip(").,|]")
-
-
-def _git_remote_url(config_path: Path) -> str | None:
-    parser = ConfigParser()
-    try:
-        parser.read(config_path, encoding="utf-8")
-    except OSError:
-        return None
-    for section in parser.sections():
-        if section.startswith('remote "') and parser.has_option(section, "url"):
-            return parser.get(section, "url")
-    return None
 
 
 def _search_score(query_terms: set[str], text: str) -> int:
@@ -1476,9 +1464,8 @@ def _patch_no_write_update_release(specfile_module: Any) -> None:
         try:
             return await original_update_release_run(self, tool_input, options, context)
         except Exception as exc:
-            if (
-                os.getenv("DRY_RUN", "False").lower() != "true"
-                or not _is_system_rpm_bindings_error(exc)
+            if os.getenv("DRY_RUN", "False").lower() != "true" or not _is_system_rpm_bindings_error(
+                exc
             ):
                 raise
 
