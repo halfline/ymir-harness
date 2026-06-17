@@ -1867,6 +1867,8 @@ def test_collect_case_caches_gitlab_project_source_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
     source_repo, pre_fix_ref = _create_git_repo(tmp_path)
     gitconfig_path = tmp_path / "gitconfig"
     gitconfig_path.write_text(
@@ -1915,7 +1917,7 @@ def test_collect_case_caches_gitlab_project_source_by_default(
 
     result = collect_case(
         CollectCaseRequest(
-            cases_dir=tmp_path / "benchmark_cases",
+            cases_dir=cases_dir,
             case_id="RHEL-12345",
             case_type="cve_backport",
             resolution="backport",
@@ -1927,19 +1929,23 @@ def test_collect_case_caches_gitlab_project_source_by_default(
         )
     )
 
-    upstream_dir = tmp_path / "benchmark_cases" / "source_cache" / "RHEL-12345" / "upstream"
-    cached_repos = list(upstream_dir.iterdir())
-    assert len(cached_repos) == 1
+    upstream_dir = cases_dir / "source_cache" / "RHEL-12345" / "upstream"
+    manifests = list(upstream_dir.glob("*.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    checkout = upstream_dir / manifest["path"]
     subprocess.run(
         [
             "git",
-            f"--git-dir={cached_repos[0]}",
+            "-C",
+            str(checkout),
             "cat-file",
             "-e",
             f"{pre_fix_ref}^{{commit}}",
         ],
         check=True,
     )
+    assert manifest["remote_url"] == "https://gitlab.com/group/pkg.git"
     assert result.warnings == []
     assert seen_urls == list(responses)
 
