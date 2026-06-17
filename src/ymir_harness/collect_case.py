@@ -41,6 +41,11 @@ from ymir_harness.models import (
     ALLOWED_RESOLUTIONS,
     SCHEMA_VERSION,
 )
+from ymir_harness.source_fixtures import (
+    is_git_worktree,
+    source_fixture_name,
+    write_source_fixture_from_repository,
+)
 
 
 YMIR_RESULT_LABELS = {
@@ -2454,33 +2459,38 @@ def _cache_upstream_source_repo(
     result: CollectCaseResult,
 ) -> None:
     remote_url = _git_clone_url(project_url)
-    destination = (
+    fixture_path = (
         cases_dir
         / "source_cache"
         / request.case_id
         / "upstream"
-        / _mock_repo_cache_name(remote_url)
+        / f"{source_fixture_name(remote_url)}.json"
     )
     try:
-        if destination.exists():
-            if not request.overwrite:
-                return
-            _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
-        else:
-            _run_git(
-                _git_clone_command(remote_url, str(destination), request.gitlab_token_env),
-                destination,
-            )
-    except CollectCaseError as exc:
-        if not destination.exists():
-            result.warnings.append(f"skipped upstream source cache for {project_url}: {exc}")
+        if fixture_path.exists() and not request.overwrite:
             return
-        result.warnings.append(f"upstream source cache may be stale for {project_url}: {exc}")
-        return
 
-    for path in (destination / "HEAD", destination / "config"):
-        if path.is_file():
-            _record_written(path, result)
+        if not ((cases_dir / ".git").exists() and is_git_worktree(cases_dir)):
+            raise CollectCaseError(f"cases directory is not a git worktree: {cases_dir}")
+
+        with tempfile.TemporaryDirectory(prefix="ymir-harness-source-fixture-") as tmp:
+            mirror = Path(tmp) / _mock_repo_cache_name(remote_url)
+            _run_git(
+                _git_clone_command(remote_url, str(mirror), request.gitlab_token_env),
+                Path(tmp),
+            )
+            manifest_path = write_source_fixture_from_repository(
+                cases_dir,
+                request.case_id,
+                mirror,
+                remote_url=remote_url,
+                overwrite=request.overwrite,
+            )
+        _record_written(manifest_path, result)
+        return
+    except CollectCaseError as exc:
+        result.warnings.append(f"skipped upstream source cache for {project_url}: {exc}")
+        return
 
 
 def _cache_mock_repo_lookaside_sources(
