@@ -182,6 +182,28 @@ def test_enforcement_replays_recorded_shell_download(tmp_path: Path) -> None:
     assert completed.stdout == "cached patch\n"
 
 
+def test_enforcement_replays_recorded_compound_shell_download(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(
+        tmp_path,
+        {"https://example.invalid/archive.tar.gz": "archives/source.tar.gz"},
+    )
+    (manifest_path.parent / "archives").mkdir()
+    (manifest_path.parent / "archives" / "source.tar.gz").write_bytes(
+        b"\x1f\x8b\x08\x00binary replay body"
+    )
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        completed = subprocess.run(
+            "cd /tmp && curl -sL https://example.invalid/archive.tar.gz | tar xz",
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+
+
 def test_enforcement_returns_replay_miss_for_unrecorded_shell_download(
     tmp_path: Path,
 ) -> None:
