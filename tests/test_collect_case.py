@@ -1371,6 +1371,132 @@ def test_collect_case_fetches_gitlab_mr_into_replay_fixture(
     assert result.fetched_urls == seen_urls == list(responses)
 
 
+def test_collect_case_infers_backport_from_auto_discovered_gitlab_mr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    mr_url = "https://gitlab.example/group/pkg/-/merge_requests/7"
+    patch_url = f"{mr_url}.patch"
+    issue_json = _write_json(
+        tmp_path / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": {
+                "summary": "Closed historical bug",
+                "status": {"name": "Closed"},
+                "resolution": {"name": "Done-Errata"},
+                "components": [{"name": "dnsmasq"}],
+                "fixVersions": [{"name": "rhel-8.10"}],
+                "labels": [],
+            },
+        },
+    )
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {"comments": [{"body": "Human discussion without structured resolution."}]},
+    )
+    links_json = _write_json(
+        tmp_path / "links.json",
+        [{"object": {"url": mr_url}}],
+    )
+
+    def fake_fetch_gitlab_mr_evidence(_gitlab_mr_url, _request, _result):
+        return (
+            {
+                "target_branch": "c8s",
+                "web_url": mr_url,
+                "diff_refs": {"base_sha": "prefix"},
+            },
+            [{"id": "fix123"}],
+            patch_url,
+            b"diff --git a/source.c b/source.c\n",
+            [
+                collect_case_module.FetchedRecord(
+                    url=patch_url,
+                    relative_path="gitlab/merge_request.patch",
+                    body=b"diff --git a/source.c b/source.c\n",
+                )
+            ],
+        )
+
+    def fake_maintainer_rules(package, _request, _result):
+        return collect_case_module.FetchedRecord(
+            url=f"https://rules.example/{package}/AGENTS.md",
+            relative_path=f"gitlab/maintainer_rules/{package}/AGENTS.md",
+            body=b"",
+        )
+
+    def fake_internal_branches(package, fix_version, _request, _result):
+        return (
+            collect_case_module.FetchedRecord(
+                url=f"https://gitlab.example/internal/{package}",
+                relative_path=f"gitlab/internal_rhel/{package}/project.json",
+                body=b"{}",
+            ),
+            collect_case_module.FetchedRecord(
+                url=f"https://gitlab.example/internal/{package}/branches",
+                relative_path=f"gitlab/internal_rhel/{package}/branches.json",
+                body=json.dumps([{"name": fix_version}]).encode("utf-8"),
+            ),
+        )
+
+    monkeypatch.setattr(
+        collect_case_module,
+        "_fetch_gitlab_mr_evidence",
+        fake_fetch_gitlab_mr_evidence,
+    )
+    monkeypatch.setattr(
+        collect_case_module,
+        "_fetch_maintainer_rules_record",
+        fake_maintainer_rules,
+    )
+    monkeypatch.setattr(
+        collect_case_module,
+        "_fetch_internal_rhel_branch_records",
+        fake_internal_branches,
+    )
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            network_mode="replay_only",
+            mock_agent="backport",
+            jira_issue_json=issue_json,
+            jira_comments_json=comments_json,
+            jira_links_json=links_json,
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["resolution"] == "backport"
+    assert expected["case_type"] == "cve_backport"
+    assert expected["package"] == "dnsmasq"
+    assert expected["target_branch"] == "c8s"
+    assert expected["fix_version"] == "rhel-8.10"
+    assert expected["patch_urls"] == [patch_url]
+    assert expected["required_artifact_kinds"] == [
+        "commit_diff",
+        "spec_file",
+        "patch_files",
+        "srpm",
+    ]
+    assert expected["patch_file_patterns"] == ["RHEL-12345"]
+
+    mock = json.loads(
+        (cases_dir / "mock_data" / "backport" / "RHEL-12345.json").read_text(encoding="utf-8")
+    )
+    assert mock["repos"][0] == {
+        "branch": "c8s",
+        "package": "dnsmasq",
+        "pre_fix_ref": "prefix",
+        "remote_url": "https://gitlab.example/group/pkg.git",
+    }
+
+
 def test_collect_case_records_commit_patches_from_jira_merge_request_patch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
