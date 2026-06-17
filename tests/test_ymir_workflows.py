@@ -98,10 +98,23 @@ def test_fixture_search_results_includes_recorded_urls_and_source_remotes(
         ),
         encoding="utf-8",
     )
-    source_repo = cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "redis.git"
-    source_repo.mkdir(parents=True)
-    (source_repo / "config").write_text(
-        '[remote "origin"]\n\turl = https://github.com/redis/redis.git\n',
+    source_fixture = cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "redis-fixture.json"
+    source_fixture.parent.mkdir(parents=True)
+    source_fixture.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "redis-fixture",
+                "path": "redis-fixture",
+                "remote_url": "https://github.com/redis/redis.git",
+                "refs": [
+                    {
+                        "name": "refs/heads/main",
+                        "object": "0" * 40,
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -811,9 +824,8 @@ def test_fallback_update_release_text_bumps_stream_release(tmp_path: Path) -> No
         abandon_autorelease=False,
     )
 
-    assert (
-        "Release:        32%{?extraversion:.%{extraversion}}%{?dist}\n"
-        in spec_path.read_text(encoding="utf-8")
+    assert "Release:        32%{?extraversion:.%{extraversion}}%{?dist}\n" in spec_path.read_text(
+        encoding="utf-8"
     )
 
 
@@ -838,9 +850,7 @@ def test_restore_backport_release_from_head_discards_agent_release_bump(
     )
     spec_path = repo_path / "dnsmasq.spec"
     spec_path.write_text(
-        "Name:           dnsmasq\n"
-        "Version:        2.79\n"
-        "Release:        31%{?dist}\n",
+        "Name:           dnsmasq\nVersion:        2.79\nRelease:        31%{?dist}\n",
         encoding="utf-8",
     )
     subprocess.run(["git", "add", "dnsmasq.spec"], cwd=repo_path, check=True, capture_output=True)
@@ -851,9 +861,7 @@ def test_restore_backport_release_from_head_discards_agent_release_bump(
         capture_output=True,
     )
     spec_path.write_text(
-        "Name:           dnsmasq\n"
-        "Version:        2.79\n"
-        "Release:        32%{?dist}\n",
+        "Name:           dnsmasq\nVersion:        2.79\nRelease:        32%{?dist}\n",
         encoding="utf-8",
     )
 
@@ -1249,9 +1257,7 @@ def test_ymir_backport_executor_captures_dirty_spec_referenced_patch(
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, check=True)
 
     spec_path.write_text(
-        "Name: dnsmasq\nVersion: 1\n"
-        "Patch0001: existing.patch\n"
-        "Patch0002: fix.patch\n",
+        "Name: dnsmasq\nVersion: 1\nPatch0001: existing.patch\nPatch0002: fix.patch\n",
         encoding="utf-8",
     )
     (repo_path / "fix.patch").write_text(_source_patch_text(), encoding="utf-8")
