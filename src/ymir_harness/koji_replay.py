@@ -152,8 +152,7 @@ def recorded_candidate_build(
     record = records.get(key)
     if not isinstance(record, Mapping):
         raise ReplayCacheError(
-            "Koji candidate build replay miss: "
-            f"package={package} dist_git_branch={dist_git_branch}"
+            f"Koji candidate build replay miss: package={package} dist_git_branch={dist_git_branch}"
         )
 
     evr_payload = record.get("evr")

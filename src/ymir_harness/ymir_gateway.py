@@ -76,10 +76,7 @@ def _patch_no_write_gateway_tools() -> None:
         ) -> StringToolOutput:
             del options, context
             return StringToolOutput(
-                result=(
-                    f"Z-Stream branch {tool_input.branch} already exists, "
-                    "no need to create it"
-                )
+                result=(f"Z-Stream branch {tool_input.branch} already exists, no need to create it")
             )
 
     class HarnessLookasideToolInput(BaseModel):
@@ -112,7 +109,9 @@ def _patch_no_write_gateway_tools() -> None:
             except ReplayCacheError as exc:
                 raise ToolError(f"Failed to download sources from replay cache: {exc}") from exc
             detail = f" ({copied} file(s))" if copied else ""
-            return StringToolOutput(result=f"Successfully downloaded sources from replay cache{detail}")
+            return StringToolOutput(
+                result=f"Successfully downloaded sources from replay cache{detail}"
+            )
 
     class HarnessPrepSourcesTool(Tool[HarnessLookasideToolInput, ToolRunOptions, StringToolOutput]):
         name = "prep_sources"
@@ -189,9 +188,7 @@ def _patch_no_write_gateway_tools() -> None:
             fork_namespace = os.getenv("FORK_NAMESPACE", "ymir-harness")
             repository = tool_input.repository.rstrip("/")
             name = repository.rsplit("/", 1)[-1].removesuffix(".git")
-            return StringToolOutput(
-                result=f"https://gitlab.com/{fork_namespace}/{name}.git"
-            )
+            return StringToolOutput(result=f"https://gitlab.com/{fork_namespace}/{name}.git")
 
     class HarnessBuildPackageTool(
         Tool[
