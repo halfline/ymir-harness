@@ -93,6 +93,56 @@ def test_capture_missing_records_replay_miss_url(
     assert [capture.url for capture in result.captured] == [url]
 
 
+def test_capture_missing_mirrors_replay_miss_project_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.json"
+    url = "https://github.com/opencontainers/runc"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        f'{{"reason": "replay miss: URL is not recorded in replay cache: {url}"}}\n',
+    )
+
+    def fake_run(command, cwd, check, stdout, stderr, text):
+        assert command[:4] == ["git", "clone", "--mirror", "--quiet"]
+        assert command[4] == f"{url}.git"
+        destination = Path(command[5])
+        destination.mkdir(parents=True)
+        (destination / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (destination / "config").write_text(
+            f'[remote "origin"]\n\turl = {url}.git\n',
+            encoding="utf-8",
+        )
+        assert cwd == destination.parent
+        assert check is False
+        assert stdout == subprocess.PIPE
+        assert stderr == subprocess.PIPE
+        assert text is True
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def fake_urlopen(request, timeout: float):
+        assert request.full_url == url
+        assert timeout == 30.0
+        return _Response(b"<html>project</html>\n", "text/html; charset=utf-8")
+
+    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+        )
+    )
+
+    assert [capture.url for capture in result.captured_source] == [url]
+    assert [capture.url for capture in result.captured] == [url]
+
+
 def test_capture_missing_records_tool_http_404_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
