@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from ymir_harness.cli import main
 from ymir_harness.collect_case import CollectCaseResult
 from ymir_harness.models import CaseValidationResult, RunCaseResult, RunReport, ValidationReport
 from ymir_harness.runner import RunCaseExecution
+from ymir_harness.source_fixtures import write_source_fixture_from_repository
 
 
 def test_cli_prints_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1021,6 +1023,133 @@ def test_cli_prepare_case_collects_until_run_succeeds(
     assert collect_requests[0].gitlab_token_env == "GITLAB_API_TOKEN"
 
 
+def test_cli_prepare_case_writes_existing_triage_mock_data(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    case_id = "RHEL-12345"
+    remote_url = "https://gitlab.com/redhat/centos-stream/rpms/dnsmasq.git"
+    _write_json(
+        cases_dir / "expected" / f"{case_id}.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": case_id,
+            "case_type": "not_affected",
+            "case_status": "quarantined",
+            "resolution": "not_affected",
+            "package": "dnsmasq",
+            "fix_version": "rhel-9.8",
+            "network_mode": "replay_only",
+        },
+    )
+
+    source_repo = tmp_path / "source"
+    subprocess.run(["git", "init", str(source_repo)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "-C", str(source_repo), "checkout", "-b", "c9s"], check=True)
+    (source_repo / "dnsmasq.spec").write_text("Name: dnsmasq\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "dnsmasq.spec"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "seed",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    pre_fix_ref = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "c9s"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    _write_source_fixture(cases_dir, tmp_path, case_id, source_repo, remote_url)
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id=case_id,
+                    case_type="not_affected",
+                    case_status="quarantined",
+                    status="valid",
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        mock_path = cases_dir / "mock_data" / "triage" / f"{case_id}.json"
+        mock_data = json.loads(mock_path.read_text(encoding="utf-8"))
+        assert mock_data == {
+            "case_id": case_id,
+            "case_type": "not_affected",
+            "repos": [
+                {
+                    "branch": "c9s",
+                    "package": "dnsmasq",
+                    "pre_fix_ref": pre_fix_ref,
+                    "remote_url": remote_url,
+                }
+            ],
+            "schema_version": 1,
+            "zstream_override": {"9": "rhel-9.8"},
+        }
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id=case_id,
+                    case_type="not_affected",
+                    status="passed",
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    monkeypatch.setattr(cli_module, "collect_case", lambda _request: pytest.fail())
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "_prepare_has_replay_candidates", lambda _results_dir: False)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                case_id,
+                "--workflow",
+                "ymir-triage",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    mock_path = cases_dir / "mock_data" / "triage" / f"{case_id}.json"
+    assert output["status"] == "succeeded"
+    assert output["collected"]["written_paths"] == [str(mock_path)]
+
+
 def test_cli_prepare_case_reruns_after_passing_run_captures_replay_miss(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1128,6 +1257,133 @@ def test_cli_prepare_case_reruns_after_passing_run_captures_replay_miss(
     assert len(capture_requests) == 1
     assert len(output["iterations"][0]["capture"]["captured_jira"]) == 1
     assert "capture" not in output["iterations"][1]
+
+
+def test_cli_prepare_case_reruns_after_recorded_replay_candidate(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    capture_requests = []
+    run_ids = []
+    has_replay_candidates = [True, False]
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id="RHEL-12345",
+                    case_type="not_affected",
+                    case_status="active",
+                    status="valid",
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        run_ids.append(kwargs["run_id"])
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id="RHEL-12345",
+                    case_type="not_affected",
+                    status="passed",
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    def fake_capture_missing(request):
+        capture_requests.append(request)
+        result = CaptureMissingResult(
+            case_id=request.case_id,
+            cases_dir=request.cases_dir,
+            run_path=request.run_path,
+        )
+        result.skipped.append(
+            CaptureFailure(
+                url="https://gitlab.example/project/raw/c9s/package.spec",
+                reason="URL is already recorded",
+            )
+        )
+        return result
+
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_has_replay_candidates",
+        lambda _results_dir: has_replay_candidates.pop(0),
+    )
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--workflow",
+                "ymir-triage",
+                "--variant",
+                "baseline",
+                "--max-iterations",
+                "2",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "succeeded"
+    assert run_ids == ["baseline-RHEL-12345-iter-1", "baseline-RHEL-12345-iter-2"]
+    assert len(capture_requests) == 1
+    assert output["iterations"][0]["capture"]["skipped"] == [
+        {
+            "reason": "URL is already recorded",
+            "url": "https://gitlab.example/project/raw/c9s/package.spec",
+        }
+    ]
+    assert "capture" not in output["iterations"][1]
+
+
+def test_prepare_recorded_replay_candidate_supersedes_earlier_skip(tmp_path: Path) -> None:
+    result = CaptureMissingResult(
+        case_id="RHEL-12345",
+        cases_dir=tmp_path,
+        run_path=tmp_path / "run",
+    )
+    result.skipped.append(
+        CaptureFailure(
+            url="https://raw.githubusercontent.com/org/project/main/file",
+            reason="host is not allowed",
+        )
+    )
+    result.skipped.append(
+        CaptureFailure(
+            url="https://raw.githubusercontent.com/org/project/main/file",
+            reason="URL is already recorded",
+        )
+    )
+    result.skipped.append(
+        CaptureFailure(
+            url="https://github.com/org/project",
+            reason="source repo is already recorded",
+        )
+    )
+
+    assert cli_module._prepare_has_only_recorded_replay_candidates(result)
 
 
 def test_cli_prepare_case_blocks_passing_run_with_uncaptured_replay_miss(
@@ -1484,3 +1740,24 @@ def _write_result_report(path: Path, cases: dict[str, tuple[str, bool]]) -> None
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_source_fixture(
+    cases_dir: Path,
+    tmp_path: Path,
+    case_id: str,
+    source_repo: Path,
+    remote_url: str,
+) -> None:
+    mirror = tmp_path / f"{case_id}-source.git"
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(mirror)],
+        check=True,
+    )
+    write_source_fixture_from_repository(
+        cases_dir,
+        case_id,
+        mirror,
+        remote_url=remote_url,
+        overwrite=True,
+    )
