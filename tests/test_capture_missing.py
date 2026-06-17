@@ -98,38 +98,27 @@ def test_capture_missing_mirrors_replay_miss_project_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    gitconfig_path = tmp_path / "gitconfig"
+    gitconfig_path.write_text(
+        "\n".join(
+            [
+                f'[url "{source_repo.resolve().as_uri()}"]',
+                "\tinsteadOf = https://github.com/opencontainers/runc.git",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig_path))
     run_file = tmp_path / "run.json"
     url = "https://github.com/opencontainers/runc"
     _write_expected(cases_dir, "RHEL-12345")
     _write_text(
         run_file,
-        f'{{"reason": "replay miss: URL is not recorded in replay cache: {url}"}}\n',
+        f'{{"reason": "external subprocess URL blocked: {url}"}}\n',
     )
-
-    def fake_run(command, cwd, check, stdout, stderr, text):
-        assert command[:4] == ["git", "clone", "--mirror", "--quiet"]
-        assert command[4] == f"{url}.git"
-        destination = Path(command[5])
-        destination.mkdir(parents=True)
-        (destination / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
-        (destination / "config").write_text(
-            f'[remote "origin"]\n\turl = {url}.git\n',
-            encoding="utf-8",
-        )
-        assert cwd == destination.parent
-        assert check is False
-        assert stdout == subprocess.PIPE
-        assert stderr == subprocess.PIPE
-        assert text is True
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    def fake_urlopen(request, timeout: float):
-        assert request.full_url == url
-        assert timeout == 30.0
-        return _Response(b"<html>project</html>\n", "text/html; charset=utf-8")
-
-    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
 
     result = capture_missing(
         CaptureMissingRequest(
@@ -139,8 +128,15 @@ def test_capture_missing_mirrors_replay_miss_project_url(
         )
     )
 
-    assert [capture.url for capture in result.captured_source] == [url]
-    assert [capture.url for capture in result.captured] == [url]
+    assert [capture.kind for capture in result.captured_source] == ["source_fixture"]
+    manifest_path = cases_dir / result.captured_source[0].relative_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    checkout = manifest_path.with_suffix("")
+    subprocess.run(
+        ["git", "-C", str(checkout), "cat-file", "-e", f"{pre_fix_ref}^{{commit}}"],
+        check=True,
+    )
+    assert manifest["remote_url"] == f"{url}.git"
 
 
 def test_capture_missing_records_tool_http_404_url(
@@ -203,10 +199,10 @@ def test_capture_missing_keeps_existing_recording_on_http_error(
     (web_cache / "manifest.json").write_text(
         json.dumps(
             {
-            "case_id": "RHEL-12345",
-            "required_urls": [url],
-            "recorded_files": {url: "jira/patches/001.patch"},
-            "response_metadata": {url: {"status": 200}},
+                "case_id": "RHEL-12345",
+                "required_urls": [url],
+                "recorded_files": {url: "jira/patches/001.patch"},
+                "response_metadata": {url: {"status": 200}},
             }
         ),
         encoding="utf-8",
@@ -277,23 +273,25 @@ def test_capture_missing_canonicalizes_escaped_newline_context_suffix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    source_repo, _pre_fix_ref = _create_git_repo(tmp_path)
+    gitconfig_path = tmp_path / "gitconfig"
+    gitconfig_path.write_text(
+        "\n".join(
+            [
+                f'[url "{source_repo.resolve().as_uri()}"]',
+                "\tinsteadOf = https://github.com/redis/redis.git",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig_path))
     run_file = tmp_path / "run.json"
     clean_url = "https://github.com/redis/redis.git"
     escaped_url = clean_url + r"\\nContext"
     _write_expected(cases_dir, "RHEL-12345")
     _write_text(run_file, f'{{"reason": "external subprocess URL blocked: {escaped_url}"}}\n')
-
-    def fake_run(command, *args, **kwargs):
-        destination = Path(command[-1])
-        destination.mkdir(parents=True)
-        (destination / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
-        (destination / "config").write_text(
-            '[remote "origin"]\n\turl = https://github.com/redis/redis.git\n',
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
 
     result = capture_missing(
         CaptureMissingRequest(
@@ -304,9 +302,10 @@ def test_capture_missing_canonicalizes_escaped_newline_context_suffix(
     )
 
     assert result.candidate_urls == [clean_url]
-    assert [capture.url for capture in result.captured_source] == [
-        "https://github.com/redis/redis"
-    ]
+    assert [capture.url for capture in result.captured_source] == ["https://github.com/redis/redis"]
+    manifest_path = cases_dir / result.captured_source[0].relative_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["remote_url"] == clean_url
     assert result.captured_git_failures == []
 
 
@@ -666,57 +665,12 @@ def test_capture_missing_records_jira_issue_miss(
     assert linked_starting["fields"]["status"] == {"name": "New"}
 
 
-def test_capture_missing_mirrors_blocked_git_source(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    cases_dir = tmp_path / "benchmark_cases"
-    run_file = tmp_path / "run.log"
-    url = "https://github.com/example/project"
-    _write_expected(cases_dir, "RHEL-12345")
-    _write_text(
-        run_file,
-        f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}\n",
-    )
-
-    def fake_run(command, cwd, check, stdout, stderr, text):
-        assert command[:4] == ["git", "clone", "--mirror", "--quiet"]
-        assert command[4] == f"{url}.git"
-        destination = Path(command[5])
-        destination.mkdir(parents=True)
-        (destination / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
-        (destination / "config").write_text(
-            f'[remote "origin"]\n\turl = {url}.git\n',
-            encoding="utf-8",
-        )
-        assert cwd == destination.parent
-        assert check is False
-        assert stdout == subprocess.PIPE
-        assert stderr == subprocess.PIPE
-        assert text is True
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
-
-    result = capture_missing(
-        CaptureMissingRequest(
-            cases_dir=cases_dir,
-            run_path=run_file,
-            case_id="RHEL-12345",
-        )
-    )
-
-    assert [capture.kind for capture in result.captured_source] == ["git_mirror"]
-    captured = cases_dir / result.captured_source[0].relative_path
-    assert (captured / "HEAD").is_file()
-    assert (captured / "config").is_file()
-
-
 def test_capture_missing_records_git_source_failure_for_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
     run_file = tmp_path / "run.log"
     url = "https://gitlab.example/group/project.git"
     _write_expected(cases_dir, "RHEL-12345")
@@ -725,7 +679,9 @@ def test_capture_missing_records_git_source_failure_for_replay(
         f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}\n",
     )
 
-    def fake_run(command, cwd, check, stdout, stderr, text):
+    def fake_run(command, check, stdout, stderr, text, cwd=None):
+        if command[:4] == ["git", "-C", str(cases_dir), "rev-parse"]:
+            return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
         assert command[:4] == ["git", "clone", "--mirror", "--quiet"]
         assert command[4] == url
         assert cwd == Path(command[5]).parent
@@ -797,6 +753,24 @@ def _write_expected(cases_dir: Path, case_id: str) -> None:
 def _write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _create_git_repo(tmp_path: Path) -> tuple[Path, str]:
+    repo_path = tmp_path / "source-repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "-C", str(repo_path), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_path), "config", "user.email", "dev@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "Dev"], check=True)
+    (repo_path / "source.c").write_text("pre-fix\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "add", "source.c"], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-q", "-m", "initial"], check=True)
+    pre_fix_ref = subprocess.check_output(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    return repo_path, pre_fix_ref
 
 
 def _environment(manifest_path: Path) -> dict[str, str]:
