@@ -6,6 +6,7 @@ from pathlib import Path
 
 import ymir_harness.validation as validation_module
 from ymir_harness.reports import write_validation_reports
+from ymir_harness.source_fixtures import write_source_fixture_from_repository
 from ymir_harness.validation import validate_case_directory
 
 
@@ -38,6 +39,70 @@ def test_validate_case_directory_checks_mock_repo_source_url(tmp_path: Path) -> 
         remote_url="https://gitlab.example/group/pkg.git",
         source_url=str(repo_path),
     )
+
+    report = validate_case_directory(cases_dir)
+
+    assert not report.has_blocking_errors
+    assert report.cases[0].status == "valid"
+
+
+def test_validate_case_directory_rejects_legacy_bare_source_cache(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    remote_url = "https://gitlab.com/redhat/centos-stream/rpms/dnsmasq.git"
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        requires_source_cache=True,
+        remote_url=remote_url,
+    )
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    expected["backport_source"] = "distgit"
+    _write_json(expected_path, expected)
+
+    mirror = cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "dnsmasq.git"
+    mirror.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(repo_path), str(mirror)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", f"--git-dir={mirror}", "config", "remote.origin.url", remote_url],
+        check=True,
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "source_cache_incomplete"
+        and "upstream must include a source fixture manifest or source archive" in issue.message
+        for issue in issues
+    )
+
+
+def test_validate_case_directory_checks_mock_repo_source_fixture_manifest(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    remote_url = "https://gitlab.com/redhat/centos-stream/rpms/dnsmasq.git"
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        requires_source_cache=True,
+        remote_url=remote_url,
+    )
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    expected["backport_source"] = "distgit"
+    _write_json(expected_path, expected)
+    _write_source_fixture(cases_dir, tmp_path, "RHEL-12345", repo_path, remote_url)
 
     report = validate_case_directory(cases_dir)
 
@@ -352,7 +417,7 @@ def test_strict_validation_reports_empty_source_cache_upstream(tmp_path: Path) -
     )
 
 
-def test_strict_validation_reports_source_cache_upstream_without_clone_or_archive(
+def test_strict_validation_reports_source_cache_upstream_without_fixture_or_archive(
     tmp_path: Path,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
@@ -377,7 +442,7 @@ def test_strict_validation_reports_source_cache_upstream_without_clone_or_archiv
     issues = report.cases[0].issues
     assert any(
         issue.category == "source_cache_incomplete"
-        and "upstream must include a git clone or source archive" in issue.message
+        and "upstream must include a source fixture manifest or source archive" in issue.message
         for issue in issues
     )
 
@@ -440,25 +505,21 @@ def test_strict_validation_reports_missing_source_cache_lookaside(tmp_path: Path
 
 def test_strict_validation_accepts_distgit_backport_without_lookaside(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    remote_url = "https://gitlab.com/redhat/centos-stream/rpms/dnsmasq.git"
     _write_replay_case(
         cases_dir,
         repo_path,
         pre_fix_ref,
         requires_source_cache=True,
+        remote_url=remote_url,
     )
     expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
     expected["backport_source"] = "distgit"
     _write_json(expected_path, expected)
-    upstream_dir = cases_dir / "source_cache" / "RHEL-12345" / "upstream"
-    upstream_dir.mkdir(parents=True)
-    subprocess.run(
-        ["git", "clone", "--bare", str(repo_path), str(upstream_dir / "distgit.git")],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    _write_source_fixture(cases_dir, tmp_path, "RHEL-12345", repo_path, remote_url)
 
     report = validate_case_directory(cases_dir)
 
@@ -916,6 +977,27 @@ def _create_git_repo(tmp_path: Path) -> tuple[Path, str]:
         text=True,
     ).stdout.strip()
     return repo_path, rev
+
+
+def _write_source_fixture(
+    cases_dir: Path,
+    tmp_path: Path,
+    case_id: str,
+    source_repo: Path,
+    remote_url: str,
+) -> None:
+    mirror = tmp_path / f"{case_id}-source.git"
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(mirror)],
+        check=True,
+    )
+    write_source_fixture_from_repository(
+        cases_dir,
+        case_id,
+        mirror,
+        remote_url=remote_url,
+        overwrite=True,
+    )
 
 
 def _run_git(command: str, repo_path: Path, *args: str) -> None:
