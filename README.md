@@ -313,6 +313,128 @@ During `run`, the harness:
 Configured model-provider HTTPS calls are still allowed. The model can run; the
 case evidence should not drift.
 
+## Interception architecture
+
+The harness enforces its sandbox by **monkey-patching** Python's I/O subsystems
+at runtime. The context manager `enforce_benchmark_boundaries()` in
+`enforcement.py` saves every original function, installs guarded replacements,
+runs the workflow, and restores the originals on exit.
+
+### What gets patched
+
+Eight subsystems are replaced before the workflow starts:
+
+| Subsystem | Original | What the guard does |
+| --- | --- | --- |
+| Sync subprocesses | `subprocess.run`, `subprocess.Popen` | Screen commands for unsafe operations; return cached output when available; block or pass through otherwise |
+| Async subprocesses | `asyncio.create_subprocess_exec`, `asyncio.create_subprocess_shell` | Same screening, returning `_AsyncReplayProcess` objects with stored stdout/stderr |
+| Sockets | `socket.socket.connect`, `socket.socket.connect_ex` | Allow localhost and the configured model provider; raise `BenchmarkBoundaryViolation` for everything else |
+| urllib | `urllib.request.urlopen` | Serve cached responses as `addinfourl` objects; return synthetic 404 for cache misses in replay mode |
+| requests | `requests.Session.request` | Serve cached responses as `requests.Response` objects with stored body, status, and headers |
+| aiohttp | `aiohttp.ClientSession._request` | Serve cached responses as `ReplayResponse` async context managers |
+
+### Subprocess interception
+
+`guarded_run()` and `guarded_popen` wrap every shell command:
+
+1. `_check_command()` inspects the command line for unsafe operations: `git push`,
+   `koji`/`brew` builds, `rhpkg` lookaside uploads, `copr`/`konflux` submissions.
+   A match records the violation and short-circuits execution.
+2. `_subprocess_replay()` checks the replay cache for stored output. Matches
+   include `curl`/`wget` downloads served from the web cache, recorded git
+   failures, and synthetic 404 responses for replay misses.
+3. If replay returns a hit, `guarded_run()` returns a synthetic
+   `CompletedProcess`. `guarded_popen` sets `_child_created = False` and provides
+   fake pipe readers so no real process is forked.
+4. Otherwise the command runs against the real (but sandboxed) environment.
+
+### HTTP interception
+
+Every HTTP call is checked against a `ReplayCache` loaded from the case's
+`manifest.json`. The cache maps URLs to local files, with stored status codes
+and response headers.
+
+Two sources are synthesized on the fly rather than pre-recorded:
+
+- **Source patches**: URLs matching a GitLab commit `.patch` path are generated
+  via `git format-patch` from the local `source_cache`.
+- **Source files**: URLs matching a Pagure `raw/.../f/<path>` pattern are
+  generated via `git show` from the `source_cache`.
+
+`canonicalize_replay_url()` normalizes URLs before lookup so that trailing
+punctuation, URL-encoded slashes, and similar noise do not cause false cache
+misses.
+
+### Unsafe operation detection
+
+`safety.py` classifies every subprocess command and HTTP request:
+
+**Blocked as unsafe:**
+
+- `git push` in any form
+- Jira API writes (POST, PUT, DELETE to `/rest/api/`)
+- GitLab fork, label, or merge-request creation
+- Errata tool write operations
+- Testing Farm submissions
+- GreenWave and ResultsDB mutations
+- Koji, Brew, and Copr build submissions
+
+**Allowed or replayed:**
+
+- `git clone`, `fetch`, `log`, `show`
+- `curl`/`wget` downloads (served from the replay cache)
+- Jira issue reads (served from local JSON fixtures)
+- GitLab read operations
+
+When an unsafe operation is detected during a run, it is recorded in the
+`unsafe_operations` list and treated as a hard scoring failure.
+
+### Environment sandboxing
+
+Before entering the patched context, `runner.py` constructs an isolated
+environment via `build_no_write_environment()`:
+
+- Sets `DRY_RUN`, `MOCK_JIRA`, and `JIRA_DRY_RUN` flags
+- Points `YMIR_BENCHMARK_REPLAY_MANIFEST` at the case's manifest
+- Installs dry-run command shims for tools such as `rhpkg` and `patch`
+- Writes a temporary `GIT_CONFIG_GLOBAL` with `insteadOf` rules that redirect
+  configured Git remote URLs to local mock repositories
+- Materializes structured Jira fixtures into the flat mock format that Ymir reads
+- Strips write credentials (`JIRA_API_TOKEN`, `JIRA_PASSWORD`, `KOJI_CONFIG`,
+  `KEYTAB_FILE`, and similar) from the process environment
+- Redirects stdout and stderr to files via `_capture_workflow_output()`
+
+The only traffic that escapes the sandbox is HTTPS to the configured model
+provider, identified from the `CHAT_MODEL` environment variable. A context
+variable temporarily unblocks model-provider sockets during the request.
+
+### End-to-end flow
+
+```text
+CLI  →  runner.build_run_report()
+          │
+          ├─ per case / repetition:
+          │    build_no_write_environment()      ← sandbox env
+          │    _mock_repo_environment()          ← git URL rewrites
+          │    _jira_mock_directory()            ← Jira fixtures
+          │    ┌─────────────────────────────────────────────┐
+          │    │ enforce_benchmark_boundaries()              │
+          │    │   patch subprocess, asyncio, socket,        │
+          │    │   urllib, requests, aiohttp                 │
+          │    │                                             │
+          │    │   executor(RunCaseRequest)                  │
+          │    │     └─ ymir workflow runs here              │
+          │    │                                             │
+          │    │   _apply_run_policies()                     │
+          │    │     └─ detect violations and unsafe ops     │
+          │    │                                             │
+          │    │   [restore originals]                       │
+          │    └─────────────────────────────────────────────┘
+          │    score result, capture artifacts
+          │
+          └─ write run report
+```
+
 ## Scoring
 
 Scoring answers one question: did the actual structured output satisfy the
@@ -383,8 +505,7 @@ time:
   already present at `pre_fix_ref`
 - structured Jira fixtures that cannot be materialized into Ymir's mock format
 
-Pass `--workflow ymir-triage` for triage-only validation. That keeps validation
-focused on triage requirements and avoids requiring implementation-only source
+Pass `--workflow ymir-triage` for triage-only validation. That keeps validation focused on triage requirements and avoids requiring implementation-only source
 cache artifacts.
 
 ## Command map
