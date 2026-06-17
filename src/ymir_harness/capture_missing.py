@@ -224,8 +224,12 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
     git_failures = _manifest_mapping(manifest.get("git_failures"))
 
     for url in urls:
-        is_git_subprocess_url = "external subprocess URL blocked" in url_reasons.get(url, ())
-        if is_git_subprocess_url and (project_url := _git_source_project_url(url)):
+        reasons = url_reasons.get(url, ())
+        project_url = _git_source_project_url(url)
+        should_capture_source = project_url is not None and (
+            "external subprocess URL blocked" in reasons or "replay miss" in reasons
+        )
+        if should_capture_source and project_url is not None:
             if not _allowed_url(project_url, request.allowed_hosts):
                 result.skipped.append(CaptureFailure(url=url, reason="host is not allowed"))
                 continue
@@ -246,9 +250,10 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
                 result.skipped.append(
                     CaptureFailure(url=url, reason="source repo is already recorded")
                 )
+            else:
+                result.captured_source.append(captured)
+            if "external subprocess URL blocked" in reasons:
                 continue
-            result.captured_source.append(captured)
-            continue
 
         if not _allowed_url(url, request.allowed_hosts):
             result.skipped.append(CaptureFailure(url=url, reason="host is not allowed"))
