@@ -866,6 +866,33 @@ def test_restore_backport_release_from_head_discards_agent_release_bump(
     assert "Release:        31%{?dist}\n" in spec_path.read_text(encoding="utf-8")
 
 
+def test_source_changelog_from_replay_patch_files_reads_spec_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_clone = tmp_path / "dist-git"
+    local_clone.mkdir()
+    (local_clone / "RHEL-12345-0.patch").write_text(
+        "diff --git a/dnsmasq.spec b/dnsmasq.spec\n"
+        "--- a/dnsmasq.spec\n"
+        "+++ b/dnsmasq.spec\n"
+        "@@ -10,6 +10,9 @@\n"
+        " %changelog\n"
+        "+* Wed Jun 17 2026 Maintainer <maintainer@example.invalid> - 2.79-32\n"
+        "+- Fix crash when parsing --synth-domain option with no prefix (RHEL-12345)\n"
+        "+\n"
+        " * Wed Jun 14 2023 Maintainer <maintainer@example.invalid> - 2.79-31\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("YMIR_BENCHMARK_CASE_ID", "RHEL-12345")
+
+    assert (
+        workflow_module._source_changelog_from_replay_patch_files(local_clone, "dnsmasq")
+        == "- Fix crash when parsing --synth-domain option with no prefix (RHEL-12345)"
+    )
+
+
 def test_recover_backport_stage_changes_stages_spec_patch_files_from_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
