@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from ymir_harness.runner import (
     load_case_manifest,
     select_validation_cases,
 )
+from ymir_harness.source_fixtures import write_source_fixture_from_repository
 
 
 def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
@@ -1015,29 +1015,15 @@ def test_build_run_report_clones_mock_repo_source_url(tmp_path: Path) -> None:
     ]
 
 
-def test_build_run_report_materializes_https_mock_repo_from_source_cache(
+def test_build_run_report_materializes_https_mock_repo_from_source_fixture_manifest(
     tmp_path: Path,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
     source_repo, pre_fix_ref = _create_git_repo(tmp_path)
     original_url = "https://gitlab.com/redhat/centos-stream/rpms/dnsmasq.git"
-    cached_repo = cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "dnsmasq.git"
-    cached_repo.parent.mkdir(parents=True)
-    subprocess.run(
-        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            f"--git-dir={cached_repo}",
-            "config",
-            "remote.origin.url",
-            original_url,
-        ],
-        check=True,
-    )
+    _write_source_fixture(cases_dir, tmp_path, "RHEL-12345", source_repo, original_url)
     _write_expected(
         cases_dir,
         "RHEL-12345",
@@ -1101,7 +1087,8 @@ def test_build_run_report_materializes_https_mock_repo_from_source_cache(
     env = requests[0].environment
     repos = json.loads(env["YMIR_BENCHMARK_MOCK_REPOS"])
     local_path = Path(repos[0]["local_path"])
-    gitconfig_text = Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
+    source_cache_dir = Path(env["YMIR_BENCHMARK_SOURCE_CACHE_DIR"])
+    materialized_repo = source_cache_dir / "upstream" / "dnsmasq-1442c4b3594a.git"
     branch_ref = subprocess.run(
         ["git", "-C", str(local_path), "rev-parse", "c9s"],
         check=True,
@@ -1111,35 +1098,19 @@ def test_build_run_report_materializes_https_mock_repo_from_source_cache(
     assert report.entries[0].status == "passed"
     assert (local_path / "source.c").read_text(encoding="utf-8") == "pre-fix\n"
     assert branch_ref == pre_fix_ref
-    assert f'[url "{local_path.resolve().as_uri()}"]' in gitconfig_text
-    assert f'[url "{cached_repo.resolve().as_uri()}"]\n\tinsteadOf = {original_url}' not in (
-        gitconfig_text
-    )
+    assert source_cache_dir.is_relative_to(results_dir)
+    assert materialized_repo.is_dir()
+    assert not (cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "dnsmasq.git").exists()
 
 
 def test_build_run_report_rewrites_source_cache_git_remotes(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
     source_repo, _pre_fix_ref = _create_git_repo(tmp_path)
-    cached_repo = cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "glib2.git"
-    cached_repo.parent.mkdir(parents=True)
-    subprocess.run(
-        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
-        check=True,
-    )
     original_url = "https://gitlab.com/redhat/centos-stream/rpms/glib2.git"
     fedora_url = "https://src.fedoraproject.org/rpms/glib2.git"
-    subprocess.run(
-        [
-            "git",
-            f"--git-dir={cached_repo}",
-            "config",
-            "remote.origin.url",
-            original_url,
-        ],
-        check=True,
-    )
-    shutil.rmtree(cached_repo / "refs")
+    _write_source_fixture(cases_dir, tmp_path, "RHEL-12345", source_repo, original_url)
     _write_expected(
         cases_dir,
         "RHEL-12345",
@@ -1596,6 +1567,27 @@ def _create_git_repo(tmp_path: Path) -> tuple[Path, str]:
     _run_git(repo_path, "add", "source.c")
     _run_git(repo_path, "commit", "-m", "fixed")
     return repo_path, rev
+
+
+def _write_source_fixture(
+    cases_dir: Path,
+    tmp_path: Path,
+    case_id: str,
+    source_repo: Path,
+    remote_url: str,
+) -> None:
+    mirror = tmp_path / f"{case_id}-source.git"
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(mirror)],
+        check=True,
+    )
+    write_source_fixture_from_repository(
+        cases_dir,
+        case_id,
+        mirror,
+        remote_url=remote_url,
+        overwrite=True,
+    )
 
 
 def _run_git(repo_path: Path, *args: str) -> None:
