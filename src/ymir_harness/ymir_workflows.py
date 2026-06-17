@@ -969,6 +969,8 @@ def _patch_backport_workflow_step_logging(backport_module: Any) -> None:
         async def logged_step(state: Any) -> Any:
             request = _request_from_environment()
             started_at = time.monotonic()
+            if str(step_name) == "update_release":
+                _restore_backport_release_from_head(state)
             _workflow_debug(
                 request,
                 "ymir_step_start",
@@ -1007,6 +1009,65 @@ def _patch_backport_workflow_step_logging(backport_module: Any) -> None:
 
     workflow_class.add_step = harness_add_step
     backport_module._ymir_harness_workflow_step_logging_patched = True
+
+
+def _restore_backport_release_from_head(state: Any) -> None:
+    if os.getenv("DRY_RUN", "False").lower() != "true":
+        return
+
+    local_clone = _field_value(state, "local_clone")
+    package = _string_or_none(_field_value(state, "package"))
+    if not isinstance(local_clone, Path) or package is None:
+        return
+
+    spec_path = local_clone / f"{package}.spec"
+    if not spec_path.is_file():
+        return
+
+    baseline_text = _git_show_text(local_clone, f"HEAD:{package}.spec")
+    if baseline_text is None:
+        return
+
+    baseline_release = _release_line(baseline_text)
+    current_text = spec_path.read_text(encoding="utf-8", errors="replace")
+    current_release = _release_line(current_text)
+    if baseline_release is None or current_release is None or baseline_release == current_release:
+        return
+
+    restored_text = _replace_release_line(current_text, baseline_release)
+    if restored_text is not None:
+        spec_path.write_text(restored_text, encoding="utf-8")
+
+
+def _git_show_text(repo_path: Path, revision_path: str) -> str | None:
+    completed = subprocess.run(
+        ["git", "show", revision_path],
+        cwd=repo_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _release_line(text: str) -> str | None:
+    for line in text.splitlines():
+        if re.match(r"^\s*Release:\s*", line):
+            return line
+    return None
+
+
+def _replace_release_line(text: str, release_line: str) -> str | None:
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if not re.match(r"^\s*Release:\s*", line):
+            continue
+        newline = line[len(line.rstrip("\r\n")) :]
+        lines[index] = release_line + newline
+        return "".join(lines)
+    return None
 
 
 def _recover_backport_stage_changes(step_name: Any, state: Any, result: Any) -> Any:
