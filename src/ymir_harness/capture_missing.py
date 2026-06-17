@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,11 @@ from ymir_harness.jira_replay import (
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.replay import canonicalize_replay_url
 from ymir_harness.scoring import load_json_file
+from ymir_harness.source_fixtures import (
+    is_git_worktree,
+    source_fixture_name,
+    write_source_fixture_from_repository,
+)
 
 
 DEFAULT_ALLOWED_HOSTS = (
@@ -948,26 +954,33 @@ def _capture_git_source_repo(
     request: CaptureMissingRequest,
 ) -> CapturedSource | None:
     remote_url = _git_clone_url(project_url)
-    destination = (
+    fixture_path = (
         cases_dir
         / "source_cache"
         / request.case_id
         / "upstream"
-        / _git_source_cache_name(remote_url)
+        / f"{source_fixture_name(remote_url)}.json"
     )
-    if destination.exists() and not request.overwrite:
+    if fixture_path.exists() and not request.overwrite:
         return None
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
-    else:
-        _run_git(["clone", "--mirror", "--quiet", remote_url, str(destination)], destination.parent)
+    if not ((cases_dir / ".git").exists() and is_git_worktree(cases_dir)):
+        raise CaptureMissingError(f"cases directory is not a git worktree: {cases_dir}")
 
+    with tempfile.TemporaryDirectory(prefix="ymir-harness-source-fixture-") as tmp:
+        mirror = Path(tmp) / _git_source_cache_name(remote_url)
+        _run_git(["clone", "--mirror", "--quiet", remote_url, str(mirror)], Path(tmp))
+        manifest_path = write_source_fixture_from_repository(
+            cases_dir,
+            request.case_id,
+            mirror,
+            remote_url=remote_url,
+            overwrite=request.overwrite,
+        )
     return CapturedSource(
-        kind="git_mirror",
+        kind="source_fixture",
         url=project_url,
-        relative_path=str(destination.relative_to(cases_dir)),
+        relative_path=str(manifest_path.relative_to(cases_dir)),
     )
 
 
