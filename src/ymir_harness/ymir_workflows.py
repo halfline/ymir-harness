@@ -23,6 +23,7 @@ from ymir_harness.llm_judge import evaluate_backport_llm_judge
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseRequest
 from ymir_harness.scoring import load_json_file
+from ymir_harness.source_fixtures import find_source_cache_repository
 from ymir_harness.ymir_source import ensure_ymir_source_path
 
 AsyncWorkflow = Callable[..., Awaitable[Any]]
@@ -197,6 +198,10 @@ async def _run_ymir_backport(
 
     workflow_runner, default_agent_factory = _backport_dependencies(workflow, agent_factory)
     if workflow is None:
+        default_agent_factory = _wrap_backport_replay_agent_factory(
+            default_agent_factory,
+            request=request,
+        )
         default_agent_factory = _instrument_agent_factory(
             default_agent_factory,
             request=request,
@@ -949,6 +954,80 @@ def _backport_dependencies(
         workflow or backport_module.run_workflow,
         agent_factory or backport_module.create_backport_agent,
     )
+
+
+def _wrap_backport_replay_agent_factory(
+    agent_factory: AgentFactory,
+    *,
+    request: RunCaseRequest,
+) -> AgentFactory:
+    def factory(*args: Any, **kwargs: Any) -> Any:
+        result = agent_factory(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return _wrap_backport_replay_agent_awaitable(result, request=request)
+        return _wrap_backport_replay_agent(result, request=request)
+
+    return factory
+
+
+async def _wrap_backport_replay_agent_awaitable(
+    awaitable: Awaitable[Any],
+    *,
+    request: RunCaseRequest,
+) -> Any:
+    agent = await awaitable
+    return _wrap_backport_replay_agent(agent, request=request)
+
+
+def _wrap_backport_replay_agent(agent: Any, *, request: RunCaseRequest) -> Any:
+    if request.environment.get("YMIR_BENCHMARK_NETWORK_MODE") not in {
+        "replay_only",
+        "network_denied",
+    }:
+        return agent
+
+    tools = getattr(agent, "_tools", None)
+    if not isinstance(tools, list):
+        return agent
+
+    wrapped_tools = []
+    changed = False
+    for tool in tools:
+        if getattr(tool, "name", None) == "clone_upstream_repository":
+            wrapped_tools.append(_replay_safe_clone_upstream_tool(tool, request=request))
+            changed = True
+        else:
+            wrapped_tools.append(tool)
+
+    if changed:
+        setattr(agent, "_tools", wrapped_tools)
+    return agent
+
+
+def _replay_safe_clone_upstream_tool(tool: Any, *, request: RunCaseRequest) -> Any:
+    from beeai_framework.tools import ToolError
+    from ymir.tools.unprivileged.upstream_tools import (  # type: ignore[import-not-found]
+        CloneUpstreamRepositoryTool,
+    )
+
+    class HarnessReplayCloneUpstreamRepositoryTool(CloneUpstreamRepositoryTool):
+        description = (
+            CloneUpstreamRepositoryTool.description
+            + "\n\nIn harness replay, this tool uses only source-cache-backed repositories. "
+            "If the upstream repository is not cached, use the pre-downloaded patch files "
+            "and the git-am fallback workflow."
+        )
+
+        async def _run(self, tool_input: Any, options: Any, context: Any) -> Any:
+            source_cache = request.environment.get("YMIR_BENCHMARK_SOURCE_CACHE_DIR")
+            if source_cache and find_source_cache_repository(Path(source_cache), tool_input.repo_url):
+                return await super()._run(tool_input, options, context)
+            raise ToolError(
+                "Upstream repository is not available in the harness source cache. "
+                "Use the pre-downloaded patch files and git-am fallback workflow."
+            )
+
+    return HarnessReplayCloneUpstreamRepositoryTool(options=getattr(tool, "options", None))
 
 
 def _patch_backport_no_write_subprocesses(backport_module: Any) -> None:
