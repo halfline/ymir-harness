@@ -1550,10 +1550,6 @@ def _derive_package(issue: Mapping[str, Any] | None) -> str | None:
     if fields is None:
         return None
 
-    downstream = fields.get("customfield_10669") or fields.get("Downstream Component Name")
-    if package := _component_name(downstream):
-        return package
-
     components = fields.get("components")
     if isinstance(components, list):
         for component in components:
@@ -1562,6 +1558,10 @@ def _derive_package(issue: Mapping[str, Any] | None) -> str | None:
                     return package
             elif package := _component_name(component):
                 return package
+
+    downstream = fields.get("customfield_10669") or fields.get("Downstream Component Name")
+    if package := _component_name(downstream):
+        return package
     return None
 
 
