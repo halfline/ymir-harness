@@ -1103,6 +1103,102 @@ def test_build_run_report_materializes_https_mock_repo_from_source_fixture_manif
     assert not (cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "dnsmasq.git").exists()
 
 
+def test_build_run_report_selects_source_fixture_containing_mock_ref(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    fedora_repo, _fedora_ref = _create_git_repo(
+        tmp_path,
+        name="fedora-repo",
+        pre_fix_text="fedora\n",
+    )
+    centos_repo, pre_fix_ref = _create_git_repo(
+        tmp_path,
+        name="centos-repo",
+        pre_fix_text="centos\n",
+    )
+    original_url = "https://gitlab.com/redhat/centos-stream/rpms/postgresql-jdbc.git"
+    fedora_url = "https://src.fedoraproject.org/rpms/postgresql-jdbc.git"
+    _write_source_fixture(cases_dir, tmp_path, "RHEL-12345", fedora_repo, fedora_url)
+    _write_source_fixture(cases_dir, tmp_path, "RHEL-12345", centos_repo, original_url)
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "postgresql-jdbc",
+            "network_mode": "network_denied",
+        },
+    )
+    _write_json(
+        cases_dir / "mock_data" / "backport" / "RHEL-12345.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "repos": [
+                {
+                    "package": "postgresql-jdbc",
+                    "remote_url": original_url,
+                    "pre_fix_ref": pre_fix_ref,
+                    "branch": "c8s",
+                }
+            ],
+        },
+    )
+    requests = []
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(request):
+        requests.append(request)
+        repos = json.loads(request.environment["YMIR_BENCHMARK_MOCK_REPOS"])
+        local_path = Path(repos[0]["local_path"])
+        assert (local_path / "source.c").read_text(encoding="utf-8") == "centos\n"
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "postgresql-jdbc",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    local_path = Path(
+        json.loads(requests[0].environment["YMIR_BENCHMARK_MOCK_REPOS"])[0]["local_path"]
+    )
+    branch_ref = subprocess.run(
+        ["git", "-C", str(local_path), "rev-parse", "c8s"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    assert report.entries[0].status == "passed"
+    assert branch_ref == pre_fix_ref
+
+
 def test_build_run_report_rewrites_source_cache_git_remotes(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
@@ -1550,11 +1646,16 @@ def _write_web_manifest(cases_dir: Path, case_id: str, required_urls: list[str])
     )
 
 
-def _create_git_repo(tmp_path: Path) -> tuple[Path, str]:
-    repo_path = tmp_path / "source-repo"
+def _create_git_repo(
+    tmp_path: Path,
+    *,
+    name: str = "source-repo",
+    pre_fix_text: str = "pre-fix\n",
+) -> tuple[Path, str]:
+    repo_path = tmp_path / name
     repo_path.mkdir()
     _run_git(repo_path, "init")
-    (repo_path / "source.c").write_text("pre-fix\n", encoding="utf-8")
+    (repo_path / "source.c").write_text(pre_fix_text, encoding="utf-8")
     _run_git(repo_path, "add", "source.c")
     _run_git(repo_path, "commit", "-m", "initial")
     rev = subprocess.run(
@@ -1576,7 +1677,7 @@ def _write_source_fixture(
     source_repo: Path,
     remote_url: str,
 ) -> None:
-    mirror = tmp_path / f"{case_id}-source.git"
+    mirror = tmp_path / f"{case_id}-{source_repo.name}-source.git"
     subprocess.run(
         ["git", "clone", "--mirror", "--quiet", str(source_repo), str(mirror)],
         check=True,
