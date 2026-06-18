@@ -2470,7 +2470,7 @@ def _cache_upstream_source_repo(
         if fixture_path.exists() and not request.overwrite:
             return
 
-        if not ((cases_dir / ".git").exists() and is_git_worktree(cases_dir)):
+        if not is_git_worktree(cases_dir):
             raise CollectCaseError(f"cases directory is not a git worktree: {cases_dir}")
 
         with tempfile.TemporaryDirectory(prefix="ymir-harness-source-fixture-") as tmp:
