@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 from pathlib import Path
@@ -1150,6 +1151,90 @@ def test_cli_prepare_case_writes_existing_triage_mock_data(
     assert output["collected"]["written_paths"] == [str(mock_path)]
 
 
+def test_cli_prepare_case_infers_mock_data_from_matching_source_branch(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    case_id = "RHEL-12345"
+    remote_url = "https://gitlab.com/redhat/centos-stream/rpms/postgresql-jdbc.git"
+    fedora_url = "https://src.fedoraproject.org/rpms/postgresql-jdbc.git"
+
+    def create_source_repo(name: str, branch: str, spec_text: str) -> tuple[Path, str]:
+        repo = tmp_path / name
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["git", "-C", str(repo), "checkout", "-b", branch], check=True)
+        (repo / "postgresql-jdbc.spec").write_text(spec_text, encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "postgresql-jdbc.spec"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "seed",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        ref = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", branch],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        return repo, ref
+
+    fedora_repo, _fedora_ref = create_source_repo(
+        "fedora-source",
+        "rawhide",
+        "Name: postgresql-jdbc\n",
+    )
+    centos_repo, pre_fix_ref = create_source_repo(
+        "centos-source",
+        "c8s",
+        "Name: postgresql-jdbc\nRelease: 1.el8\n",
+    )
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    _write_source_fixture(cases_dir, tmp_path, case_id, fedora_repo, fedora_url)
+    _write_source_fixture(cases_dir, tmp_path, case_id, centos_repo, remote_url)
+
+    warnings: list[str] = []
+    written_paths: list[Path] = []
+    cli_module._prepare_write_inferred_mock_data(
+        argparse.Namespace(
+            cases=cases_dir,
+            case_id=case_id,
+            workflow="ymir-triage",
+            overwrite=True,
+        ),
+        {
+            "case_id": case_id,
+            "case_type": "not_affected",
+            "fix_version": "rhel-8.10.z",
+            "package": "postgresql-jdbc",
+        },
+        written_paths,
+        warnings,
+    )
+
+    mock_path = cases_dir / "mock_data" / "triage" / f"{case_id}.json"
+    mock_data = json.loads(mock_path.read_text(encoding="utf-8"))
+    assert warnings == []
+    assert written_paths == [mock_path]
+    assert mock_data["repos"][0] == {
+        "branch": "c8s",
+        "package": "postgresql-jdbc",
+        "pre_fix_ref": pre_fix_ref,
+        "remote_url": remote_url,
+    }
+
+
 def test_cli_prepare_case_reruns_after_passing_run_captures_replay_miss(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1749,7 +1834,7 @@ def _write_source_fixture(
     source_repo: Path,
     remote_url: str,
 ) -> None:
-    mirror = tmp_path / f"{case_id}-source.git"
+    mirror = tmp_path / f"{case_id}-{source_repo.name}-source.git"
     subprocess.run(
         ["git", "clone", "--mirror", "--quiet", str(source_repo), str(mirror)],
         check=True,
