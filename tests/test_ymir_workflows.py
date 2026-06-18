@@ -316,6 +316,50 @@ def test_ymir_triage_executor_accepts_typed_backport_output(tmp_path: Path) -> N
     assert execution.actual_result["target_branch"] == "rhel-8.10.z"
 
 
+def test_ymir_triage_executor_preserves_expected_cve_ids(tmp_path: Path) -> None:
+    request = _request(tmp_path, case_type="not_affected")
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "not_affected",
+            "resolution": "not_affected",
+            "package": "postgresql-jdbc",
+            "cve_ids": ["CVE-2026-6473"],
+        },
+    )
+
+    async def workflow(*_args, **_kwargs):
+        return _State(
+            triage_result=_TriageResult(
+                {
+                    "resolution": "not-affected",
+                    "data": {
+                        "explanation": (
+                            "CVE-2026-6473 affects PostgreSQL server code. "
+                            "The pgjdbc advisory CVE-2026-42198 is unrelated."
+                        ),
+                        "jira_issue": "RHEL-12345",
+                        "justification_category": "Vulnerable Code not Present",
+                    },
+                }
+            )
+        )
+
+    executor = make_ymir_triage_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(request)
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    assert execution.actual_result["package"] == "postgresql-jdbc"
+    assert execution.actual_result["cve_ids"] == ["CVE-2026-6473"]
+
+
 def test_ymir_triage_executor_accepts_typed_rebase_output(tmp_path: Path) -> None:
     models = _import_ymir_models()
 
