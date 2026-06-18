@@ -1835,6 +1835,7 @@ def _triage_actual_result(
 ) -> dict[str, Any]:
     payload = _model_payload(triage_result)
     data = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
+    expected = load_json_file(request.expected_path) if request.expected_path.is_file() else {}
     actual: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "case_id": request.case_id,
@@ -1860,10 +1861,14 @@ def _triage_actual_result(
         actual["jira_issue"] = request.case_id
 
     if "package" not in actual:
-        expected = load_json_file(request.expected_path)
         pkg = expected.get("package")
         if pkg:
             actual["package"] = pkg
+
+    if "cve_id" not in actual and "cve_ids" not in actual:
+        cve_ids = _string_list(expected.get("cve_ids") or expected.get("cve_id"))
+        if cve_ids:
+            actual["cve_ids"] = cve_ids
 
     target_branch = getattr(state, "target_branch", None)
     if target_branch:
