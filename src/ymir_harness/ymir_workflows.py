@@ -144,6 +144,12 @@ async def _run_ymir_triage(
         return missing_dependency
 
     workflow_runner, default_agent_factory = _triage_dependencies(workflow, agent_factory)
+    if workflow is None:
+        default_agent_factory = _instrument_sync_agent_factory(
+            default_agent_factory,
+            request=request,
+            agent_name="triage",
+        )
 
     with _workflow_environment(request, workflow=workflow) as effective_request:
         state = await _await_workflow(
