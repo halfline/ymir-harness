@@ -91,6 +91,15 @@ COMMENT_RESOLUTION_MAP = {
     "clarification-needed": "clarification_needed",
     "clarification_needed": "clarification_needed",
 }
+COMMENT_RESOLUTION_HINTS = (
+    (
+        re.compile(
+            r"(?im)^\s*(?:fix assessment|recommended action)\s*:\s*"
+            r"(?:clean\s+)?backport\b"
+        ),
+        "backport",
+    ),
+)
 CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://[^\s<>\]\[\"']+")
 RESULT_COMMENT_PATTERNS = (
@@ -1730,10 +1739,14 @@ def _comment_values(comments: Any) -> list[Mapping[str, Any]]:
 
 def _comment_resolution(body: str) -> str | None:
     match = re.search(r"\*?resolution\*?\s*[:=-]\s*([A-Za-z_-]+)", body, re.IGNORECASE)
-    if match is None:
-        return None
-    token = match.group(1).lower().replace("_", "-")
-    return COMMENT_RESOLUTION_MAP.get(token)
+    if match is not None:
+        token = match.group(1).lower().replace("_", "-")
+        return COMMENT_RESOLUTION_MAP.get(token)
+
+    for pattern, resolution in COMMENT_RESOLUTION_HINTS:
+        if pattern.search(body):
+            return resolution
+    return None
 
 
 def _component_name(value: Any) -> str | None:
