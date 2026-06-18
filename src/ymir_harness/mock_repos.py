@@ -168,7 +168,13 @@ def _materialize_repo(
 
     source = _cloneable_source(
         source_url
-        or _source_cache_clone_source(cases_dir, case_id, remote_url, source_cache_dir)
+        or _source_cache_clone_source(
+            cases_dir,
+            case_id,
+            remote_url,
+            pre_fix_ref,
+            source_cache_dir,
+        )
         or remote_url
     )
     if source is None:
@@ -235,11 +241,13 @@ def _source_cache_clone_source(
     cases_dir: Path,
     case_id: str,
     remote_url: str,
+    pre_fix_ref: str,
     source_cache_dir: Path | None,
 ) -> str | None:
     repository = find_source_cache_repository(
         source_cache_dir or cases_dir / "source_cache" / case_id,
         remote_url,
+        obj=pre_fix_ref,
     )
     if repository is None:
         return None

@@ -153,13 +153,20 @@ def source_cache_git_repositories(upstream_dir: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(repositories))
 
 
-def find_source_cache_repository(source_cache_dir: Path, remote_url: str) -> Path | None:
+def find_source_cache_repository(
+    source_cache_dir: Path,
+    remote_url: str,
+    *,
+    obj: str | None = None,
+) -> Path | None:
     expected_aliases = set(source_cache_git_aliases(remote_url))
     for repository in source_cache_repositories(source_cache_dir):
         cached_remote = git_remote_url(repository)
         if cached_remote is None:
             continue
         if expected_aliases & set(source_cache_git_aliases(cached_remote)):
+            if obj is not None and not git_object_exists(repository, obj):
+                continue
             return repository
     return None
 
@@ -168,10 +175,22 @@ def find_source_fixture_repository(
     cases_dir: Path,
     case_id: str,
     remote_url: str,
+    *,
+    ref_name: str | None = None,
+    obj: str | None = None,
 ) -> SourceFixtureRepository | None:
     expected_aliases = set(source_cache_git_aliases(remote_url))
     for repository in load_source_fixture_repositories(cases_dir, case_id):
         if expected_aliases & set(source_cache_git_aliases(repository.remote_url)):
+            if ref_name is not None and repository.ref_object(ref_name) is None:
+                continue
+            if obj is not None and not _source_fixture_has_object(
+                cases_dir,
+                case_id,
+                repository,
+                obj,
+            ):
+                continue
             return repository
     return None
 
@@ -182,18 +201,15 @@ def resolve_source_cache_ref(
     remote_url: str,
     ref_name: str,
 ) -> str | None:
-    fixture = find_source_fixture_repository(cases_dir, case_id, remote_url)
+    fixture = find_source_fixture_repository(cases_dir, case_id, remote_url, ref_name=ref_name)
     return fixture.ref_object(ref_name) if fixture is not None else None
 
 
 def source_cache_contains_object(cases_dir: Path, case_id: str, remote_url: str, obj: str) -> bool:
-    fixture = find_source_fixture_repository(cases_dir, case_id, remote_url)
+    fixture = find_source_fixture_repository(cases_dir, case_id, remote_url, obj=obj)
     if fixture is None:
         return False
-    if fixture.contains_object(obj):
-        return True
-    submodule = source_fixture_path(cases_dir, case_id, fixture)
-    return submodule.exists() and is_git_checkout(submodule) and git_object_exists(submodule, obj)
+    return _source_fixture_has_object(cases_dir, case_id, fixture, obj)
 
 
 def source_cache_repo_for_object(
@@ -202,7 +218,7 @@ def source_cache_repo_for_object(
     remote_url: str,
     obj: str | None = None,
 ) -> Path | None:
-    fixture = find_source_fixture_repository(cases_dir, case_id, remote_url)
+    fixture = find_source_fixture_repository(cases_dir, case_id, remote_url, obj=obj)
     if fixture is None:
         return None
     submodule = source_fixture_path(cases_dir, case_id, fixture)
@@ -211,6 +227,18 @@ def source_cache_repo_for_object(
     if obj is None or git_object_exists(submodule, obj):
         return submodule
     return None
+
+
+def _source_fixture_has_object(
+    cases_dir: Path,
+    case_id: str,
+    fixture: SourceFixtureRepository,
+    obj: str,
+) -> bool:
+    if fixture.contains_object(obj):
+        return True
+    submodule = source_fixture_path(cases_dir, case_id, fixture)
+    return submodule.exists() and is_git_checkout(submodule) and git_object_exists(submodule, obj)
 
 
 def materialize_case_source_cache(
