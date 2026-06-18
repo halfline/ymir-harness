@@ -577,11 +577,13 @@ def test_ymir_triage_executor_starts_managed_gateway_by_default(
     assert len(gateway_requests) == 1
     assert gateway_requests[0].environment["DRY_RUN"] == "true"
     assert "MCP_GATEWAY_URL" not in gateway_requests[0].environment
+    wrapped_agent_factory = calls[0].pop("agent_factory")
+    assert callable(wrapped_agent_factory)
+    assert wrapped_agent_factory is not agent_factory
     assert calls == [
         {
             "jira_issue": "RHEL-12345",
             "dry_run": True,
-            "agent_factory": agent_factory,
             "kwargs": {"auto_chain": False, "silent_run": True},
             "gateway_url": "http://127.0.0.1:18080/sse",
         }
