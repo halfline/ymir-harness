@@ -442,6 +442,49 @@ def test_ymir_triage_executor_logs_workflow_progress(
     assert '"event": "workflow_finished"' in stderr
 
 
+def test_ymir_triage_executor_times_out_live_agent_factory(
+    tmp_path: Path,
+    monkeypatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class Agent:
+        async def run(self) -> None:
+            await asyncio.sleep(1)
+
+    def agent_factory(_gateway_tools, _local_tool_options):
+        return Agent()
+
+    async def workflow(_jira_issue, _dry_run, agent_factory, **_kwargs):
+        agent = agent_factory([], {})
+        await agent.run()
+
+    monkeypatch.setattr(
+        workflow_module,
+        "_triage_dependencies",
+        lambda _workflow, _agent_factory: (workflow, agent_factory),
+    )
+
+    executor = make_ymir_triage_executor()
+    request = _request(
+        tmp_path,
+        environment={
+            "CHAT_MODEL": "gemini:gemini-2.5-pro",
+            "MCP_GATEWAY_URL": "http://gateway.example.invalid/sse",
+            "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "0.01",
+        },
+    )
+
+    with pytest.raises(TimeoutError):
+        executor(request)
+
+    stderr = capsys.readouterr().err
+    assert '"event": "agent_run_start"' in stderr
+    assert '"agent": "triage"' in stderr
+    assert '"timeout_seconds": 0.01' in stderr
+    assert '"event": "agent_run_errored"' in stderr
+    assert '"error_type": "TimeoutError"' in stderr
+
+
 @pytest.mark.parametrize(
     ("executor_factory", "case_type", "expected", "reason"),
     [
