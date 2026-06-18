@@ -897,6 +897,54 @@ def test_collect_case_normalizes_gitlab_links_as_patch_urls() -> None:
     ]
 
 
+def test_collect_case_infers_backport_from_human_assessment_comment(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    issue_json = _write_json(
+        tmp_path / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": {
+                "summary": "CVE-2026-0001 qt6-qtdeclarative issue [rhel-10.2.z]",
+                "customfield_10669": "qt6",
+                "components": [{"name": "qt6-qtdeclarative"}],
+                "fixVersions": [{"name": "rhel-10.2.z"}],
+                "labels": ["Security"],
+            },
+        },
+    )
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": (
+                        "Fix Assessment: CLEAN BACKPORT - small upstream change.\n"
+                        "Recommended Action: Backport the fix into qt6-qtdeclarative"
+                    )
+                }
+            ]
+        },
+    )
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            jira_issue_json=issue_json,
+            jira_comments_json=comments_json,
+            network_mode="network_denied",
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["resolution"] == "backport"
+    assert expected["case_type"] == "cve_backport"
+    assert expected["package"] == "qt6-qtdeclarative"
+    assert expected["fix_version"] == "rhel-10.2.z"
+
+
 def test_collect_case_imports_completed_jira_without_repeated_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
