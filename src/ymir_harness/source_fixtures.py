@@ -405,6 +405,10 @@ def source_cache_git_aliases(remote_url: str) -> tuple[str, ...]:
                 for namespace in ("centos-stream", "rhel"):
                     gitlab_url = f"https://gitlab.com/redhat/{namespace}/rpms/{package}.git"
                     aliases.extend(remote_git_aliases(gitlab_url))
+        if parsed.hostname in {"github.com", "code.qt.io"} and len(parts) >= 2 and parts[0] == "qt":
+            qt_project = "/".join(parts)
+            aliases.extend(remote_git_aliases(f"https://github.com/{qt_project}.git"))
+            aliases.extend(remote_git_aliases(f"https://code.qt.io/{qt_project}.git"))
         if parsed.hostname == "gitlab.gnome.org" and len(parts) >= 2:
             github_url = f"https://github.com/{'/'.join(parts)}.git"
             aliases.extend(remote_git_aliases(github_url))
