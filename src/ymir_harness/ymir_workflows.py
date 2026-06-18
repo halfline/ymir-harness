@@ -501,10 +501,14 @@ def _instrument_agent_factory(
     async def factory(*args: Any, **kwargs: Any) -> Any:
         result = agent_factory(*args, **kwargs)
         agent = await result if inspect.isawaitable(result) else result
-        _instrument_agent_llm(agent, request=request, agent_name=agent_name)
-        return _InstrumentedAgent(agent, request=request, agent_name=agent_name)
+        return _instrument_agent(agent, request=request, agent_name=agent_name)
 
     return factory
+
+
+def _instrument_agent(agent: Any, *, request: RunCaseRequest, agent_name: str) -> Any:
+    _instrument_agent_llm(agent, request=request, agent_name=agent_name)
+    return _InstrumentedAgent(agent, request=request, agent_name=agent_name)
 
 
 def _instrument_agent_llm(agent: Any, *, request: RunCaseRequest, agent_name: str) -> None:
