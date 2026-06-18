@@ -1867,8 +1867,10 @@ def test_collect_case_caches_gitlab_project_source_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cases_dir = tmp_path / "benchmark_cases"
-    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    cases_root = tmp_path / "benchmark_cases"
+    cases_dir = cases_root / "ymir-triage"
+    cases_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(cases_root)], check=True, stdout=subprocess.DEVNULL)
     source_repo, pre_fix_ref = _create_git_repo(tmp_path)
     gitconfig_path = tmp_path / "gitconfig"
     gitconfig_path.write_text(
@@ -1946,6 +1948,7 @@ def test_collect_case_caches_gitlab_project_source_by_default(
         check=True,
     )
     assert manifest["remote_url"] == "https://gitlab.com/group/pkg.git"
+    assert (cases_root / ".gitmodules").is_file()
     assert result.warnings == []
     assert seen_urls == list(responses)
 
