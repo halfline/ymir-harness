@@ -125,6 +125,7 @@ def test_capture_missing_mirrors_replay_miss_project_url(
             cases_dir=cases_dir,
             run_path=run_file,
             case_id="RHEL-12345",
+            overwrite=True,
         )
     )
 
@@ -137,6 +138,83 @@ def test_capture_missing_mirrors_replay_miss_project_url(
         check=True,
     )
     assert manifest["remote_url"] == f"{url}.git"
+
+
+def test_capture_missing_mirrors_source_from_suite_worktree_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_root = tmp_path / "benchmark_cases"
+    cases_dir = cases_root / "ymir-triage"
+    cases_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(cases_root)], check=True, stdout=subprocess.DEVNULL)
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    gitconfig_path = tmp_path / "gitconfig"
+    gitconfig_path.write_text(
+        "\n".join(
+            [
+                f'[url "{source_repo.resolve().as_uri()}"]',
+                "\tinsteadOf = https://github.com/go-delve/delve.git",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig_path))
+    run_file = tmp_path / "run.json"
+    url = "https://github.com/go-delve/delve.git"
+    _write_expected(cases_dir, "RHEL-12345")
+    web_manifest = cases_dir / "web_cache" / "RHEL-12345" / "manifest.json"
+    _write_text(
+        web_manifest,
+        json.dumps(
+            {
+                "case_id": "RHEL-12345",
+                "case_type": "not_affected",
+                "git_failures": {
+                    "https://github.com/go-delve/delve": {
+                        "returncode": 128,
+                        "stderr": "old failure\n",
+                        "stdout": "",
+                    },
+                    "https://github.com/go-delve/delve.git": {
+                        "returncode": 128,
+                        "stderr": "old failure\n",
+                        "stdout": "",
+                    },
+                },
+                "recorded_files": {},
+                "required_urls": [],
+                "schema_version": 1,
+            }
+        ),
+    )
+    _write_text(run_file, f'{{"reason": "external subprocess URL blocked: {url}"}}\n')
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            overwrite=True,
+        )
+    )
+
+    assert result.captured_git_failures == []
+    assert [capture.url for capture in result.captured_source] == [
+        "https://github.com/go-delve/delve"
+    ]
+    manifest_path = cases_dir / result.captured_source[0].relative_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    checkout = manifest_path.with_suffix("")
+    subprocess.run(
+        ["git", "-C", str(checkout), "cat-file", "-e", f"{pre_fix_ref}^{{commit}}"],
+        check=True,
+    )
+    assert manifest["remote_url"] == url
+    assert (cases_root / ".gitmodules").is_file()
+    updated_web_manifest = json.loads(web_manifest.read_text(encoding="utf-8"))
+    assert "git_failures" not in updated_web_manifest
 
 
 def test_capture_missing_records_tool_http_404_url(
