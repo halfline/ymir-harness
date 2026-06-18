@@ -24,6 +24,7 @@ from ymir_harness.ymir_workflows import (
     _materialize_replay_unpacked_sources,
     _patch_no_write_candidate_build_lookup,
     _recover_backport_stage_changes,
+    _wrap_backport_replay_agent,
     make_ymir_backport_executor,
     make_ymir_rebuild_executor,
     make_ymir_rebase_executor,
@@ -158,6 +159,45 @@ def test_fixture_search_results_returns_empty_for_unknown_query(tmp_path: Path) 
         )
         == []
     )
+
+
+def test_backport_replay_agent_wraps_uncached_upstream_clone(tmp_path: Path) -> None:
+    ensure_ymir_source_path()
+    from beeai_framework.tools import ToolError
+    from ymir.tools.unprivileged.upstream_tools import (  # type: ignore[import-not-found]
+        CloneUpstreamRepositoryTool,
+        CloneUpstreamRepositoryToolInput,
+    )
+
+    class Agent:
+        def __init__(self) -> None:
+            self._tools = [CloneUpstreamRepositoryTool(options={"working_directory": None})]
+
+    request = _request(
+        tmp_path,
+        environment={
+            "YMIR_BENCHMARK_NETWORK_MODE": "replay_only",
+            "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(tmp_path / "source-cache" / "RHEL-12345"),
+        },
+    )
+
+    agent = _wrap_backport_replay_agent(Agent(), request=request)
+    tool = agent._tools[0]
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(
+            tool._run(
+                CloneUpstreamRepositoryToolInput(
+                    repo_url="https://code.qt.io/qt/qtdeclarative.git",
+                    clone_directory=tmp_path / "qt6-qtdeclarative",
+                ),
+                None,
+                None,
+            )
+        )
+
+    assert "pre-downloaded patch files" in str(exc_info.value)
+    assert "code.qt.io" not in str(exc_info.value)
 
 
 def test_ymir_triage_executor_runs_workflow_with_no_write_environment(
