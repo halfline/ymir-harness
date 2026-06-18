@@ -1994,6 +1994,10 @@ def _triage_actual_result(
 
 def _backport_inputs(request: RunCaseRequest) -> BackportInputs | RunCaseExecution:
     expected = load_json_file(request.expected_path)
+    triage_inputs = _backport_inputs_from_triage_result(request)
+    if triage_inputs is not None:
+        return triage_inputs
+
     upstream_patches = tuple(
         _string_list(expected.get("patch_urls")) or _string_list(expected.get("fix_sources"))
     )
@@ -2028,6 +2032,106 @@ def _backport_inputs(request: RunCaseRequest) -> BackportInputs | RunCaseExecuti
         ),
         fix_version=_string_or_none(expected.get("fix_version")),
     )
+
+
+def _backport_inputs_from_triage_result(
+    request: RunCaseRequest,
+) -> BackportInputs | RunCaseExecution | None:
+    triage_result_path = _backport_triage_result_path(request)
+    if triage_result_path is None:
+        return None
+
+    triage_result = load_json_file(triage_result_path)
+    resolution = _string_or_none(triage_result.get("resolution"))
+    if resolution is None or resolution.replace("-", "_") != "backport":
+        return RunCaseExecution(
+            status="failed",
+            reason=f"ymir backport workflow triage result is not backport: {resolution!r}",
+        )
+
+    data = triage_result.get("data") if isinstance(triage_result.get("data"), Mapping) else {}
+    assert isinstance(data, Mapping)
+    upstream_patches = tuple(
+        _string_list(data.get("patch_urls"))
+        or _string_list(triage_result.get("patch_urls"))
+        or _string_list(data.get("fix_sources"))
+        or _string_list(triage_result.get("fix_sources"))
+    )
+    package = _string_or_none(data.get("package") or triage_result.get("package"))
+    values = {
+        "package": package,
+        "dist_git_branch": _backport_triage_dist_git_branch(
+            request,
+            triage_result,
+            package=package,
+        ),
+        "upstream_patches": upstream_patches,
+        "jira_issue": _string_or_none(
+            data.get("jira_issue") or triage_result.get("jira_issue") or triage_result.get("case_id")
+        )
+        or request.case_id,
+    }
+    missing = [
+        name for name, value in values.items() if value is None or value == () or value == ""
+    ]
+    if missing:
+        return RunCaseExecution(
+            status="failed",
+            reason=(
+                "ymir backport workflow missing triage result "
+                f"{', '.join(missing)} from {triage_result_path}"
+            ),
+        )
+
+    return BackportInputs(
+        package=values["package"],
+        dist_git_branch=values["dist_git_branch"],
+        upstream_patches=upstream_patches,
+        jira_issue=values["jira_issue"],
+        cve_id=_first_string(data.get("cve_id"), triage_result.get("cve_id"), triage_result.get("cve_ids")),
+        justification=_string_or_none(
+            data.get("justification")
+            or triage_result.get("justification")
+            or data.get("rationale")
+            or triage_result.get("rationale")
+            or data.get("notes")
+            or triage_result.get("notes")
+        ),
+        fix_version=_string_or_none(data.get("fix_version") or triage_result.get("fix_version")),
+    )
+
+
+def _backport_triage_result_path(request: RunCaseRequest) -> Path | None:
+    path = request.cases_dir / "triage_results" / f"{request.case_id}.actual.json"
+    return path if path.is_file() else None
+
+
+def _backport_triage_dist_git_branch(
+    request: RunCaseRequest,
+    triage_result: Mapping[str, Any],
+    *,
+    package: str | None,
+) -> str | None:
+    return _mock_repo_branch(request, package=package) or _string_or_none(
+        triage_result.get("target_branch")
+    )
+
+
+def _mock_repo_branch(request: RunCaseRequest, *, package: str | None) -> str | None:
+    for path in sorted((request.cases_dir / "mock_data").glob(f"*/{request.case_id}.json")):
+        config = load_json_file(path)
+        repos = config.get("repos")
+        if not isinstance(repos, list):
+            continue
+        for repo in repos:
+            if not isinstance(repo, Mapping):
+                continue
+            repo_package = _string_or_none(repo.get("package"))
+            if package is not None and repo_package not in {None, package}:
+                continue
+            if branch := _string_or_none(repo.get("branch")):
+                return branch
+    return None
 
 
 def _rebase_inputs(request: RunCaseRequest) -> RebaseInputs | RunCaseExecution:
