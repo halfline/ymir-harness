@@ -398,8 +398,13 @@ def source_cache_git_aliases(remote_url: str) -> tuple[str, ...]:
     if parsed.scheme in {"http", "https"}:
         parts = [part for part in parsed.path.strip("/").removesuffix(".git").split("/") if part]
         if len(parts) >= 2 and parts[-2] == "rpms":
+            package = parts[-1]
             fedora_url = f"https://src.fedoraproject.org/rpms/{parts[-1]}.git"
             aliases.extend(remote_git_aliases(fedora_url))
+            if parsed.hostname == "gitlab.com" and len(parts) >= 4 and parts[0] == "redhat":
+                for namespace in ("centos-stream", "rhel"):
+                    gitlab_url = f"https://gitlab.com/redhat/{namespace}/rpms/{package}.git"
+                    aliases.extend(remote_git_aliases(gitlab_url))
         if parsed.hostname == "gitlab.gnome.org" and len(parts) >= 2:
             github_url = f"https://github.com/{'/'.join(parts)}.git"
             aliases.extend(remote_git_aliases(github_url))
