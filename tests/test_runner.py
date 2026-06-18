@@ -14,7 +14,7 @@ from ymir_harness.runner import (
     load_case_manifest,
     select_validation_cases,
 )
-from ymir_harness.source_fixtures import write_source_fixture_from_repository
+from ymir_harness.source_fixtures import source_cache_git_aliases, write_source_fixture_from_repository
 
 
 def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
@@ -1205,6 +1205,7 @@ def test_build_run_report_rewrites_source_cache_git_remotes(tmp_path: Path) -> N
     subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
     source_repo, _pre_fix_ref = _create_git_repo(tmp_path)
     original_url = "https://gitlab.com/redhat/centos-stream/rpms/glib2.git"
+    internal_rhel_url = "https://gitlab.com/redhat/rhel/rpms/glib2.git"
     fedora_url = "https://src.fedoraproject.org/rpms/glib2.git"
     _write_source_fixture(cases_dir, tmp_path, "RHEL-12345", source_repo, original_url)
     _write_expected(
@@ -1258,12 +1259,22 @@ def test_build_run_report_rewrites_source_cache_git_remotes(tmp_path: Path) -> N
     assert report.entries[0].status == "passed"
     assert original_url in gitconfig_text
     assert original_url.removesuffix(".git") in gitconfig_text
+    assert internal_rhel_url in gitconfig_text
+    assert internal_rhel_url.removesuffix(".git") in gitconfig_text
     assert fedora_url in gitconfig_text
     assert fedora_url.removesuffix(".git") in gitconfig_text
     assert gateway_gitconfig.read_text(encoding="utf-8") == gitconfig_text
     assert original_url in blocked_urls
+    assert internal_rhel_url in blocked_urls
     assert fedora_url in blocked_urls
 
+
+def test_source_cache_git_aliases_include_related_forges() -> None:
+    distgit_aliases = source_cache_git_aliases(
+        "https://gitlab.com/redhat/centos-stream/rpms/qt6-qtdeclarative.git"
+    )
+    assert "https://gitlab.com/redhat/rhel/rpms/qt6-qtdeclarative.git" in distgit_aliases
+    assert "https://gitlab.com/redhat/rhel/rpms/qt6-qtdeclarative" in distgit_aliases
 
 def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
