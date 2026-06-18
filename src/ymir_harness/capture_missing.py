@@ -257,6 +257,7 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
                     CaptureFailure(url=url, reason="source repo is already recorded")
                 )
             else:
+                _clear_git_failure(git_failures, url, project_url)
                 result.captured_source.append(captured)
             if "external subprocess URL blocked" in reasons:
                 continue
@@ -407,7 +408,9 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             )
         )
 
-    manifest_changed = bool(result.captured or result.captured_git_failures)
+    manifest_changed = bool(
+        result.captured or result.captured_source or result.captured_git_failures
+    )
     if not request.dry_run and manifest_changed:
         manifest["required_urls"] = required_urls
         manifest["recorded_files"] = recorded_files
@@ -964,7 +967,7 @@ def _capture_git_source_repo(
     if fixture_path.exists() and not request.overwrite:
         return None
 
-    if not ((cases_dir / ".git").exists() and is_git_worktree(cases_dir)):
+    if not is_git_worktree(cases_dir):
         raise CaptureMissingError(f"cases directory is not a git worktree: {cases_dir}")
 
     with tempfile.TemporaryDirectory(prefix="ymir-harness-source-fixture-") as tmp:
@@ -999,6 +1002,11 @@ def _record_git_failure(
     for alias in _git_failure_aliases(url, project_url):
         git_failures[alias] = failure
     return CapturedGitFailure(url=url, returncode=128, stderr=stderr)
+
+
+def _clear_git_failure(git_failures: dict[str, Any], url: str, project_url: str) -> None:
+    for alias in _git_failure_aliases(url, project_url):
+        git_failures.pop(alias, None)
 
 
 def _git_failure_is_recorded(git_failures: Mapping[str, Any], url: str) -> bool:
