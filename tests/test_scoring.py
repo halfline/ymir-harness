@@ -1104,11 +1104,19 @@ def test_score_result_directory_records_headline_reasons(tmp_path: Path) -> None
         case_status="excluded",
         case_status_reason="fixture cannot be replayed",
     )
+    _write_expected(
+        cases_dir,
+        "RHEL-67890",
+        package="butane",
+        case_status="active",
+        answer_leakage="production_signal",
+    )
     for case_id, package in (
         ("RHEL-12345", "dnsmasq"),
         ("RHEL-23456", "libtiff"),
         ("RHEL-34567", "openssl"),
         ("RHEL-45678", "kernel"),
+        ("RHEL-67890", "butane"),
     ):
         _write_json(
             actual_dir / f"{case_id}.actual.json",
@@ -1127,6 +1135,7 @@ def test_score_result_directory_records_headline_reasons(tmp_path: Path) -> None
     assert entries["RHEL-34567"].headline_reason == "answer_leakage is explicit"
     assert entries["RHEL-45678"].headline_reason == "network_mode is live_non_reproducible"
     assert entries["RHEL-56789"].headline_reason == "case_status is excluded"
+    assert entries["RHEL-67890"].headline_reason is None
     assert entries["RHEL-56789"].reason == "fixture cannot be replayed"
     payload_cases = {case["case_id"]: case for case in report.to_json()["cases"]}
     assert payload_cases["RHEL-12345"]["headline_reason"] == "case_status is quarantined"

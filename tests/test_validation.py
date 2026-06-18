@@ -167,6 +167,36 @@ def test_validate_case_directory_reports_invalid_backport_source(tmp_path: Path)
     )
 
 
+def test_validate_case_directory_rejects_active_explicit_answer_leakage(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(cases_dir, repo_path, pre_fix_ref, answer_leakage="explicit")
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    assert any(
+        issue.category == "ground_truth_ambiguous"
+        and "explicit answer leakage" in issue.message
+        for issue in report.cases[0].issues
+    )
+
+
+def test_validate_case_directory_accepts_active_production_signal(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(cases_dir, repo_path, pre_fix_ref, answer_leakage="production_signal")
+
+    report = validate_case_directory(cases_dir)
+
+    assert not report.has_blocking_errors
+    assert report.cases[0].status == "valid"
+
+
 def test_validate_case_directory_reports_invalid_ymir_jira_mock(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     _write_json(
@@ -895,6 +925,7 @@ def _write_replay_case(
         "-int main(void) { return 0; }\n"
         "+int main(void) { return 1; }\n"
     ),
+    answer_leakage: str = "none",
 ) -> None:
     case_id = "RHEL-12345"
     case_type = "cve_backport"
@@ -915,7 +946,7 @@ def _write_replay_case(
             "patch_urls": patch_urls,
             "expected_basis": "merged_mr",
             "ground_truth_confidence": "high",
-            "answer_leakage": "none",
+            "answer_leakage": answer_leakage,
             "case_status": "active",
             "case_status_reason": None,
             "network_mode": network_mode,
