@@ -506,6 +506,31 @@ def _instrument_agent_factory(
     return factory
 
 
+def _instrument_sync_agent_factory(
+    agent_factory: AgentFactory,
+    *,
+    request: RunCaseRequest,
+    agent_name: str,
+) -> AgentFactory:
+    def factory(*args: Any, **kwargs: Any) -> Any:
+        result = agent_factory(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return _instrument_agent_awaitable(result, request=request, agent_name=agent_name)
+        return _instrument_agent(result, request=request, agent_name=agent_name)
+
+    return factory
+
+
+async def _instrument_agent_awaitable(
+    awaitable: Awaitable[Any],
+    *,
+    request: RunCaseRequest,
+    agent_name: str,
+) -> Any:
+    agent = await awaitable
+    return _instrument_agent(agent, request=request, agent_name=agent_name)
+
+
 def _instrument_agent(agent: Any, *, request: RunCaseRequest, agent_name: str) -> Any:
     _instrument_agent_llm(agent, request=request, agent_name=agent_name)
     return _InstrumentedAgent(agent, request=request, agent_name=agent_name)
