@@ -1276,6 +1276,15 @@ def test_source_cache_git_aliases_include_related_forges() -> None:
     assert "https://gitlab.com/redhat/rhel/rpms/qt6-qtdeclarative.git" in distgit_aliases
     assert "https://gitlab.com/redhat/rhel/rpms/qt6-qtdeclarative" in distgit_aliases
 
+    github_qt_aliases = source_cache_git_aliases("https://github.com/qt/qtdeclarative.git")
+    assert "https://code.qt.io/qt/qtdeclarative.git" in github_qt_aliases
+    assert "https://code.qt.io/qt/qtdeclarative" in github_qt_aliases
+
+    code_qt_aliases = source_cache_git_aliases("https://code.qt.io/qt/qtdeclarative.git")
+    assert "https://github.com/qt/qtdeclarative.git" in code_qt_aliases
+    assert "https://github.com/qt/qtdeclarative" in code_qt_aliases
+
+
 def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
