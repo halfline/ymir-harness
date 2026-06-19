@@ -449,12 +449,15 @@ def _patch_touched_files_metric(
     case_id: str,
 ) -> ScoreMetric:
     expected_files = _normalize_file_list(expected.get("patch_touched_files"))
-    if not expected_files and cases_dir is not None:
-        expected_files = _reference_patch_touched_files(cases_dir, case_id)
-
     actual_files = _normalize_file_list(_actual_result_field(actual, "patch_touched_files"))
     if not actual_files:
         actual_files = _actual_generated_patch_touched_files(actual)
+    if (
+        not expected_files
+        and cases_dir is not None
+        and (actual_files or _actual_result_field(actual, "workflow") != "ymir-triage")
+    ):
+        expected_files = _reference_patch_touched_files(cases_dir, case_id)
 
     if not expected_files:
         return ScoreMetric(
