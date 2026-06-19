@@ -456,6 +456,62 @@ def test_enforcement_replays_recorded_git_subprocess_failure(tmp_path: Path) -> 
     assert completed.stderr == "fatal: unable to access repository\n"
 
 
+def test_enforcement_replays_recorded_subprocess_command(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    command = "GIT_TERMINAL_PROMPT=0 git ls-remote https://example.invalid/repo 2>&1 | head -5"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["subprocess_replays"] = {
+        command: {
+            "returncode": 0,
+            "stdout": "abc123\tHEAD\n",
+            "stderr": "",
+        }
+    }
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    assert completed.returncode == 0
+    assert completed.stdout == "abc123\tHEAD\n"
+    assert completed.stderr == ""
+
+
+def test_enforcement_does_not_replay_subprocess_command_in_network_denied(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    command = "git ls-remote https://example.invalid/repo"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["subprocess_replays"] = {
+        command: {
+            "returncode": 0,
+            "stdout": "abc123\tHEAD\n",
+            "stderr": "",
+        }
+    }
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    environment = {**_environment(manifest_path), "YMIR_BENCHMARK_NETWORK_MODE": "network_denied"}
+
+    with enforce_benchmark_boundaries(environment):
+        with pytest.raises(BenchmarkBoundaryViolation) as exc_info:
+            subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+    assert str(exc_info.value) == "external subprocess URL blocked: https://example.invalid/repo"
+
+
 def test_enforcement_blocks_unrecorded_git_popen_url(tmp_path: Path) -> None:
     manifest_path = _write_replay_manifest(tmp_path, {})
     url = "https://example.invalid/repo.git"
