@@ -31,6 +31,7 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
             "JIRA_EMAIL": "prod@example.com",
             "JIRA_TOKEN": "prod-token",
             "GITLAB_TOKEN": "prod-token",
+            "UV_PUBLISH_TOKEN": "publish-token",
             "JIRA_PASSWORD": "prod-password",
             "KEYTAB_FILE": "/etc/ymir/prod.keytab",
             "KRB5CCNAME": "/tmp/prod-krb5",
@@ -57,7 +58,9 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["GOOGLE_VERTEX_LOCATION"] == "global"
     assert env["BENCHMARK_MAX_ITERATIONS_OVERRIDE"] == "50"
     assert env["BEEAI_MAX_ITERATIONS"] == "50"
-    assert env["GITLAB_TOKEN"] == "prod-token"
+    assert env["YMIR_HARNESS_FS_ISOLATION"] == "bwrap"
+    assert "GITLAB_TOKEN" not in env
+    assert "UV_PUBLISH_TOKEN" not in env
     assert "JIRA_PASSWORD" not in env
     assert "KEYTAB_FILE" not in env
     assert "KRB5CCNAME" not in env
@@ -375,6 +378,108 @@ def test_build_run_report_calls_executor_for_runnable_cases(
     assert entries["RHEL-23456", 1].actual_path is None
     assert entries["RHEL-23456", 2].status == "skipped"
     assert entries["RHEL-23456", 2].actual_path is None
+
+
+def test_build_run_report_isolates_real_ymir_executor_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_structured_jira(cases_dir, "RHEL-12345")
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+    isolated_calls = []
+
+    def executor(_request):
+        raise AssertionError("isolatable Ymir executor should run in a worker process")
+
+    executor.ymir_workflow = "ymir-triage"
+    executor.ymir_isolatable = True
+
+    def isolated(workflow, request):
+        isolated_calls.append((workflow, request))
+        return RunCaseExecution(status="passed", reason="isolated workflow completed")
+
+    monkeypatch.setattr(runner_module, "_execute_isolated_case_workflow", isolated)
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert len(isolated_calls) == 1
+    assert isolated_calls[0][0] == "ymir-triage"
+    assert isolated_calls[0][1].environment["YMIR_HARNESS_FS_ISOLATION"] == "bwrap"
+    assert report.entries[0].status == "passed"
+    assert report.entries[0].reason == "isolated workflow completed"
+
+
+def test_filesystem_isolation_command_binds_harness_without_parent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    actual_path = results_dir / "repeat-1" / "actual-results" / "RHEL-12345.actual.json"
+    worker_home = results_dir / "repeat-1" / "workflow-worker" / "home"
+    request_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.request.json"
+    result_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.result.json"
+    results_dir.mkdir(parents=True)
+    worker_home.mkdir(parents=True)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/bwrap")
+
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        repetition=1,
+        cases_dir=cases_dir,
+        results_dir=results_dir,
+        expected_path=expected_path,
+        actual_path=actual_path,
+        environment={"PATH": "/usr/bin"},
+        variant="baseline",
+        features=(),
+    )
+
+    command = runner_module._filesystem_isolation_command(
+        request,
+        request_path=request_path,
+        result_path=result_path,
+        worker_home=worker_home,
+    )
+
+    ro_binds = _bwrap_pairs(command, "--ro-bind")
+    rw_binds = _bwrap_pairs(command, "--bind")
+    harness_root = runner_module._harness_root()
+    assert (str(harness_root), str(harness_root)) in ro_binds
+    assert (str(harness_root.parent), str(harness_root.parent)) not in ro_binds
+    assert (str(harness_root.parent), str(harness_root.parent)) not in rw_binds
+    assert (str(results_dir), str(results_dir)) in rw_binds
+    assert "--unshare-pid" in command
+
+
+def _bwrap_pairs(command: list[str], option: str) -> list[tuple[str, str]]:
+    return [
+        (command[index + 1], command[index + 2])
+        for index, item in enumerate(command[:-2])
+        if item == option
+    ]
 
 
 def test_build_run_report_fails_invalid_structured_jira(tmp_path: Path) -> None:
