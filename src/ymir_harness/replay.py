@@ -76,6 +76,13 @@ class GitFailureReplay:
     stderr: bytes
 
 
+@dataclass(frozen=True)
+class SubprocessReplay:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
 TRAILING_ESCAPED_URL_GARBAGE_RE = re.compile(r"(?:\\+[nrt]|\\+)+$", re.IGNORECASE)
 
 
@@ -97,6 +104,14 @@ def canonicalize_replay_url(value: Any) -> str:
     return url
 
 
+def subprocess_command_key(command: Any) -> str:
+    if isinstance(command, str):
+        return command.strip()
+    if isinstance(command, (list, tuple)):
+        return json.dumps([str(part) for part in command], separators=(",", ":"))
+    return str(command).strip()
+
+
 class ReplayCache:
     def __init__(self, manifest_path: Path, *, source_cache_dir: Path | None = None):
         self.manifest_path = manifest_path
@@ -105,6 +120,7 @@ class ReplayCache:
         self._recorded_files = self._load_recorded_files(manifest_path)
         self._response_metadata = self._load_response_metadata(manifest_path)
         self._git_failures = self._load_git_failures(manifest_path)
+        self._subprocess_replays = self._load_subprocess_replays(manifest_path)
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "ReplayCache | None":
@@ -139,6 +155,9 @@ class ReplayCache:
             stdout=b"".join(failure.stdout for failure in replay_failures),
             stderr=b"".join(failure.stderr for failure in replay_failures),
         )
+
+    def subprocess_replay_for_command(self, command: Any) -> SubprocessReplay | None:
+        return self._subprocess_replays.get(subprocess_command_key(command))
 
     def read_bytes(self, url: Any) -> bytes:
         url = _url_text(url)
@@ -273,6 +292,27 @@ class ReplayCache:
             stderr = payload.get("stderr")
             output[canonical_url] = GitFailureReplay(
                 returncode=returncode if isinstance(returncode, int) else 128,
+                stdout=stdout.encode("utf-8") if isinstance(stdout, str) else b"",
+                stderr=stderr.encode("utf-8") if isinstance(stderr, str) else b"",
+            )
+        return output
+
+    def _load_subprocess_replays(self, manifest_path: Path) -> dict[str, SubprocessReplay]:
+        manifest = self._load_manifest(manifest_path)
+        subprocess_replays = manifest.get("subprocess_replays")
+        if not isinstance(subprocess_replays, Mapping):
+            return {}
+
+        output: dict[str, SubprocessReplay] = {}
+        for command, payload in subprocess_replays.items():
+            command_key = command if isinstance(command, str) else ""
+            if not command_key or not isinstance(payload, Mapping):
+                continue
+            returncode = payload.get("returncode")
+            stdout = payload.get("stdout")
+            stderr = payload.get("stderr")
+            output[command_key] = SubprocessReplay(
+                returncode=returncode if isinstance(returncode, int) else 1,
                 stdout=stdout.encode("utf-8") if isinstance(stdout, str) else b"",
                 stderr=stderr.encode("utf-8") if isinstance(stderr, str) else b"",
             )
