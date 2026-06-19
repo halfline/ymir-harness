@@ -729,6 +729,38 @@ def test_collect_case_writes_embedded_linked_jira_for_local_issue_json(
     assert linked["fields"]["summary"] == "Original issue"
 
 
+def test_collect_case_overwrite_clears_stale_jira_replay_state(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    jira_dir = cases_dir / "jiras" / "RHEL-12345"
+    _write_json(jira_dir / "api" / "search" / "stale.json", {"response": {"issues": []}})
+    _write_json(jira_dir / "linked" / "RHEL-OLD" / "issue.json", {"key": "RHEL-OLD"})
+    issue_json = _write_json(
+        tmp_path / "issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": {"summary": "Backport CVE fix"},
+        },
+    )
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="dnsmasq",
+            target_branch="rhel-8.10.z",
+            network_mode="network_denied",
+            jira_issue_json=issue_json,
+            overwrite=True,
+        )
+    )
+
+    assert not (jira_dir / "api").exists()
+    assert not (jira_dir / "linked").exists()
+    assert (jira_dir / "issue.json").is_file()
+
+
 def test_collect_case_uses_embedded_linked_jira_when_fetch_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
