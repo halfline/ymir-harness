@@ -598,7 +598,7 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     responses = {
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345?expand=changelog": {
             "key": "RHEL-12345",
             "fields": {
                 "summary": "Backport CVE fix",
@@ -618,7 +618,7 @@ def test_collect_case_fetches_jira_issue_comments_and_links(
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [
             {"object": {"url": "https://gitlab.example/group/pkg/-/merge_requests/7"}}
         ],
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-23456": {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-23456?expand=changelog": {
             "key": "RHEL-23456",
             "fields": {
                 "summary": "Original issue",
@@ -734,7 +734,7 @@ def test_collect_case_uses_embedded_linked_jira_when_fetch_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     responses = {
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345?expand=changelog": {
             "key": "RHEL-12345",
             "fields": {
                 "summary": "Clone issue",
@@ -750,8 +750,8 @@ def test_collect_case_uses_embedded_linked_jira_when_fetch_fails(
         },
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/comment": {"comments": []},
         "https://issues.example.invalid/rest/api/2/issue/RHEL-12345/remotelink": [],
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-23456": HTTPError(
-            "https://issues.example.invalid/rest/api/2/issue/RHEL-23456",
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-23456?expand=changelog": HTTPError(
+            "https://issues.example.invalid/rest/api/2/issue/RHEL-23456?expand=changelog",
             403,
             "Forbidden",
             None,
@@ -794,7 +794,7 @@ def test_collect_case_uses_embedded_linked_jira_when_fetch_fails(
     assert any(
         warning.startswith(
             "used embedded linked Jira RHEL-23456: failed to fetch "
-            "https://issues.example.invalid/rest/api/2/issue/RHEL-23456"
+            "https://issues.example.invalid/rest/api/2/issue/RHEL-23456?expand=changelog"
         )
         and "HTTP Error 403" in warning
         for warning in result.warnings
@@ -806,7 +806,7 @@ def test_collect_case_fetches_jira_with_basic_auth_token_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     responses = {
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345?expand=changelog": {
             "key": "RHEL-12345",
             "fields": {"summary": "Backport CVE fix"},
         },
@@ -956,7 +956,7 @@ def test_collect_case_imports_completed_jira_without_repeated_metadata(
     internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fdnsmasq"
     internal_branches_url = "https://gitlab.com/api/v4/projects/42/repository/branches"
     responses = {
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345?expand=changelog": {
             "key": "RHEL-12345",
             "fields": {
                 "summary": "CVE-2026-0001 in dnsmasq",
@@ -1104,7 +1104,7 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
     internal_project_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fglib2"
     internal_branches_url = "https://gitlab.com/api/v4/projects/43/repository/branches"
     responses = {
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345?expand=changelog": {
             "key": "RHEL-12345",
             "fields": {
                 "summary": "CVE-2026-0001 in glib2",
@@ -1243,6 +1243,37 @@ def test_collect_case_scrubs_comments_after_historical_as_of(tmp_path: Path) -> 
                 "summary": "Backport CVE fix",
                 "components": [{"name": "dnsmasq"}],
                 "fixVersions": [{"name": "rhel-8.10.z"}],
+                "status": {"name": "Integration"},
+                "labels": ["Security", "ymir_backported"],
+                "customfield_10578": "dnsmasq-2.90-1.el8_10.4",
+                "updated": "2025-09-13T00:00:00.000+0000",
+            },
+            "changelog": {
+                "histories": [
+                    {
+                        "created": "2025-09-12T10:00:00.000+0000",
+                        "items": [
+                            {
+                                "field": "status",
+                                "fieldId": "status",
+                                "fromString": "Planning",
+                                "toString": "Integration",
+                            },
+                            {
+                                "field": "labels",
+                                "fieldId": "labels",
+                                "fromString": "Security ymir_triage_in_progress",
+                                "toString": "Security ymir_backported",
+                            },
+                            {
+                                "field": "Fixed in Build",
+                                "fieldId": "customfield_10578",
+                                "fromString": None,
+                                "toString": "dnsmasq-2.90-1.el8_10.4",
+                            },
+                        ],
+                    }
+                ]
             },
         },
     )
@@ -1284,6 +1315,11 @@ def test_collect_case_scrubs_comments_after_historical_as_of(tmp_path: Path) -> 
     reconstruction = json.loads((jira_dir / "reconstruction.json").read_text(encoding="utf-8"))
     starting = json.loads((jira_dir / "starting-issue.json").read_text(encoding="utf-8"))
     assert reconstruction["as_of"] == "2025-09-12T09:46:43.671999Z"
+    assert "changelog" not in starting
+    assert starting["fields"]["status"] == {"name": "Planning"}
+    assert starting["fields"]["labels"] == ["Security"]
+    assert starting["fields"]["customfield_10578"] is None
+    assert starting["fields"]["updated"] == "2025-09-12T09:46:43.671999Z"
     assert starting["fields"]["comment"]["comments"] == [
         {
             "body": "Reporter supplied reproducer.",
@@ -1570,7 +1606,7 @@ def test_collect_case_records_commit_patches_from_jira_merge_request_patch(
     project_id = collect_case_module._synthetic_internal_rhel_project_id(package)
     internal_branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
     responses = {
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345?expand=changelog": {
             "key": "RHEL-12345",
             "fields": {
                 "summary": "GDBusConnection serial overflow",
@@ -1679,7 +1715,7 @@ def test_collect_case_synthesizes_hidden_internal_branch_fixture(
     project_id = collect_case_module._synthetic_internal_rhel_project_id("glib2")
     internal_branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
     responses = {
-        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345": {
+        "https://issues.example.invalid/rest/api/2/issue/RHEL-12345?expand=changelog": {
             "key": "RHEL-12345",
             "fields": {
                 "summary": "CVE-2026-0001 in glib2",
