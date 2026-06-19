@@ -1266,6 +1266,51 @@ def test_collect_case_extracts_jotnar_outputs_without_starting_leakage(
     assert seen_urls == list(responses)
 
 
+def test_triage_expected_patch_urls_ignore_backport_only_result_comment(
+    tmp_path: Path,
+) -> None:
+    upstream_patch_url = "https://github.example/upstream/pkg/commit/abc123.patch"
+    mr_url = "https://gitlab.example/redhat/rpms/pkg/-/merge_requests/64"
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": f"Output from Backport Agent:\n\n{mr_url}\n",
+                    "author": {"displayName": "Jotnar Project"},
+                }
+            ]
+        },
+    )
+    fetched = collect_case_module.FetchedEvidence(
+        jira_patch_urls=(upstream_patch_url,),
+        gitlab_mr_url=mr_url,
+        gitlab_patch_url=f"{mr_url}.patch",
+    )
+
+    triage_request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-12345",
+        expected_basis="historical_jira_state",
+        mock_agent="triage",
+        jira_comments_json=comments_json,
+    )
+    backport_request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-12345",
+        expected_basis="historical_jira_state",
+        mock_agent="backport",
+        jira_comments_json=comments_json,
+    )
+
+    assert collect_case_module._expected_patch_urls(triage_request, fetched) == (
+        upstream_patch_url,
+    )
+    assert collect_case_module._expected_patch_urls(backport_request, fetched) == (
+        f"{mr_url}.patch",
+    )
+
+
 def test_collect_case_scrubs_comments_after_historical_as_of(tmp_path: Path) -> None:
     issue_json = _write_json(
         tmp_path / "issue.json",
