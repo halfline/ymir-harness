@@ -68,6 +68,13 @@ MISSING_URL_PATTERNS = (
         "tool HTTP 404",
         re.compile(r"Failed to fetch patch from\s+(https?://[^\s\"'<>]+):\s*HTTP 404"),
     ),
+    (
+        "tool replay miss",
+        re.compile(
+            r"Failed to fetch patch from\s+(https?://[^\s\"'<>]+):\s*"
+            r"URL is not (?:recorded|available) in replay cache"
+        ),
+    ),
     ("unrecorded URL", re.compile(r"unrecorded URL:\s*(https?://[^\s\"'<>]+)")),
 )
 TEXT_SUFFIXES = {".json", ".log", ".md", ".out", ".txt"}
