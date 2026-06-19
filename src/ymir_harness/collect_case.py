@@ -1940,6 +1940,10 @@ def _write_jira_fixtures(
     result: CollectCaseResult,
 ) -> None:
     jira_dir = cases_dir / "jiras" / request.case_id
+    if request.overwrite:
+        for stale_dir in (jira_dir / "api", jira_dir / "linked"):
+            if stale_dir.exists():
+                shutil.rmtree(stale_dir)
     issue_for_start: Mapping[str, Any] | None = None
     comments_for_start: Any = None
     if fetched.jira_issue is not None:
