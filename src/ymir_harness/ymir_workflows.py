@@ -80,6 +80,8 @@ def make_ymir_triage_executor(
             )
         )
 
+    executor.ymir_workflow = "ymir-triage"  # type: ignore[attr-defined]
+    executor.ymir_isolatable = workflow is None and agent_factory is None  # type: ignore[attr-defined]
     return executor
 
 
@@ -97,6 +99,8 @@ def make_ymir_backport_executor(
             )
         )
 
+    executor.ymir_workflow = "ymir-backport"  # type: ignore[attr-defined]
+    executor.ymir_isolatable = workflow is None and agent_factory is None  # type: ignore[attr-defined]
     return executor
 
 
@@ -112,6 +116,8 @@ def make_ymir_rebase_executor(
             )
         )
 
+    executor.ymir_workflow = "ymir-rebase"  # type: ignore[attr-defined]
+    executor.ymir_isolatable = workflow is None  # type: ignore[attr-defined]
     return executor
 
 
@@ -127,6 +133,8 @@ def make_ymir_rebuild_executor(
             )
         )
 
+    executor.ymir_workflow = "ymir-rebuild"  # type: ignore[attr-defined]
+    executor.ymir_isolatable = workflow is None  # type: ignore[attr-defined]
     return executor
 
 

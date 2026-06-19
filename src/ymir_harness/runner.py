@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
@@ -44,6 +47,8 @@ DEFAULT_CHAT_MODEL = "vertexai:claude-sonnet-4-6"
 MAX_ITERATIONS_OVERRIDE_ENV = "BENCHMARK_MAX_ITERATIONS_OVERRIDE"
 MAX_COST_PER_RUN_ENV = "BENCHMARK_MAX_COST_PER_RUN"
 COST_ALERT_THRESHOLD_ENV = "BENCHMARK_COST_ALERT_THRESHOLD"
+FILESYSTEM_ISOLATION_ENV = "YMIR_HARNESS_FS_ISOLATION"
+FILESYSTEM_ISOLATION_WORKER_ENV = "YMIR_HARNESS_WORKFLOW_WORKER"
 EVENT_TRACE_FIELDS = ("events", "tool_events", "tool_calls", "trace")
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
@@ -60,12 +65,15 @@ SENSITIVE_ENVIRONMENT_NAMES = frozenset(
         "JIRA_API_TOKEN",
         "JIRA_PASSWORD",
         "JIRA_TOKEN",
+        "GITLAB_TOKEN",
+        "GITHUB_TOKEN",
         "KEYTAB_FILE",
         "KRB5CCNAME",
         "KRB5_KTNAME",
         "KOJI_CONFIG",
         "LOOKASIDE_PASSWORD",
         "LOOKASIDE_TOKEN",
+        "UV_PUBLISH_TOKEN",
     }
 )
 RunCaseExecutor = Callable[["RunCaseRequest"], "RunCaseExecution"]
@@ -138,6 +146,7 @@ def build_no_write_environment(
 
     env.update(NO_WRITE_ENVIRONMENT)
     env.setdefault("CHAT_MODEL", DEFAULT_CHAT_MODEL)
+    env.setdefault(FILESYSTEM_ISOLATION_ENV, "bwrap")
     _normalize_model_environment(env)
     env["JIRA_MOCK_FILES"] = str((jira_mock_dir or cases_dir / "jiras").resolve())
     env["MOCK_REPOS_DIR"] = str((cases_dir / "mock_data").resolve())
@@ -575,7 +584,7 @@ def _run_case_result(
                 _capture_workflow_output(results_dir, case_id, repetition),
                 enforce_benchmark_boundaries(request.environment),
             ):
-                execution = executor(request)
+                execution = _execute_case_workflow(executor, request)
             runtime_seconds = time.monotonic() - started_at
         except BenchmarkBoundaryViolation as exc:
             return RunCaseResult(
@@ -716,6 +725,291 @@ def _source_cache_directory(
         case_id,
         results_dir / f"repeat-{repetition}" / "source-cache" / case_id,
     )
+
+
+def _execute_case_workflow(
+    executor: RunCaseExecutor,
+    request: RunCaseRequest,
+) -> RunCaseExecution:
+    workflow = getattr(executor, "ymir_workflow", None)
+    if not (
+        isinstance(workflow, str)
+        and getattr(executor, "ymir_isolatable", False)
+        and _filesystem_isolation_enabled(request.environment)
+    ):
+        return executor(request)
+    return _execute_isolated_case_workflow(workflow, request)
+
+
+def _filesystem_isolation_enabled(environment: Mapping[str, str]) -> bool:
+    value = environment.get(FILESYSTEM_ISOLATION_ENV, "bwrap").strip().lower()
+    return value not in {"", "0", "false", "no", "none", "off", "disabled"}
+
+
+def _execute_isolated_case_workflow(
+    workflow: str,
+    request: RunCaseRequest,
+) -> RunCaseExecution:
+    worker_dir = request.results_dir / f"repeat-{request.repetition}" / "workflow-worker"
+    worker_dir.mkdir(parents=True, exist_ok=True)
+    worker_home = worker_dir / "home"
+    worker_home.mkdir(parents=True, exist_ok=True)
+    request_path = worker_dir / f"{request.case_id}.request.json"
+    result_path = worker_dir / f"{request.case_id}.result.json"
+
+    worker_environment = _isolated_worker_environment(request.environment, worker_home)
+    request_path.write_text(
+        json.dumps(
+            {
+                "workflow": workflow,
+                "request": _request_payload(
+                    _request_with_environment(request, worker_environment)
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    command = _filesystem_isolation_command(
+        request,
+        request_path=request_path,
+        result_path=result_path,
+        worker_home=worker_home,
+    )
+    completed = subprocess.run(
+        command,
+        cwd=str(_harness_root()),
+        env=worker_environment,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"isolated {workflow} worker exited with status {completed.returncode}"
+        )
+    return _execution_from_payload(
+        json.loads(result_path.read_text(encoding="utf-8")),
+        base_dir=_harness_root(),
+    )
+
+
+def _isolated_worker_environment(
+    environment: Mapping[str, str],
+    worker_home: Path,
+) -> dict[str, str]:
+    env = dict(environment)
+    env["HOME"] = str(worker_home)
+    env["PYTHONUNBUFFERED"] = "1"
+    env[FILESYSTEM_ISOLATION_WORKER_ENV] = "1"
+
+    adc_path = _google_application_credentials_path(env)
+    if adc_path is not None:
+        env["GOOGLE_APPLICATION_CREDENTIALS"] = str(
+            worker_home / ".config" / "gcloud" / "application_default_credentials.json"
+        )
+    return env
+
+
+def _google_application_credentials_path(environment: Mapping[str, str]) -> Path | None:
+    explicit = environment.get("GOOGLE_APPLICATION_CREDENTIALS")
+    candidates = [Path(explicit).expanduser()] if explicit else []
+    home = os.environ.get("HOME")
+    if home:
+        candidates.append(Path(home) / ".config" / "gcloud" / "application_default_credentials.json")
+
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def _filesystem_isolation_command(
+    request: RunCaseRequest,
+    *,
+    request_path: Path,
+    result_path: Path,
+    worker_home: Path,
+) -> list[str]:
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        raise RuntimeError(
+            f"{FILESYSTEM_ISOLATION_ENV}=bwrap requested, but bwrap is not installed"
+        )
+
+    command = [
+        bwrap,
+        "--unshare-pid",
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind-try",
+        "/bin",
+        "/bin",
+        "--ro-bind-try",
+        "/sbin",
+        "/sbin",
+        "--ro-bind-try",
+        "/lib",
+        "/lib",
+        "--ro-bind-try",
+        "/lib64",
+        "/lib64",
+        "--ro-bind-try",
+        "/etc/resolv.conf",
+        "/etc/resolv.conf",
+        "--ro-bind-try",
+        "/etc/hosts",
+        "/etc/hosts",
+        "--ro-bind-try",
+        "/etc/nsswitch.conf",
+        "/etc/nsswitch.conf",
+        "--ro-bind-try",
+        "/etc/passwd",
+        "/etc/passwd",
+        "--ro-bind-try",
+        "/etc/group",
+        "/etc/group",
+        "--ro-bind-try",
+        "/etc/pki",
+        "/etc/pki",
+        "--ro-bind-try",
+        "/etc/ssl",
+        "/etc/ssl",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+        "--tmpfs",
+        "/var/tmp",
+        "--dir",
+        "/run",
+    ]
+
+    python_runtime = Path(sys.executable).resolve()
+    command.extend(_ro_bind_path(python_runtime.parent.parent, python_runtime.parent.parent))
+    command.extend(_ro_bind_path(_harness_root(), _harness_root()))
+    command.extend(_bind_path(request.results_dir, request.results_dir))
+    command.extend(_bind_path(worker_home, worker_home))
+
+    adc_path = _google_application_credentials_path(request.environment)
+    if adc_path is not None:
+        command.extend(
+            _ro_bind_path(
+                adc_path,
+                worker_home / ".config" / "gcloud" / "application_default_credentials.json",
+            )
+        )
+
+    command.extend(
+        [
+            "--chdir",
+            str(_harness_root()),
+            sys.executable,
+            "-m",
+            "ymir_harness.workflow_worker",
+            str(request_path),
+            str(result_path),
+        ]
+    )
+    return command
+
+
+def _ro_bind_path(source: Path, destination: Path) -> list[str]:
+    return ["--ro-bind", str(source), str(destination)]
+
+
+def _bind_path(source: Path, destination: Path) -> list[str]:
+    return ["--bind", str(source), str(destination)]
+
+
+def _request_with_environment(
+    request: RunCaseRequest,
+    environment: Mapping[str, str],
+) -> RunCaseRequest:
+    return RunCaseRequest(
+        case_id=request.case_id,
+        case_type=request.case_type,
+        repetition=request.repetition,
+        cases_dir=request.cases_dir,
+        results_dir=request.results_dir,
+        expected_path=request.expected_path,
+        actual_path=request.actual_path,
+        environment=environment,
+        variant=request.variant,
+        features=request.features,
+    )
+
+
+def _request_payload(request: RunCaseRequest) -> dict[str, Any]:
+    return {
+        "case_id": request.case_id,
+        "case_type": request.case_type,
+        "repetition": request.repetition,
+        "cases_dir": str(request.cases_dir),
+        "results_dir": str(request.results_dir),
+        "expected_path": str(request.expected_path),
+        "actual_path": str(request.actual_path),
+        "environment": dict(request.environment),
+        "variant": request.variant,
+        "features": list(request.features),
+    }
+
+
+def request_from_payload(payload: Mapping[str, Any]) -> RunCaseRequest:
+    return RunCaseRequest(
+        case_id=str(payload["case_id"]),
+        case_type=payload.get("case_type") if isinstance(payload.get("case_type"), str) else None,
+        repetition=int(payload["repetition"]),
+        cases_dir=Path(str(payload["cases_dir"])),
+        results_dir=Path(str(payload["results_dir"])),
+        expected_path=Path(str(payload["expected_path"])),
+        actual_path=Path(str(payload["actual_path"])),
+        environment={
+            str(key): str(value)
+            for key, value in dict(payload.get("environment") or {}).items()
+        },
+        variant=str(payload["variant"]),
+        features=tuple(str(feature) for feature in payload.get("features") or ()),
+    )
+
+
+def execution_to_payload(execution: RunCaseExecution) -> dict[str, Any]:
+    return {
+        "status": execution.status,
+        "actual_result": execution.actual_result,
+        "actual_path": str(execution.actual_path) if execution.actual_path is not None else None,
+        "reason": execution.reason,
+    }
+
+
+def _execution_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    base_dir: Path,
+) -> RunCaseExecution:
+    actual_path_value = payload.get("actual_path")
+    actual_result = payload.get("actual_result")
+    return RunCaseExecution(
+        status=str(payload["status"]),  # type: ignore[arg-type]
+        actual_result=actual_result if isinstance(actual_result, Mapping) else None,
+        actual_path=Path(str(actual_path_value)) if actual_path_value is not None else None,
+        reason=payload.get("reason") if isinstance(payload.get("reason"), str) else None,
+    )
+
+
+def _harness_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
 
 def _mock_repo_environment(
