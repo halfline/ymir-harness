@@ -935,6 +935,183 @@ def test_capture_missing_records_git_source_failure_for_replay(
     assert "https://gitlab.example/group/project" in manifest["git_failures"]
 
 
+def test_capture_missing_records_git_ls_remote_subprocess_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    url = "https://github.com/group/project"
+    command = f"GIT_TERMINAL_PROMPT=0 git ls-remote {url} 2>&1 | head -5"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        "\n".join(
+            [
+                json.dumps({"input": {"command": command}}),
+                f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}",
+                "",
+            ]
+        ),
+    )
+
+    def fake_run(command_args, **kwargs):
+        assert command_args == ["git", "ls-remote", url]
+        assert kwargs["check"] is False
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.PIPE
+        assert kwargs["text"] is True
+        assert kwargs["timeout"] == 30.0
+        assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        return subprocess.CompletedProcess(
+            command_args,
+            0,
+            stdout="abc123\tHEAD\nbranch\trefs/heads/main\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            allowed_hosts=("github.com",),
+        )
+    )
+
+    assert result.failed == []
+    assert [capture.command for capture in result.captured_subprocesses] == [command]
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    replay = manifest["subprocess_replays"][command]
+    assert replay == {
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "abc123\tHEAD\nbranch\trefs/heads/main\n",
+    }
+    assert "git_failures" not in manifest
+    assert not (cases_dir / "source_cache" / "RHEL-12345").exists()
+
+
+def test_capture_missing_records_git_failure_when_clone_follows_ls_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    run_file = tmp_path / "run.log"
+    url = "https://github.com/group/project"
+    ls_remote = f"git ls-remote {url} 2>&1 | head -5"
+    clone = f"git clone --no-local {url} /tmp/project 2>&1 | tail -5"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        "\n".join(
+            [
+                json.dumps({"input": {"command": ls_remote}}),
+                json.dumps({"input": {"command": clone}}),
+                f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}",
+                "",
+            ]
+        ),
+    )
+
+    def fake_run(command_args, **kwargs):
+        if command_args[:4] == ["git", "-C", str(cases_dir), "rev-parse"]:
+            return subprocess.CompletedProcess(command_args, 0, stdout="true\n", stderr="")
+        if command_args == ["git", "ls-remote", url]:
+            return subprocess.CompletedProcess(
+                command_args,
+                128,
+                stdout="",
+                stderr="remote: Repository not found.\n",
+            )
+        assert command_args[:4] == ["git", "clone", "--mirror", "--quiet"]
+        assert command_args[4] == f"{url}.git"
+        return subprocess.CompletedProcess(
+            command_args,
+            128,
+            stdout="",
+            stderr="fatal: repository not found\n",
+        )
+
+    monkeypatch.setattr(capture_missing_module.subprocess, "run", fake_run)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            allowed_hosts=("github.com",),
+        )
+    )
+
+    assert result.failed == []
+    assert [capture.command for capture in result.captured_subprocesses] == [ls_remote]
+    assert [capture.url for capture in result.captured_git_failures] == [url]
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert ls_remote in manifest["subprocess_replays"]
+    assert url in manifest["git_failures"]
+    assert f"{url}.git" in manifest["git_failures"]
+
+
+def test_capture_missing_preserves_existing_subprocess_replay_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    command = "GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/group/project 2>&1 | head -5"
+    url = "https://github.com/example/project/commit/fix.patch"
+    _write_expected(cases_dir, "RHEL-12345")
+    web_cache = cases_dir / "web_cache" / "RHEL-12345"
+    web_cache.mkdir(parents=True)
+    (web_cache / "manifest.json").write_text(
+        json.dumps(
+            {
+                "case_id": "RHEL-12345",
+                "required_urls": [],
+                "recorded_files": {},
+                "subprocess_replays": {
+                    command: {
+                        "returncode": 0,
+                        "stdout": "abc123\tHEAD\n",
+                        "stderr": "",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_text(
+        run_file,
+        f"ToolError('Failed to fetch patch from {url}: URL is not recorded in replay cache')\n",
+    )
+
+    def fake_urlopen(_request, timeout: float):
+        assert timeout == 30.0
+        return _Response(b"diff --git a/source.c b/source.c\n", "text/x-patch")
+
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+        )
+    )
+
+    assert result.failed == []
+    manifest = json.loads((web_cache / "manifest.json").read_text(encoding="utf-8"))
+    assert list(manifest["subprocess_replays"]) == [command]
+
+
 class _Response:
     def __init__(self, body: bytes, content_type: str):
         self.status = 200
