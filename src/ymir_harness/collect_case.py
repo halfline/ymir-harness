@@ -1417,7 +1417,14 @@ def _localize_mock_repo_cache(request: CollectCaseRequest) -> CollectCaseRequest
     source = mock_repo.source_url or mock_repo.remote_url
     destination = cache_dir / _mock_repo_cache_name(mock_repo.remote_url)
     if destination.exists():
-        _run_git(["-C", str(destination), "remote", "update", "--prune"], destination)
+        _run_git(
+            _git_authenticated_command(
+                source,
+                ["-C", str(destination), "remote", "update", "--prune"],
+                request.gitlab_token_env,
+            ),
+            destination,
+        )
     else:
         _run_git(
             _git_clone_command(source, str(destination), request.gitlab_token_env), destination
