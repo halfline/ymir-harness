@@ -2768,7 +2768,13 @@ def _expected_patch_urls(
     if request.patch_urls:
         return tuple(dict.fromkeys(request.patch_urls))
 
-    historical_urls = _historical_result_patch_urls(_evidence_comments(request, fetched))
+    historical_agent = (
+        request.mock_agent if request.expected_basis == "historical_jira_state" else None
+    )
+    historical_urls = _historical_result_patch_urls(
+        _evidence_comments(request, fetched),
+        agent=historical_agent,
+    )
     if historical_urls:
         valid_evidence_urls = set(fetched.jira_patch_urls)
         if valid_evidence_urls:
@@ -2776,6 +2782,9 @@ def _expected_patch_urls(
             if filtered:
                 return tuple(filtered)
         return tuple(historical_urls)
+
+    if request.mock_agent == "triage" and fetched.jira_patch_urls:
+        return tuple(fetched.jira_patch_urls)
 
     return _effective_patch_urls(request, fetched)
 
@@ -2826,10 +2835,12 @@ def _backport_source_for_url(url: str) -> str | None:
     return None
 
 
-def _historical_result_patch_urls(comments: Any) -> list[str]:
+def _historical_result_patch_urls(comments: Any, *, agent: str | None = None) -> list[str]:
     urls: list[str] = []
     for comment in _comment_values(comments):
         if not _is_result_comment(comment):
+            continue
+        if agent is not None and agent not in _result_comment_agents(comment):
             continue
         body = comment.get("body")
         if body is None:
@@ -2837,6 +2848,25 @@ def _historical_result_patch_urls(comments: Any) -> list[str]:
         body_text = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
         urls.extend(_patch_urls_from_jira_evidence(body_text))
     return list(dict.fromkeys(urls))
+
+
+def _result_comment_agents(comment: Mapping[str, Any]) -> set[str]:
+    body = comment.get("body")
+    body_text = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
+    lowered_body = _normalized_text(body_text)
+    agents: set[str] = set()
+    for agent in ("triage", "backport", "rebase", "rebuild"):
+        if (
+            f"output from {agent} agent" in lowered_body
+            or f"output from ymir {agent} agent" in lowered_body
+        ):
+            agents.add(agent)
+    if "ymir_triaged" in lowered_body:
+        agents.add("triage")
+    for agent in ("backport", "rebase", "rebuild"):
+        if f"ymir_{agent}ed" in lowered_body:
+            agents.add(agent)
+    return agents
 
 
 def _effective_fix_sources(
