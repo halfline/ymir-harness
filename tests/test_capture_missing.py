@@ -258,6 +258,37 @@ def test_capture_missing_records_tool_http_404_url(
     assert manifest["response_metadata"][url]["status"] == 404
 
 
+def test_capture_missing_records_tool_replay_miss_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    url = "https://github.com/example/project/commit/fix.patch"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        f"ToolError('Failed to fetch patch from {url}: URL is not recorded in replay cache')\n",
+    )
+
+    def fake_urlopen(_request, timeout: float):
+        assert timeout == 30.0
+        return _Response(b"diff --git a/source.c b/source.c\n", "text/x-patch")
+
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+        )
+    )
+
+    assert result.candidate_urls == [url]
+    assert result.captured[0].url == url
+
+
 def test_capture_missing_keeps_existing_recording_on_http_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
