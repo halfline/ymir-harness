@@ -22,7 +22,11 @@ from urllib.request import Request, urlopen
 
 import yaml
 
-from ymir_harness.jira_replay import derive_as_of_from_comments, filter_comments_as_of
+from ymir_harness.jira_replay import (
+    derive_as_of_from_comments,
+    filter_comments_as_of,
+    reconstruct_issue_as_of,
+)
 from ymir_harness.koji_replay import (
     KOJI_CANDIDATE_BUILDS_MANIFEST_KEY,
     candidate_build_branches,
@@ -603,12 +607,9 @@ def _jira_urls(request: CollectCaseRequest, case_id: str) -> dict[str, str]:
     if request.jira_url and case_id == request.case_id:
         issue_url = _jira_issue_api_url(request.jira_url, case_id)
     elif request.jira_url:
-        issue_url = _join_url(_origin(request.jira_url), f"/rest/api/2/issue/{case_id}")
+        issue_url = _jira_issue_api_url(_origin(request.jira_url), case_id)
     elif request.jira_base_url:
-        issue_url = _join_url(
-            request.jira_base_url,
-            f"/rest/api/2/issue/{case_id}",
-        )
+        issue_url = _jira_issue_api_url(request.jira_base_url, case_id)
     else:
         raise CollectCaseError("jira URL configuration is missing")
 
@@ -780,10 +781,11 @@ def _jira_issue_api_url(url: str, case_id: str) -> str:
         raise CollectCaseError(f"Jira URL must be absolute: {url}")
 
     if "/rest/api/" in parsed.path and "/issue/" in parsed.path:
-        return url
+        separator = "&" if parsed.query else "?"
+        return url if "expand=" in parsed.query else f"{url}{separator}expand=changelog"
     if "/browse/" in parsed.path:
-        return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}")
-    return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}")
+        return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}?expand=changelog")
+    return _join_url(_origin(url), f"/rest/api/2/issue/{case_id}?expand=changelog")
 
 
 def _gitlab_mr_urls(url: str) -> dict[str, str]:
@@ -2171,7 +2173,8 @@ def _build_starting_jira_issue(
     case_type: str | None,
     as_of: str | None = None,
 ) -> dict[str, Any]:
-    payload = copy.deepcopy(dict(issue))
+    payload = reconstruct_issue_as_of(issue, as_of=as_of)
+    payload.pop("changelog", None)
     payload.setdefault("schema_version", SCHEMA_VERSION)
     payload.setdefault("case_id", case_id)
     if case_type is not None:
