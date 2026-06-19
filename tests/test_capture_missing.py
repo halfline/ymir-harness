@@ -513,7 +513,10 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
 
     def fake_urlopen(request, timeout: float):
         assert timeout == 30.0
-        if request.full_url == "https://redhat.atlassian.net/rest/api/2/issue/RHEL-4139":
+        if (
+            request.full_url
+            == "https://redhat.atlassian.net/rest/api/2/issue/RHEL-4139?expand=changelog"
+        ):
             assert request.get_method() == "GET"
             return _Response(
                 json.dumps(
@@ -668,6 +671,94 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
     ]
 
 
+def test_capture_missing_filters_jira_search_empty_predicates_as_of(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.log"
+    search_url = "https://redhat.atlassian.net/rest/api/3/search/jql"
+    payload = {
+        "jql": 'component = "redis" AND "Fixed in Build" is not EMPTY',
+        "fields": ["fixVersions"],
+        "maxResults": 50,
+    }
+    _write_expected(cases_dir, "RHEL-178383")
+    _write_text(run_file, jira_search_replay_miss(search_url, payload) + "\n")
+
+    def fake_urlopen(request, timeout: float):
+        assert timeout == 30.0
+        if request.full_url == (
+            "https://redhat.atlassian.net/rest/api/2/issue/RHEL-178386?expand=changelog"
+        ):
+            return _Response(
+                json.dumps(
+                    {
+                        "id": "10001",
+                        "key": "RHEL-178386",
+                        "fields": {
+                            "created": "2026-05-21T13:48:33.995+0000",
+                            "customfield_10578": "redis-6.2.7-1.el9_6.4",
+                            "status": {"name": "Integration"},
+                        },
+                        "changelog": {
+                            "histories": [
+                                {
+                                    "created": "2026-06-18T15:31:36.246+0000",
+                                    "items": [
+                                        {
+                                            "field": "Fixed in Build",
+                                            "fieldId": "customfield_10578",
+                                            "fromString": None,
+                                            "toString": "redis-6.2.7-1.el9_6.4",
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                ).encode("utf-8"),
+                "application/json",
+            )
+        if request.full_url == search_url:
+            assert request.get_method() == "POST"
+            assert json.loads(request.data.decode("utf-8")) == payload
+            return _Response(
+                json.dumps(
+                    {
+                        "issues": [
+                            {
+                                "key": "RHEL-178386",
+                                "id": "10001",
+                                "fields": {"fixVersions": [{"name": "rhel-9.6.z"}]},
+                            }
+                        ]
+                    }
+                ).encode("utf-8"),
+                "application/json",
+            )
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-178383",
+            as_of="2026-05-31T07:18:08.888999Z",
+        )
+    )
+
+    assert result.failed == []
+    assert [capture.kind for capture in result.captured_jira] == ["jira_search"]
+    fixture = json.loads(
+        jira_search_fixture_path(cases_dir, "RHEL-178383", payload).read_text(encoding="utf-8")
+    )
+    assert fixture["response"]["issues"] == []
+    assert not (cases_dir / "jiras" / "RHEL-178383" / "linked" / "RHEL-178386").exists()
+
+
 def test_capture_missing_records_jira_issue_miss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -680,11 +771,28 @@ def test_capture_missing_records_jira_issue_miss(
 
     def fake_urlopen(request, timeout: float):
         assert timeout == 30.0
-        if request.full_url == "https://redhat.atlassian.net/rest/api/2/issue/RHEL-23456":
+        if (
+            request.full_url
+            == "https://redhat.atlassian.net/rest/api/2/issue/RHEL-23456?expand=changelog"
+        ):
             return _Response(
                 json.dumps(
                     {
                         "key": "RHEL-23456",
+                        "changelog": {
+                            "histories": [
+                                {
+                                    "created": "2025-09-20T00:00:00.000+0000",
+                                    "items": [
+                                        {
+                                            "field": "status",
+                                            "fromString": "New",
+                                            "toString": "Closed",
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
                         "fields": {
                             "summary": "Linked issue",
                             "status": {"name": "Closed"},
