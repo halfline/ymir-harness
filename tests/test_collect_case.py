@@ -1964,6 +1964,58 @@ def test_collect_case_caches_mock_repo_source(tmp_path: Path) -> None:
     assert not report.has_blocking_errors
 
 
+def test_localize_mock_repo_cache_authenticates_existing_gitlab_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_dir = tmp_path / "repo-cache"
+    destination = cache_dir / collect_case_module._mock_repo_cache_name(  # noqa: SLF001
+        "https://gitlab.com/redhat/rhel/rpms/redis.git"
+    )
+    destination.mkdir(parents=True)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: "token")
+
+    def fake_run_git(command, cwd):
+        commands.append(list(command))
+
+    monkeypatch.setattr(collect_case_module, "_run_git", fake_run_git)
+
+    request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-178383",
+        mock_repo=MockRepoInput(
+            remote_url="https://gitlab.com/redhat/rhel/rpms/redis.git",
+            pre_fix_ref="abc123",
+            branch="rhel-9.4.0",
+        ),
+        mock_repo_cache=cache_dir,
+    )
+
+    localized = collect_case_module._localize_mock_repo_cache(request)  # noqa: SLF001
+
+    authorization = base64.b64encode(b"oauth2:token").decode("ascii")
+    assert commands[0] == [
+        "-c",
+        f"http.https://gitlab.com/.extraHeader=Authorization: Basic {authorization}",
+        "-C",
+        str(destination),
+        "remote",
+        "update",
+        "--prune",
+    ]
+    assert commands[1] == [
+        "-C",
+        str(destination),
+        "cat-file",
+        "-e",
+        "abc123^{commit}",
+    ]
+    assert localized.mock_repo is not None
+    assert localized.mock_repo.source_url == str(destination)
+
+
 def test_collect_case_caches_lookaside_sources_from_prefixed_mock_repo(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
