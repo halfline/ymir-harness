@@ -399,6 +399,8 @@ def _check_command(
         raise BenchmarkBoundaryViolation(f"unsafe operation blocked: {operation.detail}")
 
     if network_mode in {"replay_only", "network_denied"}:
+        if network_mode == "replay_only" and _can_replay_subprocess(command, replay_cache):
+            return
         external_urls = _external_urls(tokens)
         replayable_download = (
             network_mode == "replay_only"
@@ -439,6 +441,9 @@ def _subprocess_replay(
     network_mode: str | None,
     mock_git_urls: Sequence[str],
 ) -> _SubprocessReplay | None:
+    cached_subprocess = _cached_subprocess(command, replay_cache)
+    if cached_subprocess is not None:
+        return cached_subprocess
     cached = _cached_shell_download(command, replay_cache)
     if cached is not None:
         return cached
@@ -449,6 +454,22 @@ def _subprocess_replay(
         command,
         network_mode=network_mode,
         mock_git_urls=mock_git_urls,
+    )
+
+
+def _cached_subprocess(
+    command: Any,
+    replay_cache: ReplayCache | None,
+) -> _SubprocessReplay | None:
+    if replay_cache is None:
+        return None
+    replay = replay_cache.subprocess_replay_for_command(command)
+    if replay is None:
+        return None
+    return _SubprocessReplay(
+        returncode=replay.returncode,
+        stdout_body=replay.stdout,
+        stderr_body=replay.stderr,
     )
 
 
@@ -586,6 +607,13 @@ def _can_replay_git_failure(
     if replay_cache is None:
         return False
     return replay_cache.git_failure_for_urls(list(urls)) is not None
+
+
+def _can_replay_subprocess(
+    command: Any,
+    replay_cache: ReplayCache | None,
+) -> bool:
+    return replay_cache is not None and replay_cache.subprocess_replay_for_command(command) is not None
 
 
 def _patch_socket(originals: _PatchState) -> None:
