@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,13 @@ RESULT_COMMENT_MARKERS = (
     "ymir_backported",
     "ymir_rebased",
     "ymir_rebuilt",
+)
+JIRA_FIELD_ALIASES = {
+    "fixed in build": ("customfield_10578",),
+}
+EMPTY_JQL_PATTERN = re.compile(
+    r"(?i)(?:\"(?P<quoted>[^\"]+)\"|(?P<bare>[A-Za-z][A-Za-z0-9_ ]+))\s+is\s+"
+    r"(?P<not>not\s+)?empty\b"
 )
 
 
@@ -112,6 +120,75 @@ def write_jira_search_fixture(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(fixture, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def reconstruct_issue_as_of(issue: Mapping[str, Any], *, as_of: str | None) -> dict[str, Any]:
+    payload = copy.deepcopy(dict(issue))
+    if as_of is None:
+        return payload
+
+    as_of_timestamp = _parse_jira_timestamp(as_of)
+    if as_of_timestamp is None:
+        return payload
+
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        fields = {}
+    fields = copy.deepcopy(dict(fields))
+    payload["fields"] = fields
+
+    changelog = payload.get("changelog")
+    histories = changelog.get("histories") if isinstance(changelog, Mapping) else None
+    if not isinstance(histories, list):
+        return payload
+
+    future_histories = []
+    for history in histories:
+        if not isinstance(history, Mapping):
+            continue
+        created_at = _parse_jira_timestamp(history.get("created"))
+        if created_at is not None and created_at > as_of_timestamp:
+            future_histories.append((created_at, history))
+
+    for _, history in sorted(future_histories, key=lambda item: item[0], reverse=True):
+        items = history.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, Mapping):
+                _rewind_field_from_changelog_item(fields, item)
+
+    updated_at = _parse_jira_timestamp(fields.get("updated"))
+    if updated_at is not None and updated_at > as_of_timestamp:
+        fields["updated"] = as_of
+    resolution_date = _parse_jira_timestamp(fields.get("resolutiondate"))
+    if resolution_date is not None and resolution_date > as_of_timestamp:
+        fields["resolutiondate"] = None
+    return payload
+
+
+def filter_issue_for_search_as_of(
+    issue: Mapping[str, Any],
+    *,
+    as_of: str | None,
+    jql: str,
+    detail: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    detail_source = detail if isinstance(detail, Mapping) else issue
+    reconstructed_detail = reconstruct_issue_as_of(detail_source, as_of=as_of)
+    if not _matches_empty_jql_predicates(reconstructed_detail, jql):
+        return None
+
+    projected = copy.deepcopy(dict(issue))
+    issue_fields = projected.get("fields")
+    detail_fields = reconstructed_detail.get("fields")
+    if isinstance(issue_fields, Mapping) and isinstance(detail_fields, Mapping):
+        projected_fields = copy.deepcopy(dict(issue_fields))
+        for field_name in list(projected_fields):
+            if field_name in detail_fields:
+                projected_fields[field_name] = copy.deepcopy(detail_fields[field_name])
+        projected["fields"] = projected_fields
+    return projected
 
 
 def jira_dev_status_path(cases_dir: Path, case_id: str, issue_key: str) -> Path:
@@ -233,6 +310,7 @@ def filter_search_response_as_of(
     *,
     as_of: str | None,
     issue_details: Mapping[str, Mapping[str, Any]] | None = None,
+    jql: str | None = None,
 ) -> dict[str, Any]:
     if as_of is None:
         return copy.deepcopy(dict(response))
@@ -256,7 +334,14 @@ def filter_search_response_as_of(
         created_at = _parse_jira_timestamp(created)
         if created_at is not None and created_at > as_of_timestamp:
             continue
-        kept.append(issue)
+        filtered_issue = filter_issue_for_search_as_of(
+            issue,
+            as_of=as_of,
+            jql=jql or "",
+            detail=detail,
+        )
+        if filtered_issue is not None:
+            kept.append(filtered_issue)
     filtered["issues"] = kept
     return filtered
 
@@ -314,6 +399,118 @@ def _issue_field(issue: Mapping[str, Any], name: str) -> Any:
     fields = issue.get("fields")
     if isinstance(fields, Mapping):
         return fields.get(name)
+    return None
+
+
+def _rewind_field_from_changelog_item(fields: dict[str, Any], item: Mapping[str, Any]) -> None:
+    field_id = _string_or_none(item.get("fieldId"))
+    field_name = _string_or_none(item.get("field"))
+    normalized = _normalize_field_name(field_name)
+    target = field_id or _default_field_id(normalized)
+    if target is None:
+        return
+
+    from_string = _string_or_none(item.get("fromString"))
+    if target == "status" or normalized == "status":
+        fields["status"] = {"name": from_string} if from_string else None
+        return
+    if target == "resolution" or normalized == "resolution":
+        fields["resolution"] = {"name": from_string} if from_string else None
+        return
+    if target == "labels" or normalized == "labels":
+        fields["labels"] = _parse_labels(from_string)
+        return
+    if target == "fixVersions" or normalized in {"fix version", "fix versions", "fix version/s"}:
+        fields["fixVersions"] = _parse_versions(from_string)
+        return
+    if target.startswith("customfield_"):
+        fields[target] = from_string
+
+
+def _matches_empty_jql_predicates(issue: Mapping[str, Any], jql: str) -> bool:
+    if not jql:
+        return True
+    fields = issue.get("fields")
+    if not isinstance(fields, Mapping):
+        fields = {}
+    for match in EMPTY_JQL_PATTERN.finditer(jql):
+        field_name = match.group("quoted") or match.group("bare") or ""
+        field_id = _field_id_for_display_name(issue, field_name)
+        if field_id is None:
+            continue
+        is_empty = _empty_jira_value(fields.get(field_id))
+        expects_not_empty = bool(match.group("not"))
+        if expects_not_empty == is_empty:
+            return False
+    return True
+
+
+def _field_id_for_display_name(issue: Mapping[str, Any], field_name: str) -> str | None:
+    normalized = _normalize_field_name(field_name)
+    default = _default_field_id(normalized)
+    if default is not None:
+        return default
+    changelog = issue.get("changelog")
+    histories = changelog.get("histories") if isinstance(changelog, Mapping) else None
+    if not isinstance(histories, list):
+        return None
+    for history in histories:
+        if not isinstance(history, Mapping):
+            continue
+        items = history.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if _normalize_field_name(_string_or_none(item.get("field"))) == normalized:
+                return _string_or_none(item.get("fieldId"))
+    return None
+
+
+def _default_field_id(normalized_field_name: str | None) -> str | None:
+    if not normalized_field_name:
+        return None
+    if normalized_field_name in {"status", "resolution", "labels"}:
+        return normalized_field_name
+    if normalized_field_name in {"fix version", "fix versions", "fix version/s"}:
+        return "fixVersions"
+    aliases = JIRA_FIELD_ALIASES.get(normalized_field_name)
+    return aliases[0] if aliases else None
+
+
+def _empty_jira_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, set, dict)):
+        return not value
+    return False
+
+
+def _parse_labels(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [label for label in value.split() if label]
+
+
+def _parse_versions(value: str | None) -> list[dict[str, str]]:
+    if not value:
+        return []
+    names = [name.strip() for name in re.split(r"[,;]", value) if name.strip()]
+    return [{"name": name} for name in names]
+
+
+def _normalize_field_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return re.sub(r"\s+", " ", value.strip().casefold())
+
+
+def _string_or_none(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
     return None
 
 
