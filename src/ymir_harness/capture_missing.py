@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -26,7 +27,7 @@ from ymir_harness.jira_replay import (
     write_jira_search_fixture,
 )
 from ymir_harness.models import SCHEMA_VERSION
-from ymir_harness.replay import canonicalize_replay_url
+from ymir_harness.replay import canonicalize_replay_url, subprocess_command_key
 from ymir_harness.scoring import load_json_file
 from ymir_harness.source_fixtures import (
     is_git_worktree,
@@ -168,6 +169,18 @@ class CapturedGitFailure:
 
 
 @dataclass(frozen=True)
+class CapturedSubprocess:
+    command: str
+    returncode: int
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "command": self.command,
+            "returncode": self.returncode,
+        }
+
+
+@dataclass(frozen=True)
 class CaptureFailure:
     url: str
     reason: str
@@ -187,6 +200,7 @@ class CaptureMissingResult:
     captured_jira: list[CapturedJiraRequest] = field(default_factory=list)
     captured_source: list[CapturedSource] = field(default_factory=list)
     captured_git_failures: list[CapturedGitFailure] = field(default_factory=list)
+    captured_subprocesses: list[CapturedSubprocess] = field(default_factory=list)
     skipped: list[CaptureFailure] = field(default_factory=list)
     failed: list[CaptureFailure] = field(default_factory=list)
 
@@ -201,6 +215,9 @@ class CaptureMissingResult:
             "captured_jira": [capture.to_json() for capture in self.captured_jira],
             "captured_source": [capture.to_json() for capture in self.captured_source],
             "captured_git_failures": [capture.to_json() for capture in self.captured_git_failures],
+            "captured_subprocesses": [
+                capture.to_json() for capture in self.captured_subprocesses
+            ],
             "skipped": [skip.to_json() for skip in self.skipped],
             "failed": [failure.to_json() for failure in self.failed],
         }
@@ -212,6 +229,13 @@ class _FetchedResponse:
     status: int
     headers: Mapping[str, str]
     capture_error: str | None = None
+
+
+@dataclass(frozen=True)
+class _CapturedCommand:
+    returncode: int
+    stdout: str
+    stderr: str
 
 
 def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
@@ -235,6 +259,43 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
     recorded_files = _manifest_mapping(manifest.get("recorded_files"))
     response_metadata = _manifest_mapping(manifest.get("response_metadata"))
     git_failures = _manifest_mapping(manifest.get("git_failures"))
+    subprocess_replays = _manifest_raw_mapping(manifest.get("subprocess_replays"))
+    git_discovery_commands = _git_discovery_commands_from_run_path(run_path, urls)
+    git_command_urls = _git_command_urls(git_discovery_commands)
+    non_discovery_git_command_urls = _non_discovery_git_command_urls_from_run_path(run_path, urls)
+
+    for command in git_discovery_commands:
+        command_key = subprocess_command_key(command)
+        command_urls = _command_urls(command)
+        if command_key in subprocess_replays and not request.overwrite:
+            for url in command_urls:
+                result.skipped.append(
+                    CaptureFailure(url=url, reason="subprocess command is already recorded")
+                )
+            continue
+        denied_url = next(
+            (url for url in command_urls if not _allowed_url(url, request.allowed_hosts)),
+            None,
+        )
+        if denied_url is not None:
+            result.skipped.append(CaptureFailure(url=denied_url, reason="host is not allowed"))
+            continue
+        if request.dry_run:
+            continue
+        try:
+            captured = _capture_git_discovery_command(command, request)
+        except CaptureMissingError as exc:
+            for url in command_urls:
+                result.failed.append(CaptureFailure(url=url, reason=str(exc)))
+            continue
+        subprocess_replays[command_key] = {
+            "returncode": captured.returncode,
+            "stdout": captured.stdout,
+            "stderr": captured.stderr,
+        }
+        result.captured_subprocesses.append(
+            CapturedSubprocess(command=command, returncode=captured.returncode)
+        )
 
     for url in urls:
         reasons = url_reasons.get(url, ())
@@ -242,6 +303,15 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
         should_capture_source = project_url is not None and (
             "external subprocess URL blocked" in reasons or "replay miss" in reasons
         )
+        if (
+            should_capture_source
+            and url in git_command_urls
+            and url not in non_discovery_git_command_urls
+        ):
+            result.skipped.append(
+                CaptureFailure(url=url, reason="subprocess command is recorded")
+            )
+            continue
         if should_capture_source and project_url is not None:
             if not _allowed_url(project_url, request.allowed_hosts):
                 result.skipped.append(CaptureFailure(url=url, reason="host is not allowed"))
@@ -424,7 +494,10 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
         )
 
     manifest_changed = bool(
-        result.captured or result.captured_source or result.captured_git_failures
+        result.captured
+        or result.captured_source
+        or result.captured_git_failures
+        or result.captured_subprocesses
     )
     if not request.dry_run and manifest_changed:
         manifest["required_urls"] = required_urls
@@ -434,6 +507,10 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             manifest["git_failures"] = git_failures
         else:
             manifest.pop("git_failures", None)
+        if subprocess_replays:
+            manifest["subprocess_replays"] = subprocess_replays
+        else:
+            manifest.pop("subprocess_replays", None)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -461,6 +538,285 @@ def _blocked_jira_requests_from_run_path(run_path: Path) -> list[JiraReplayMiss]
             for miss in jira_requests_from_run_path(run_path)
         }.values()
     )
+
+
+def _git_discovery_commands_from_run_path(
+    run_path: Path,
+    urls: Sequence[str],
+) -> list[str]:
+    if run_path.is_file():
+        paths = [run_path]
+    elif run_path.is_dir():
+        paths = sorted(path for path in run_path.rglob("*") if _looks_like_text_artifact(path))
+    else:
+        raise CaptureMissingError(f"run path does not exist: {run_path}")
+
+    target_urls = set(urls)
+    commands: list[str] = []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for command in _json_command_strings(text):
+            command_urls = set(_command_urls(command))
+            if not command_urls or not command_urls & target_urls:
+                continue
+            if not _git_ls_remote_invocations(command):
+                continue
+            commands.append(command)
+    return list(dict.fromkeys(commands))
+
+
+def _non_discovery_git_command_urls_from_run_path(
+    run_path: Path,
+    urls: Sequence[str],
+) -> set[str]:
+    if run_path.is_file():
+        paths = [run_path]
+    elif run_path.is_dir():
+        paths = sorted(path for path in run_path.rglob("*") if _looks_like_text_artifact(path))
+    else:
+        raise CaptureMissingError(f"run path does not exist: {run_path}")
+
+    target_urls = set(urls)
+    output: set[str] = set()
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for command in _json_command_strings(text):
+            command_urls = set(_command_urls(command))
+            matched_urls = command_urls & target_urls
+            if not matched_urls:
+                continue
+            if _is_non_discovery_git_subprocess_command(command):
+                output.update(matched_urls)
+    return output
+
+
+def _json_command_strings(text: str) -> list[str]:
+    commands: list[str] = []
+    for match in re.finditer(r'"command"\s*:\s*"((?:\\.|[^"\\])*)"', text):
+        try:
+            command = json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            continue
+        if isinstance(command, str) and command.strip():
+            commands.append(command)
+    return commands
+
+
+def _git_command_urls(commands: Sequence[str]) -> set[str]:
+    return {url for command in commands for url in _command_urls(command)}
+
+
+def _command_urls(command: str) -> tuple[str, ...]:
+    urls = []
+    for match in re.finditer(r"https?://[^\s\"'<>]+", command):
+        url = _clean_url(match.group(0))
+        if url:
+            urls.append(url)
+    return tuple(dict.fromkeys(urls))
+
+
+def _capture_git_discovery_command(
+    command: str,
+    request: CaptureMissingRequest,
+) -> _CapturedCommand:
+    invocations = _git_ls_remote_invocations(command)
+    if not invocations:
+        raise CaptureMissingError("unsupported git discovery command")
+    completions = (
+        _run_git_ls_remote(url, line_limit, request) for url, line_limit in invocations
+    )
+    completed = tuple(completions)
+    if not completed:
+        raise CaptureMissingError("unsupported git discovery command")
+    return _CapturedCommand(
+        returncode=completed[-1].returncode,
+        stdout="".join(item.stdout for item in completed),
+        stderr="".join(item.stderr for item in completed),
+    )
+
+
+def _run_git_ls_remote(
+    url: str,
+    line_limit: int | None,
+    request: CaptureMissingRequest,
+) -> _CapturedCommand:
+    completed = subprocess.run(
+        ["git", "ls-remote", url],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=request.http_timeout,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    return _CapturedCommand(
+        returncode=completed.returncode,
+        stdout=_limit_lines(completed.stdout, line_limit),
+        stderr=_limit_lines(completed.stderr, line_limit),
+    )
+
+
+def _git_ls_remote_invocations(command: str) -> tuple[tuple[str, int | None], ...]:
+    invocations: list[tuple[str, int | None]] = []
+    for chunk in _shell_command_chunks(command):
+        url = _git_ls_remote_url(chunk)
+        if url is not None:
+            invocations.append((url, _head_line_limit(chunk)))
+    return tuple(invocations)
+
+
+def _is_non_discovery_git_subprocess_command(command: str) -> bool:
+    for chunk in _shell_command_chunks(command):
+        if _git_ls_remote_url(chunk) is not None:
+            continue
+        tokens = _command_tokens(chunk)
+        for segment in _shell_command_segments(tokens):
+            command_tokens = _tokens_after_env(segment)
+            if command_tokens and Path(command_tokens[0]).name == "git":
+                return True
+    return False
+
+
+def _git_ls_remote_url(command: str) -> str | None:
+    tokens = _command_tokens(command)
+    for segment in _shell_command_segments(tokens):
+        command_tokens = _tokens_after_env(segment)
+        if not command_tokens or Path(command_tokens[0]).name != "git":
+            continue
+        subcommand_index = _git_subcommand_index(command_tokens)
+        if subcommand_index is None or command_tokens[subcommand_index] != "ls-remote":
+            continue
+        return _git_ls_remote_remote_arg(command_tokens[subcommand_index + 1 :])
+    return None
+
+
+def _git_subcommand_index(tokens: Sequence[str]) -> int | None:
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}:
+            index += 2
+            continue
+        if any(
+            token.startswith(f"{option}=")
+            for option in {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+        ):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _git_ls_remote_remote_arg(tokens: Sequence[str]) -> str | None:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"|", "&&", "||", ";"}:
+            return None
+        if token == "--":
+            index += 1
+            continue
+        if token in {"--upload-pack", "--server-option", "-o"}:
+            index += 2
+            continue
+        if token.startswith(("--upload-pack=", "--server-option=")):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        url = _clean_url(token)
+        parsed = urlparse(url)
+        if parsed.scheme in {"http", "https"} and parsed.hostname:
+            return url
+        return None
+    return None
+
+
+def _strip_shell_comment_lines(command: str) -> str:
+    return "\n".join(line for line in command.splitlines() if not line.lstrip().startswith("#"))
+
+
+def _shell_command_chunks(command: str) -> tuple[str, ...]:
+    return tuple(
+        chunk.strip()
+        for chunk in re.split(r"[;\n]+", _strip_shell_comment_lines(command))
+        if chunk.strip()
+    )
+
+
+def _command_tokens(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _shell_command_segments(tokens: Sequence[str]) -> list[list[str]]:
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in {"&&", "||", ";", "|"}:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _tokens_after_env(tokens: Sequence[str]) -> list[str]:
+    output = list(tokens)
+    if output and Path(output[0]).name == "env":
+        output = output[1:]
+        while output and output[0].startswith("-"):
+            option = output.pop(0)
+            if option in {"-i", "--ignore-environment", "-0", "--null"}:
+                continue
+            if option in {"-u", "--unset"} and output:
+                output.pop(0)
+                continue
+            if option.startswith(("-u=", "--unset=")):
+                continue
+            break
+    while output and _is_env_assignment(output[0]):
+        output.pop(0)
+    return output
+
+
+def _is_env_assignment(token: str) -> bool:
+    name, separator, _value = token.partition("=")
+    if not separator or not name:
+        return False
+    return all(char == "_" or char.isalnum() for char in name)
+
+
+def _head_line_limit(command: str) -> int | None:
+    match = re.search(r"(?:^|\|)\s*head(?:\s+-n)?\s+-(\d+)\b", command)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"(?:^|\|)\s*head\s+(\d+)\b", command)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _limit_lines(value: str, limit: int | None) -> str:
+    if limit is None:
+        return value
+    lines = value.splitlines(keepends=True)
+    return "".join(lines[:limit])
 
 
 def jira_requests_from_run_path(run_path: Path) -> list[JiraReplayMiss]:
@@ -546,6 +902,12 @@ def _manifest_mapping(value: Any) -> dict[str, Any]:
         for key, item in value.items()
         if isinstance(key, str) and (canonical := _clean_url(key))
     }
+
+
+def _manifest_raw_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {key: item for key, item in value.items() if isinstance(key, str) and key}
 
 
 def _allowed_url(url: str, allowed_hosts: Sequence[str]) -> bool:

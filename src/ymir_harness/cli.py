@@ -712,7 +712,8 @@ def _cmd_capture_missing(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(
             f"captured {len(result.captured)} missing URL(s), "
-            f"{len(result.captured_git_failures)} git failure(s); "
+            f"{len(result.captured_git_failures)} git failure(s), "
+            f"{len(result.captured_subprocesses)} subprocess replay(s); "
             f"skipped {len(result.skipped)}; failed {len(result.failed)}\n"
         )
     return 1 if result.failed else 0
@@ -750,6 +751,7 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
                     f"{len(capture['captured'])} URL(s), "
                     f"{len(capture['captured_jira'])} Jira request(s), "
                     f"{len(capture['captured_git_failures'])} git failure(s), "
+                    f"{len(capture.get('captured_subprocesses', []))} subprocess replay(s), "
                     f"{len(capture['failed'])} failure(s)\n"
                 )
             if auto_allowed_hosts := iteration.get("auto_allowed_hosts"):
@@ -828,6 +830,7 @@ def _prepare_case(
             + len(capture_result.captured_jira)
             + len(capture_result.captured_source)
             + len(capture_result.captured_git_failures)
+            + len(capture_result.captured_subprocesses)
         )
         if captured_count == 0:
             if _prepare_has_only_recorded_replay_candidates(capture_result):
@@ -853,6 +856,8 @@ def _prepare_has_only_recorded_replay_candidates(capture_result: CaptureMissingR
         return False
     recorded_reasons = {
         "source repo is already recorded",
+        "subprocess command is already recorded",
+        "subprocess command is recorded",
         "URL is already recorded",
         "URL is already recorded with successful content",
     }
@@ -1045,6 +1050,7 @@ def _merge_capture_results(
     base.captured_jira.extend(update.captured_jira)
     base.captured_source.extend(update.captured_source)
     base.captured_git_failures.extend(update.captured_git_failures)
+    base.captured_subprocesses.extend(update.captured_subprocesses)
     base.skipped.extend(update.skipped)
     base.failed.extend(update.failed)
 
