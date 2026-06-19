@@ -375,11 +375,19 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
         except (OSError, CaptureMissingError) as exc:
             result.failed.append(CaptureFailure(url=miss.url, reason=str(exc)))
             continue
-        issue_details = _fetch_search_issue_details(miss.url, response, request, result)
+        issue_details = _fetch_search_issue_details(
+            miss.url,
+            response,
+            request,
+            result,
+            as_of=as_of,
+            jql=str(miss.payload.get("jql") or ""),
+        )
         filtered_response = filter_search_response_as_of(
             response,
             as_of=as_of,
             issue_details=issue_details,
+            jql=str(miss.payload.get("jql") or ""),
         )
         _capture_related_jira_from_search(
             miss.url,
@@ -614,19 +622,29 @@ def _fetch_search_issue_details(
     response: Mapping[str, Any],
     request: CaptureMissingRequest,
     result: CaptureMissingResult,
+    *,
+    as_of: str | None,
+    jql: str,
 ) -> dict[str, Mapping[str, Any]]:
     details = {}
     issues = response.get("issues")
     if not isinstance(issues, list):
         return details
+    needs_temporal_fields = as_of is not None and _jql_has_empty_predicates(jql)
 
     for issue in issues:
-        if not isinstance(issue, Mapping) or _has_field(issue, "created"):
+        if not isinstance(issue, Mapping):
             continue
         key = issue.get("key")
         if not isinstance(key, str) or not key:
             continue
-        url = _jira_issue_detail_url(search_url, key)
+        if not needs_temporal_fields and _has_field(issue, "created"):
+            continue
+        url = (
+            _jira_issue_with_changelog_url(search_url, key)
+            if needs_temporal_fields
+            else _jira_issue_detail_url(search_url, key)
+        )
         try:
             fetched = _fetch_url(url, request)
             detail = _json_object_from_body(fetched.body, url)
@@ -681,10 +699,14 @@ def _capture_jira_issue_fixture(
         return None
 
     issue_url = _jira_issue_url(source_url, issue_key)
+    issue_fetch_url = _jira_issue_with_changelog_url(source_url, issue_key)
     try:
-        issue_payload = _json_object_from_body(_fetch_url(issue_url, request).body, issue_url)
+        issue_payload = _json_object_from_body(
+            _fetch_url(issue_fetch_url, request).body,
+            issue_fetch_url,
+        )
     except (OSError, CaptureMissingError) as exc:
-        result.failed.append(CaptureFailure(url=issue_url, reason=str(exc)))
+        result.failed.append(CaptureFailure(url=issue_fetch_url, reason=str(exc)))
         return None
 
     comments_url = f"{issue_url}/comment"
@@ -845,10 +867,18 @@ def _has_field(issue: Mapping[str, Any], field: str) -> bool:
     return isinstance(fields, Mapping) and fields.get(field) is not None
 
 
+def _jql_has_empty_predicates(jql: str) -> bool:
+    return bool(re.search(r"(?i)\bis\s+(?:not\s+)?empty\b", jql))
+
+
 def _jira_issue_url(search_url: str, issue_key: str) -> str:
     parsed = urlparse(search_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     return f"{origin}/rest/api/2/issue/{quote(issue_key)}"
+
+
+def _jira_issue_with_changelog_url(search_url: str, issue_key: str) -> str:
+    return f"{_jira_issue_url(search_url, issue_key)}?expand=changelog"
 
 
 def _jira_issue_detail_url(search_url: str, issue_key: str) -> str:
