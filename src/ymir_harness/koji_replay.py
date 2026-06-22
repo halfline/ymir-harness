@@ -4,6 +4,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,12 @@ def higher_stream_branch(dist_git_branch: str) -> str | None:
     return match.group("prefix") + str(min(y + 1, 10)) + suffix
 
 
-def fetch_candidate_build(package: str, dist_git_branch: str) -> dict[str, Any]:
+def fetch_candidate_build(
+    package: str,
+    dist_git_branch: str,
+    *,
+    as_of: str | None = None,
+) -> dict[str, Any]:
     try:
         import koji  # type: ignore[import-not-found]
         from specfile.utils import EVR
@@ -50,16 +56,33 @@ def fetch_candidate_build(package: str, dist_git_branch: str) -> dict[str, Any]:
     ]
     session = koji.ClientSession(BREWHUB_URL)
     ssl_verify = True
+    event = None
+    if as_of is not None:
+        before = _parse_timestamp(as_of)
+        if before is not None:
+            try:
+                event = session.getLastEvent(before=before.timestamp(), strict=True)
+            except Exception as exc:
+                if not _is_ssl_verification_error(exc):
+                    raise
+                session = koji.ClientSession(BREWHUB_URL, opts={"no_ssl_verify": True})
+                ssl_verify = False
+                event = session.getLastEvent(before=before.timestamp(), strict=True)
+
     latest: tuple[Any, Mapping[str, Any], str] | None = None
     for tag in candidate_tags:
         try:
-            builds = _list_tagged(session, package=package, tag=tag)
+            builds = _list_tagged(session, package=package, tag=tag, event=event)
         except Exception as exc:
             if not _is_ssl_verification_error(exc):
                 raise
             session = koji.ClientSession(BREWHUB_URL, opts={"no_ssl_verify": True})
             ssl_verify = False
-            builds = _list_tagged(session, package=package, tag=tag)
+            if as_of is not None and event is None:
+                before = _parse_timestamp(as_of)
+                if before is not None:
+                    event = session.getLastEvent(before=before.timestamp(), strict=True)
+            builds = _list_tagged(session, package=package, tag=tag, event=event)
         if not builds:
             continue
         build = builds[0]
@@ -86,13 +109,22 @@ def fetch_candidate_build(package: str, dist_git_branch: str) -> dict[str, Any]:
         "metadata": dict(metadata),
         "evr": _evr_to_json(evr),
         "source_ref": source_ref,
+        **({"replay_as_of": as_of, "koji_event": dict(event)} if event is not None else {}),
     }
 
 
-def _list_tagged(session: Any, *, package: str, tag: str) -> list[Mapping[str, Any]]:
+def _list_tagged(
+    session: Any,
+    *,
+    package: str,
+    tag: str,
+    event: Mapping[str, Any] | None = None,
+) -> list[Mapping[str, Any]]:
+    event_id = event.get("id") if isinstance(event, Mapping) else None
     return session.listTagged(
         package=package,
         tag=tag,
+        event=event_id,
         latest=True,
         inherit=True,
         strict=False,
@@ -200,3 +232,20 @@ def _evr_from_payload(evr_type: Any, payload: Mapping[str, Any]) -> Any:
         version=str(payload["version"]),
         release=str(payload["release"]),
     )
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = value
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    if len(candidate) >= 5 and candidate[-5] in {"+", "-"} and candidate[-3] != ":":
+        candidate = f"{candidate[:-2]}:{candidate[-2:]}"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
