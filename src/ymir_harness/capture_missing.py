@@ -30,6 +30,8 @@ from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.replay import canonicalize_replay_url, subprocess_command_key
 from ymir_harness.scoring import load_json_file
 from ymir_harness.source_fixtures import (
+    git_refs,
+    git_symbolic_ref,
     is_git_worktree,
     source_fixture_name,
     write_source_fixture_from_repository,
@@ -284,7 +286,7 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
         if request.dry_run:
             continue
         try:
-            captured = _capture_git_discovery_command(command, request)
+            captured = _capture_git_discovery_command(command, request, as_of=as_of)
         except CaptureMissingError as exc:
             for url in command_urls:
                 result.failed.append(CaptureFailure(url=url, reason=str(exc)))
@@ -624,12 +626,15 @@ def _command_urls(command: str) -> tuple[str, ...]:
 def _capture_git_discovery_command(
     command: str,
     request: CaptureMissingRequest,
+    *,
+    as_of: str | None,
 ) -> _CapturedCommand:
     invocations = _git_ls_remote_invocations(command)
     if not invocations:
         raise CaptureMissingError("unsupported git discovery command")
     completions = (
-        _run_git_ls_remote(url, line_limit, request) for url, line_limit in invocations
+        _run_git_ls_remote(url, line_limit, request, as_of=as_of)
+        for url, line_limit in invocations
     )
     completed = tuple(completions)
     if not completed:
@@ -645,7 +650,12 @@ def _run_git_ls_remote(
     url: str,
     line_limit: int | None,
     request: CaptureMissingRequest,
+    *,
+    as_of: str | None,
 ) -> _CapturedCommand:
+    if as_of is not None:
+        return _run_git_ls_remote_as_of(url, line_limit, request, as_of)
+
     completed = subprocess.run(
         ["git", "ls-remote", url],
         check=False,
@@ -659,6 +669,29 @@ def _run_git_ls_remote(
         returncode=completed.returncode,
         stdout=_limit_lines(completed.stdout, line_limit),
         stderr=_limit_lines(completed.stderr, line_limit),
+    )
+
+
+def _run_git_ls_remote_as_of(
+    url: str,
+    line_limit: int | None,
+    request: CaptureMissingRequest,
+    as_of: str,
+) -> _CapturedCommand:
+    with tempfile.TemporaryDirectory(prefix="ymir-harness-ls-remote-") as tmp:
+        mirror = Path(tmp) / _git_source_cache_name(url)
+        _run_git(["clone", "--mirror", "--quiet", url, str(mirror)], Path(tmp))
+        refs = git_refs(mirror, as_of=as_of)
+        refs_by_name = dict(refs)
+        lines = []
+        head_ref = git_symbolic_ref(mirror, "HEAD")
+        if head_ref is not None and head_ref in refs_by_name:
+            lines.append(f"{refs_by_name[head_ref]}\tHEAD\n")
+        lines.extend(f"{object_name}\t{ref_name}\n" for ref_name, object_name in refs)
+    return _CapturedCommand(
+        returncode=0,
+        stdout=_limit_lines("".join(lines), line_limit),
+        stderr="",
     )
 
 
