@@ -161,10 +161,9 @@ class ReplayCache:
 
     def read_bytes(self, url: Any) -> bytes:
         url = _url_text(url)
-        if url not in self._recorded_files:
-            source_response = self._source_response(url)
-            if source_response is not None:
-                return source_response.body
+        source_response = self._source_response(url)
+        if source_response is not None:
+            return source_response.body
 
         path = self.path_for_url(url)
         try:
@@ -200,10 +199,9 @@ class ReplayCache:
 
     def response_headers(self, url: Any, body: bytes | None = None) -> dict[str, str]:
         url = _url_text(url)
-        if url not in self._recorded_files:
-            source_response = self._source_response(url)
-            if source_response is not None:
-                return dict(source_response.headers)
+        source_response = self._source_response(url)
+        if source_response is not None:
+            return dict(source_response.headers)
 
         body = self.read_bytes(url) if body is None else body
         path = self.path_for_url(url)
@@ -219,10 +217,9 @@ class ReplayCache:
 
     def status_code(self, url: Any) -> int:
         url = _url_text(url)
-        if url not in self._recorded_files:
-            source_response = self._source_response(url)
-            if source_response is not None:
-                return source_response.status
+        source_response = self._source_response(url)
+        if source_response is not None:
+            return source_response.status
 
         metadata = self._response_metadata.get(url, {})
         status = metadata.get("status") if isinstance(metadata, Mapping) else None
@@ -349,7 +346,9 @@ class ReplayCache:
         if repo_path is None:
             return None
 
-        if not _git_commit_exists(repo_path, request.commit):
+        if not _git_commit_exists(repo_path, request.commit) or not _git_commit_advertised(
+            repo_path, request.commit
+        ):
             return _SourcePatchResponse(
                 body=f"commit {request.commit} is not available in source cache\n".encode("utf-8"),
                 status=404,
@@ -375,6 +374,17 @@ class ReplayCache:
         repo_path = self._source_repo_for_project(request.project_url)
         if repo_path is None:
             return None
+
+        if _looks_like_git_object(request.ref) and not _git_commit_advertised(
+            repo_path, request.ref
+        ):
+            return _SourcePatchResponse(
+                body=(
+                    f"{request.ref}:{request.file_path} is not available in source cache\n"
+                ).encode("utf-8"),
+                status=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+            )
 
         body = _git_show_file(repo_path, request.ref, request.file_path)
         if body is None:
@@ -518,6 +528,52 @@ def _git_commit_exists(repo_path: Path, commit: str) -> bool:
         stderr=subprocess.DEVNULL,
     )
     return completed.returncode == 0
+
+
+def _git_commit_advertised(repo_path: Path, commit: str) -> bool:
+    refs = _git_advertised_refs(repo_path)
+    if not refs:
+        return _git_commit_exists(repo_path, commit)
+    return any(_git_commit_reachable(repo_path, commit, ref) for ref in refs)
+
+
+def _git_advertised_refs(repo_path: Path) -> tuple[str, ...]:
+    completed = subprocess.run(
+        _git_command(repo_path, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags"]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    refs = [
+        line.strip()
+        for line in completed.stdout.splitlines()
+        if completed.returncode == 0 and line.strip()
+    ]
+    head = subprocess.run(
+        _git_command(repo_path, ["rev-parse", "--verify", "HEAD^{commit}"]),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if head.returncode == 0:
+        refs.append("HEAD")
+    return tuple(dict.fromkeys(refs))
+
+
+def _git_commit_reachable(repo_path: Path, commit: str, ref: str) -> bool:
+    completed = subprocess.run(
+        _git_command(repo_path, ["merge-base", "--is-ancestor", commit, ref]),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return completed.returncode == 0
+
+
+def _looks_like_git_object(value: str) -> bool:
+    return re.fullmatch(r"[0-9a-fA-F]{7,64}", value) is not None
 
 
 def _git_format_patch(repo_path: Path, commit: str) -> bytes:
