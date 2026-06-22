@@ -263,6 +263,7 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
     git_discovery_commands = _git_discovery_commands_from_run_path(run_path, urls)
     git_command_urls = _git_command_urls(git_discovery_commands)
     non_discovery_git_command_urls = _non_discovery_git_command_urls_from_run_path(run_path, urls)
+    as_of = request.as_of or derive_as_of(cases_dir, request.case_id)
 
     for command in git_discovery_commands:
         command_key = subprocess_command_key(command)
@@ -324,7 +325,7 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             if request.dry_run:
                 continue
             try:
-                captured = _capture_git_source_repo(project_url, cases_dir, request)
+                captured = _capture_git_source_repo(project_url, cases_dir, request, as_of=as_of)
             except CaptureMissingError as exc:
                 captured_failure = _record_git_failure(git_failures, url, project_url, str(exc))
                 result.captured_git_failures.append(captured_failure)
@@ -372,7 +373,6 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             CapturedResponse(url=url, relative_path=relative_path, status=fetched.status)
         )
 
-    as_of = request.as_of or derive_as_of(cases_dir, request.case_id)
     for miss in jira_requests:
         if miss.kind == "jira_issue":
             if miss.method != "GET":
@@ -1354,6 +1354,8 @@ def _capture_git_source_repo(
     project_url: str,
     cases_dir: Path,
     request: CaptureMissingRequest,
+    *,
+    as_of: str | None,
 ) -> CapturedSource | None:
     remote_url = _git_clone_url(project_url)
     fixture_path = (
@@ -1377,6 +1379,7 @@ def _capture_git_source_repo(
             request.case_id,
             mirror,
             remote_url=remote_url,
+            as_of=as_of,
             overwrite=request.overwrite,
         )
     return CapturedSource(
