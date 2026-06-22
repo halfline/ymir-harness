@@ -1047,6 +1047,61 @@ def test_capture_missing_records_git_ls_remote_subprocess_replay(
     assert not (cases_dir / "source_cache" / "RHEL-12345").exists()
 
 
+def test_capture_missing_records_git_ls_remote_subprocess_replay_as_of(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    source_repo, branch, pre_fix_ref, _future_ref = _create_dated_git_repo(tmp_path)
+    gitconfig_path = tmp_path / "gitconfig"
+    gitconfig_path.write_text(
+        "\n".join(
+            [
+                f'[url "{source_repo.resolve().as_uri()}"]',
+                "\tinsteadOf = https://github.com/group/project",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig_path))
+    run_file = tmp_path / "run.log"
+    url = "https://github.com/group/project"
+    command = f"GIT_TERMINAL_PROMPT=0 git ls-remote {url} 2>&1 | head -5"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        "\n".join(
+            [
+                json.dumps({"input": {"command": command}}),
+                f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}",
+                "",
+            ]
+        ),
+    )
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            allowed_hosts=("github.com",),
+            as_of="2025-09-12T09:46:42Z",
+        )
+    )
+
+    assert result.failed == []
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["subprocess_replays"][command] == {
+        "returncode": 0,
+        "stderr": "",
+        "stdout": f"{pre_fix_ref}\tHEAD\n{pre_fix_ref}\trefs/heads/{branch}\n",
+    }
+    assert not (cases_dir / "source_cache" / "RHEL-12345").exists()
+
+
 def test_capture_missing_records_git_failure_when_clone_follows_ls_remote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
