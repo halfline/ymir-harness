@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ymir_harness.jira_replay import filter_dev_status_as_of
+
 
 class JiraMockMaterializationError(RuntimeError):
     """Raised when structured Jira fixtures cannot be prepared for Ymir."""
@@ -106,9 +108,20 @@ def _build_ymir_jira_mock_issue_from_dir(jira_dir: Path, case_id: str) -> dict[s
     )
     dev_status = _load_json(jira_dir / "dev-status.json", required=False)
     if isinstance(dev_status, Mapping):
+        summary = dev_status.get("summary")
+        details = dev_status.get("details")
+        filtered_summary, filtered_details = filter_dev_status_as_of(
+            summary if isinstance(summary, Mapping) else {},
+            details if isinstance(details, Mapping) else {},
+            as_of=_fixture_as_of(jira_dir),
+        )
         payload["dev_status"] = {
             key: copy.deepcopy(value)
-            for key, value in dev_status.items()
+            for key, value in {
+                **dev_status,
+                "summary": filtered_summary,
+                "details": filtered_details,
+            }.items()
             if key not in {"schema_version", "case_id", "case_type", "reconstruction"}
         }
     return payload
@@ -124,6 +137,22 @@ def _load_json(path: Path, *, required: bool) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise JiraMockMaterializationError(f"cannot read Jira fixture {path}: {exc}") from exc
+
+
+def _fixture_as_of(jira_dir: Path) -> str | None:
+    for name in ("reconstruction.json", "dev-status.json"):
+        data = _load_json(jira_dir / name, required=False)
+        if not isinstance(data, Mapping):
+            continue
+        as_of = data.get("as_of")
+        if isinstance(as_of, str) and as_of:
+            return as_of
+        reconstruction = data.get("reconstruction")
+        if isinstance(reconstruction, Mapping):
+            as_of = reconstruction.get("as_of")
+            if isinstance(as_of, str) and as_of:
+                return as_of
+    return None
 
 
 def _normalized_comment_block(
