@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shlex
 import subprocess
 import urllib.error
@@ -332,6 +333,51 @@ def test_enforcement_returns_404_for_missing_source_cache_commit(tmp_path: Path)
     )
     assert diff_exc_info.value.code == 404
     assert github_exc_info.value.code == 404
+
+
+def test_enforcement_returns_404_for_unadvertised_source_cache_commit(tmp_path: Path) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    source_repo, branch, pre_fix_ref, future_ref = _create_dated_git_repo(tmp_path)
+    cached_repo = tmp_path / "source_cache" / "RHEL-12345" / "upstream" / "pkg.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", f"--git-dir={cached_repo}", "update-ref", f"refs/heads/{branch}", pre_fix_ref],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            "https://gitlab.gnome.org/group/pkg.git",
+        ],
+        check=True,
+    )
+
+    environment = {
+        **_environment(manifest_path),
+        "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
+    }
+
+    with enforce_benchmark_boundaries(environment):
+        ok_response = urllib.request.urlopen(
+            f"https://gitlab.gnome.org/group/pkg/-/commit/{pre_fix_ref}.patch"
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(
+                f"https://gitlab.gnome.org/group/pkg/-/commit/{future_ref}.patch"
+            )
+
+    assert b"Subject: [PATCH] initial" in ok_response.read()
+    assert exc_info.value.code == 404
+    assert exc_info.value.read() == (
+        f"commit {future_ref} is not available in source cache\n".encode("utf-8")
+    )
 
 
 def test_enforcement_does_not_replay_unaliased_same_path_source_cache_url(
@@ -700,3 +746,42 @@ def _create_git_repo(tmp_path: Path) -> tuple[Path, str]:
         text=True,
     ).strip()
     return repo_path, commit_sha
+
+
+def _create_dated_git_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
+    repo_path = tmp_path / "dated-source-repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "-C", str(repo_path), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_path), "config", "user.email", "dev@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "Dev"], check=True)
+    branch = subprocess.check_output(
+        ["git", "-C", str(repo_path), "symbolic-ref", "--short", "HEAD"],
+        text=True,
+    ).strip()
+    _commit_with_date(repo_path, "before\n", "initial", "2025-09-01T00:00:00+0000")
+    pre_fix_ref = subprocess.check_output(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    _commit_with_date(repo_path, "after\n", "future", "2025-09-20T00:00:00+0000")
+    future_ref = subprocess.check_output(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    return repo_path, branch, pre_fix_ref, future_ref
+
+
+def _commit_with_date(repo_path: Path, text: str, message: str, date: str) -> None:
+    (repo_path / "source.c").write_text(text, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "add", "source.c"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_path), "commit", "-q", "-m", message],
+        check=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_DATE": date,
+            "GIT_COMMITTER_DATE": date,
+        },
+    )
