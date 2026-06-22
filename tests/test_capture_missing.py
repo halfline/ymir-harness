@@ -663,11 +663,19 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
                                         "url": "https://gitlab.example/group/glib",
                                         "commits": [
                                             {
+                                                "authorTimestamp": "2025-09-02T00:00:00.000+0000",
                                                 "url": (
                                                     "https://gitlab.example/group/glib"
                                                     "/-/commit/abc123"
-                                                )
-                                            }
+                                                ),
+                                            },
+                                            {
+                                                "authorTimestamp": "2025-10-02T00:00:00.000+0000",
+                                                "url": (
+                                                    "https://gitlab.example/group/glib"
+                                                    "/-/commit/future"
+                                                ),
+                                            },
                                         ],
                                     }
                                 ]
@@ -749,7 +757,10 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
     assert linked_starting["fields"]["status"] == {"name": "New"}
     assert dev_status["summary"]["repository"]["byInstanceType"]["GitLab"]["count"] == 1
     assert dev_status["details"]["GitLab:repository"][0]["repositories"][0]["commits"] == [
-        {"url": "https://gitlab.example/group/glib/-/commit/abc123"}
+        {
+            "authorTimestamp": "2025-09-02T00:00:00.000+0000",
+            "url": "https://gitlab.example/group/glib/-/commit/abc123",
+        }
     ]
 
 
