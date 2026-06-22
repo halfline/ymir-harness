@@ -224,6 +224,35 @@ def write_jira_dev_status_fixture(
     return path
 
 
+def filter_dev_status_as_of(
+    summary: Mapping[str, Any],
+    details: Mapping[str, Any],
+    *,
+    as_of: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    filtered_summary = copy.deepcopy(dict(summary))
+    filtered_details = copy.deepcopy(dict(details))
+    if as_of is None:
+        return filtered_summary, filtered_details
+
+    as_of_timestamp = _parse_jira_timestamp(as_of)
+    if as_of_timestamp is None:
+        return filtered_summary, filtered_details
+
+    repository_counts: dict[str, int] = {}
+    for key, detail in list(filtered_details.items()):
+        if not isinstance(key, str) or not key.endswith(":repository"):
+            continue
+        app_type = key.removesuffix(":repository")
+        filtered_detail = _filter_dev_status_detail_as_of(detail, as_of_timestamp)
+        filtered_details[key] = filtered_detail
+        repository_counts[app_type] = _dev_status_repository_count(filtered_detail)
+
+    _apply_dev_status_repository_counts(filtered_summary, repository_counts, as_of)
+    _hide_future_dev_status_summaries(filtered_summary, as_of_timestamp)
+    return filtered_summary, filtered_details
+
+
 def jira_replay_miss_line(miss: JiraReplayMiss) -> str:
     return f"{JIRA_REPLAY_MISS_PREFIX} {json.dumps(miss.to_json(), sort_keys=True)}"
 
@@ -542,3 +571,159 @@ def _comment_payload(comments: list[Any]) -> dict[str, Any]:
         "startAt": 0,
         "total": len(comments),
     }
+
+
+def _filter_dev_status_detail_as_of(detail: Any, as_of: datetime) -> list[Any]:
+    if not isinstance(detail, list):
+        return []
+    output = []
+    for entry in detail:
+        if not isinstance(entry, Mapping):
+            output.append(copy.deepcopy(entry))
+            continue
+        filtered_entry = copy.deepcopy(dict(entry))
+        repositories = filtered_entry.get("repositories")
+        if isinstance(repositories, list):
+            filtered_repositories = []
+            for repository in repositories:
+                if not isinstance(repository, Mapping):
+                    filtered_repositories.append(copy.deepcopy(repository))
+                    continue
+                filtered_repository = copy.deepcopy(dict(repository))
+                commits = filtered_repository.get("commits")
+                if isinstance(commits, list):
+                    filtered_commits = [
+                        copy.deepcopy(commit)
+                        for commit in commits
+                        if not _dev_status_item_is_future(commit, as_of)
+                    ]
+                    filtered_repository["commits"] = filtered_commits
+                    if not filtered_commits:
+                        continue
+                filtered_repositories.append(filtered_repository)
+            filtered_entry["repositories"] = filtered_repositories
+            if not filtered_repositories:
+                continue
+        output.append(filtered_entry)
+    return output
+
+
+def _dev_status_item_is_future(item: Any, as_of: datetime) -> bool:
+    if not isinstance(item, Mapping):
+        return False
+    for field in (
+        "authorTimestamp",
+        "authorTimestampMillis",
+        "authored_date",
+        "committed_date",
+        "created_at",
+        "updated_at",
+        "date",
+    ):
+        timestamp = _parse_dev_status_timestamp(item.get(field))
+        if timestamp is not None:
+            return timestamp > as_of
+    author = item.get("author")
+    if isinstance(author, Mapping):
+        timestamp = _parse_dev_status_timestamp(author.get("timestamp"))
+        if timestamp is not None:
+            return timestamp > as_of
+    return False
+
+
+def _parse_dev_status_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, (int, float)):
+        candidate = value / 1000 if value > 10_000_000_000 else value
+        try:
+            return datetime.fromtimestamp(candidate, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    return _parse_jira_timestamp(value)
+
+
+def _dev_status_repository_count(detail: Any) -> int:
+    if not isinstance(detail, list):
+        return 0
+    count = 0
+    for entry in detail:
+        if not isinstance(entry, Mapping):
+            continue
+        repositories = entry.get("repositories")
+        if not isinstance(repositories, list):
+            continue
+        count += sum(1 for repository in repositories if isinstance(repository, Mapping))
+    return count
+
+
+def _apply_dev_status_repository_counts(
+    summary: dict[str, Any],
+    repository_counts: Mapping[str, int],
+    as_of: str,
+) -> None:
+    if not repository_counts:
+        return
+    repository = summary.get("repository")
+    if not isinstance(repository, Mapping):
+        return
+    repository_payload = copy.deepcopy(dict(repository))
+    summary["repository"] = repository_payload
+
+    by_instance = repository_payload.get("byInstanceType")
+    if isinstance(by_instance, Mapping):
+        by_instance_payload = copy.deepcopy(dict(by_instance))
+    else:
+        by_instance_payload = {}
+    for app_type, count in repository_counts.items():
+        entry = by_instance_payload.get(app_type)
+        if isinstance(entry, Mapping):
+            entry_payload = copy.deepcopy(dict(entry))
+        else:
+            entry_payload = {"name": app_type}
+        entry_payload["count"] = count
+        by_instance_payload[app_type] = entry_payload
+    repository_payload["byInstanceType"] = by_instance_payload
+
+    overall = repository_payload.get("overall")
+    if isinstance(overall, Mapping):
+        overall_payload = copy.deepcopy(dict(overall))
+    else:
+        overall_payload = {"dataType": "repository"}
+    total = sum(repository_counts.values())
+    overall_payload["count"] = total
+    if total:
+        overall_payload["lastUpdated"] = as_of
+    else:
+        overall_payload.pop("lastUpdated", None)
+    repository_payload["overall"] = overall_payload
+
+
+def _hide_future_dev_status_summaries(summary: dict[str, Any], as_of: datetime) -> None:
+    for name, payload in list(summary.items()):
+        if not isinstance(payload, Mapping):
+            continue
+        overall = payload.get("overall")
+        if not isinstance(overall, Mapping):
+            continue
+        last_updated = _parse_jira_timestamp(overall.get("lastUpdated"))
+        if last_updated is None or last_updated <= as_of:
+            continue
+        replacement = copy.deepcopy(dict(payload))
+        overall_payload = copy.deepcopy(dict(overall))
+        for field in ("count", "stateCount", "open", "merged", "declined"):
+            if isinstance(overall_payload.get(field), int):
+                overall_payload[field] = 0
+        overall_payload.pop("lastUpdated", None)
+        replacement["overall"] = overall_payload
+        by_instance = replacement.get("byInstanceType")
+        if isinstance(by_instance, Mapping):
+            by_instance_payload = {}
+            for app_type, entry in by_instance.items():
+                if isinstance(entry, Mapping):
+                    entry_payload = copy.deepcopy(dict(entry))
+                    if isinstance(entry_payload.get("count"), int):
+                        entry_payload["count"] = 0
+                    by_instance_payload[app_type] = entry_payload
+                else:
+                    by_instance_payload[app_type] = copy.deepcopy(entry)
+            replacement["byInstanceType"] = by_instance_payload
+        summary[name] = replacement
