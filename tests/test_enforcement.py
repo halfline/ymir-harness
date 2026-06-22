@@ -428,6 +428,62 @@ def test_enforcement_returns_404_for_unadvertised_source_cache_commit(tmp_path: 
     )
 
 
+def test_enforcement_source_cache_overrides_recorded_unadvertised_cgit_patch(
+    tmp_path: Path,
+) -> None:
+    source_repo, branch, pre_fix_ref, future_ref = _create_dated_git_repo(tmp_path)
+    future_url = (
+        "https://pkgs.devel.redhat.com/cgit/rpms/pkg/patch/"
+        f"?h={branch}&id={future_ref}"
+    )
+    manifest_path = _write_replay_manifest(
+        tmp_path,
+        {future_url: "captured/future.patch"},
+    )
+    captured_dir = manifest_path.parent / "captured"
+    captured_dir.mkdir()
+    (captured_dir / "future.patch").write_text("cached future patch\n", encoding="utf-8")
+    cached_repo = tmp_path / "source_cache" / "RHEL-12345" / "upstream" / "pkg.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", f"--git-dir={cached_repo}", "update-ref", f"refs/heads/{branch}", pre_fix_ref],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            "https://gitlab.com/redhat/rhel/rpms/pkg.git",
+        ],
+        check=True,
+    )
+
+    environment = {
+        **_environment(manifest_path),
+        "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
+    }
+
+    with enforce_benchmark_boundaries(environment):
+        ok_response = urllib.request.urlopen(
+            "https://pkgs.devel.redhat.com/cgit/rpms/pkg/patch/"
+            f"?h={branch}&id={pre_fix_ref}"
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(future_url)
+
+    assert b"Subject: [PATCH] initial" in ok_response.read()
+    assert exc_info.value.code == 404
+    assert exc_info.value.read() == (
+        f"commit {future_ref} is not available in source cache\n".encode("utf-8")
+    )
+
+
 def test_enforcement_does_not_replay_unaliased_same_path_source_cache_url(
     tmp_path: Path,
 ) -> None:
