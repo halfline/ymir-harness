@@ -71,6 +71,12 @@ class _SourceLogRequest:
 
 
 @dataclass(frozen=True)
+class _SourceRefsRequest:
+    project_url: str
+    package: str
+
+
+@dataclass(frozen=True)
 class _SourcePatchResponse:
     body: bytes
     status: int
@@ -349,6 +355,10 @@ class ReplayCache:
         log_response = self._source_log_response(url)
         if log_response is not None:
             return log_response
+        refs_response = self._source_refs_response(url)
+        if refs_response is not None:
+            return refs_response
+        return None
 
     def _source_patch_response(self, url: str) -> _SourcePatchResponse | None:
         request = _source_patch_request(url)
@@ -436,6 +446,21 @@ class ReplayCache:
             headers={"Content-Type": "text/html; charset=utf-8"},
         )
 
+    def _source_refs_response(self, url: str) -> _SourcePatchResponse | None:
+        request = _source_refs_request(url)
+        if request is None:
+            return None
+
+        repo_path = self._source_repo_for_project(request.project_url)
+        if repo_path is None:
+            return None
+
+        return _SourcePatchResponse(
+            body=_git_cgit_refs_html(repo_path, request.package),
+            status=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+        )
+
     def _source_repo_for_url(self, url: str) -> Path | None:
         patch_request = _source_patch_request(url)
         if patch_request is not None:
@@ -446,6 +471,9 @@ class ReplayCache:
         log_request = _source_log_request(url)
         if log_request is not None:
             return self._source_repo_for_project(log_request.project_url)
+        refs_request = _source_refs_request(url)
+        if refs_request is not None:
+            return self._source_repo_for_project(refs_request.project_url)
         return None
 
     def _source_repo_for_project(self, project_url: str) -> Path | None:
@@ -586,6 +614,24 @@ def _source_log_request(url: Any) -> _SourceLogRequest | None:
         package=package,
         ref=_cgit_query_ref(parsed),
     )
+
+
+def _source_refs_request(url: Any) -> _SourceRefsRequest | None:
+    url = _url_text(url)
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return None
+    if parsed.hostname.lower() != "pkgs.devel.redhat.com":
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 4 or parts[:2] != ["cgit", "rpms"] or parts[3] != "refs":
+        return None
+
+    package = parts[2]
+    project_url = f"{parsed.scheme}://gitlab.com/redhat/rhel/rpms/{package}"
+    return _SourceRefsRequest(project_url=project_url, package=package)
+
 
 def _cgit_query_ref(parsed) -> str:
     ref = (parse_qs(parsed.query).get("h") or ["HEAD"])[0].strip()
@@ -728,6 +774,54 @@ def _git_cgit_log_html(repo_path: Path, package: str, ref: str) -> bytes | None:
         f"<h1>{html.escape(package)} log for {ref_text}</h1>"
         "<table class='list nowrap'>"
         "<tr><th>Commit message</th><th>Author</th><th>Date</th></tr>"
+        + "".join(rows)
+        + "</table></body></html>\n"
+    )
+    return body.encode("utf-8")
+
+
+def _git_cgit_refs_html(repo_path: Path, package: str) -> bytes:
+    completed = subprocess.run(
+        _git_command(
+            repo_path,
+            [
+                "for-each-ref",
+                "--format=%(refname:strip=2)%00%(objectname)%00%(subject)%00%(authordate:iso-strict)",
+                "refs/heads",
+            ],
+        ),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    rows = []
+    if completed.returncode == 0:
+        for line in completed.stdout.splitlines():
+            parts = line.split("\0")
+            if len(parts) != 4:
+                continue
+            ref, commit, subject, authored_date = parts
+            ref_text = html.escape(ref)
+            commit_text = html.escape(commit)
+            rows.append(
+                "<tr>"
+                f"<td><a href='/cgit/rpms/{html.escape(package)}/log/?h={quote(ref)}'>"
+                f"{ref_text}</a></td>"
+                "<td><a href='/cgit/rpms/"
+                f"{html.escape(package)}/commit/?h={quote(ref)}&amp;id={commit_text}'>"
+                f"{html.escape(subject)}</a></td>"
+                f"<td>{commit_text}</td>"
+                f"<td>{html.escape(authored_date)}</td>"
+                "</tr>"
+            )
+    body = (
+        "<!doctype html><html><head>"
+        f"<title>{html.escape(package)} refs</title>"
+        "</head><body>"
+        f"<h1>{html.escape(package)} refs</h1>"
+        "<table class='list nowrap'>"
+        "<tr><th>Branch</th><th>Commit</th><th>Object</th><th>Date</th></tr>"
         + "".join(rows)
         + "</table></body></html>\n"
     )
