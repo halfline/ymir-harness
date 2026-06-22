@@ -496,6 +496,11 @@ def _source_file_request(url: Any) -> _SourceFileRequest | None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
         return None
+
+    cgit_request = _cgit_source_file_request(parsed)
+    if cgit_request is not None:
+        return cgit_request
+
     if parsed.hostname.lower() != "src.fedoraproject.org":
         return None
 
@@ -507,6 +512,26 @@ def _source_file_request(url: Any) -> _SourceFileRequest | None:
     file_path = "/".join(parts[5:])
     project_url = f"{parsed.scheme}://{parsed.netloc}/{'/'.join(parts[:2])}"
     return _SourceFileRequest(project_url=project_url, ref=ref, file_path=file_path)
+
+
+def _cgit_source_file_request(parsed) -> _SourceFileRequest | None:
+    if parsed.hostname is None or parsed.hostname.lower() != "pkgs.devel.redhat.com":
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 5 or parts[:2] != ["cgit", "rpms"] or parts[3] != "plain":
+        return None
+
+    package = parts[2]
+    file_path = "/".join(parts[4:])
+    ref = _cgit_query_ref(parsed)
+    project_url = f"{parsed.scheme}://gitlab.com/redhat/rhel/rpms/{package}"
+    return _SourceFileRequest(project_url=project_url, ref=ref, file_path=file_path)
+
+
+def _cgit_query_ref(parsed) -> str:
+    ref = (parse_qs(parsed.query).get("h") or ["HEAD"])[0].strip()
+    return ref or "HEAD"
 
 
 def _source_git_repositories(upstream_dir: Path) -> tuple[Path, ...]:
