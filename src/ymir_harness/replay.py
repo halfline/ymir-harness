@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from urllib.error import HTTPError
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.response import addinfourl
 
 
@@ -74,6 +74,11 @@ class _SourceLogRequest:
 class _SourceRefsRequest:
     project_url: str
     package: str
+
+
+@dataclass(frozen=True)
+class _SourceGitLabBranchesRequest:
+    project_identifier: str
 
 
 @dataclass(frozen=True)
@@ -358,7 +363,7 @@ class ReplayCache:
         refs_response = self._source_refs_response(url)
         if refs_response is not None:
             return refs_response
-        return None
+        return self._source_gitlab_branches_response(url)
 
     def _source_patch_response(self, url: str) -> _SourcePatchResponse | None:
         request = _source_patch_request(url)
@@ -461,6 +466,28 @@ class ReplayCache:
             headers={"Content-Type": "text/html; charset=utf-8"},
         )
 
+    def _source_gitlab_branches_response(self, url: str) -> _SourcePatchResponse | None:
+        request = _source_gitlab_branches_request(url)
+        if request is None:
+            return None
+
+        project_url = self._gitlab_api_project_url(request.project_identifier)
+        if project_url is None:
+            return None
+        repo_path = self._source_repo_for_project(project_url)
+        if repo_path is None:
+            return None
+
+        body = json.dumps(
+            _gitlab_branch_payloads(repo_path, project_url),
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return _SourcePatchResponse(
+            body=body,
+            status=200,
+            headers={"Content-Type": "application/json"},
+        )
+
     def _source_repo_for_url(self, url: str) -> Path | None:
         patch_request = _source_patch_request(url)
         if patch_request is not None:
@@ -474,6 +501,10 @@ class ReplayCache:
         refs_request = _source_refs_request(url)
         if refs_request is not None:
             return self._source_repo_for_project(refs_request.project_url)
+        branches_request = _source_gitlab_branches_request(url)
+        if branches_request is not None:
+            project_url = self._gitlab_api_project_url(branches_request.project_identifier)
+            return self._source_repo_for_project(project_url) if project_url is not None else None
         return None
 
     def _source_repo_for_project(self, project_url: str) -> Path | None:
@@ -492,6 +523,39 @@ class ReplayCache:
         if matching:
             return matching[0]
         return None
+
+    def _gitlab_api_project_url(self, project_identifier: str) -> str | None:
+        decoded = unquote(project_identifier).strip("/")
+        if not decoded:
+            return None
+        if "/" in decoded:
+            return f"https://gitlab.com/{decoded}"
+
+        for url, relative_path in self._recorded_files.items():
+            parsed = urlparse(url)
+            if parsed.hostname is None or parsed.hostname.lower() != "gitlab.com":
+                continue
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) != 4 or parts[:3] != ["api", "v4", "projects"]:
+                continue
+            project = self._load_recorded_json(relative_path)
+            if not isinstance(project, Mapping):
+                continue
+            recorded_identifier = unquote(parts[3]).strip("/")
+            metadata_id = project.get("id")
+            if recorded_identifier != decoded and str(metadata_id or "") != decoded:
+                continue
+            project_url = _gitlab_project_url_from_metadata(project)
+            if project_url is not None:
+                return project_url
+        return None
+
+    def _load_recorded_json(self, relative_path: str) -> Any:
+        path = self.cache_dir / relative_path
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
 
 
 def _content_type_for(path: Path, body: bytes) -> str:
@@ -631,6 +695,22 @@ def _source_refs_request(url: Any) -> _SourceRefsRequest | None:
     package = parts[2]
     project_url = f"{parsed.scheme}://gitlab.com/redhat/rhel/rpms/{package}"
     return _SourceRefsRequest(project_url=project_url, package=package)
+
+
+def _source_gitlab_branches_request(url: Any) -> _SourceGitLabBranchesRequest | None:
+    url = _url_text(url)
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return None
+    if parsed.hostname.lower() != "gitlab.com":
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 6 or parts[:3] != ["api", "v4", "projects"]:
+        return None
+    if parts[4:] != ["repository", "branches"]:
+        return None
+    return _SourceGitLabBranchesRequest(project_identifier=parts[3])
 
 
 def _cgit_query_ref(parsed) -> str:
@@ -828,6 +908,136 @@ def _git_cgit_refs_html(repo_path: Path, package: str) -> bytes:
     return body.encode("utf-8")
 
 
+def _gitlab_branch_payloads(repo_path: Path, project_url: str) -> list[dict[str, Any]]:
+    completed = subprocess.run(
+        _git_command(
+            repo_path,
+            [
+                "for-each-ref",
+                "--format=%(refname:strip=2)%00%(objectname)",
+                "refs/heads",
+            ],
+        ),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return []
+
+    branches = []
+    default_branch = _git_symbolic_branch(repo_path, "HEAD")
+    for line in completed.stdout.splitlines():
+        parts = line.split("\0")
+        if len(parts) != 2:
+            continue
+        branch, commit = parts
+        commit_payload = _gitlab_commit_payload(repo_path, project_url, commit)
+        branches.append(
+            {
+                "name": branch,
+                "commit": commit_payload,
+                "merged": False,
+                "protected": False,
+                "developers_can_push": False,
+                "developers_can_merge": False,
+                "can_push": False,
+                "default": branch == default_branch,
+                "web_url": f"{project_url}/-/tree/{quote(branch)}",
+            }
+        )
+    return branches
+
+
+def _gitlab_commit_payload(repo_path: Path, project_url: str, commit: str) -> dict[str, Any]:
+    completed = subprocess.run(
+        _git_command(
+            repo_path,
+            [
+                "show",
+                "-s",
+                "--date=iso-strict",
+                "--format=%H%x00%h%x00%aI%x00%cI%x00%an%x00%ae%x00%cn%x00%ce%x00%s%x00%B",
+                commit,
+            ],
+        ),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return {
+            "id": commit,
+            "short_id": commit[:8],
+            "web_url": f"{project_url}/-/commit/{commit}",
+        }
+    parts = completed.stdout.split("\0", 9)
+    if len(parts) != 10:
+        return {
+            "id": commit,
+            "short_id": commit[:8],
+            "web_url": f"{project_url}/-/commit/{commit}",
+        }
+    (
+        full_id,
+        short_id,
+        authored_date,
+        committed_date,
+        author_name,
+        author_email,
+        committer_name,
+        committer_email,
+        title,
+        message,
+    ) = parts
+    return {
+        "id": full_id,
+        "short_id": short_id,
+        "created_at": committed_date,
+        "parent_ids": _git_parent_ids(repo_path, full_id),
+        "title": title,
+        "message": message,
+        "author_name": author_name,
+        "author_email": author_email,
+        "authored_date": authored_date,
+        "committer_name": committer_name,
+        "committer_email": committer_email,
+        "committed_date": committed_date,
+        "trailers": {},
+        "extended_trailers": {},
+        "web_url": f"{project_url}/-/commit/{full_id}",
+    }
+
+
+def _git_parent_ids(repo_path: Path, commit: str) -> list[str]:
+    completed = subprocess.run(
+        _git_command(repo_path, ["show", "-s", "--format=%P", commit]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return []
+    return [parent for parent in completed.stdout.strip().split() if parent]
+
+
+def _git_symbolic_branch(repo_path: Path, ref: str) -> str | None:
+    symbolic_ref = subprocess.run(
+        _git_command(repo_path, ["symbolic-ref", "-q", "--short", ref]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if symbolic_ref.returncode != 0:
+        return None
+    value = symbolic_ref.stdout.strip()
+    return value.removeprefix("heads/") or None
+
+
 def _git_resolve_commit(repo_path: Path, ref: str) -> str | None:
     completed = subprocess.run(
         _git_command(repo_path, ["rev-parse", "--verify", f"{ref}^{{commit}}"]),
@@ -893,6 +1103,20 @@ def _same_or_aliased_git_project(first: str | None, second: str) -> bool:
         return False
     target = _normalized_git_project(second)
     return target in {_normalized_git_project(alias) for alias in _source_project_aliases(first)}
+
+
+def _gitlab_project_url_from_metadata(project: Mapping[str, Any]) -> str | None:
+    for field in ("http_url_to_repo", "web_url"):
+        value = project.get(field)
+        if isinstance(value, str) and value:
+            parsed = urlparse(value)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                path = parsed.path.removesuffix(".git").rstrip("/")
+                return f"{parsed.scheme}://{parsed.netloc}{path}"
+    namespace = project.get("path_with_namespace")
+    if isinstance(namespace, str) and namespace:
+        return f"https://gitlab.com/{namespace.strip('/').removesuffix('.git')}"
+    return None
 
 
 def _source_project_aliases(remote_url: str) -> tuple[str, ...]:
