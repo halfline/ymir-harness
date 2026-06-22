@@ -20,6 +20,7 @@ from ymir_harness.jira_replay import (
     JiraReplayMiss,
     derive_as_of,
     filter_comments_as_of,
+    filter_dev_status_as_of,
     filter_search_response_as_of,
     jira_search_fixture_path,
     parse_jira_replay_misses,
@@ -1253,12 +1254,17 @@ def _capture_dev_status(
             if isinstance(detail, list):
                 details[f"{app_type}:repository"] = detail
 
+    filtered_summary, filtered_details = filter_dev_status_as_of(
+        summary,
+        details,
+        as_of=as_of,
+    )
     write_jira_dev_status_fixture(
         cases_dir,
         case_id,
         issue_key,
-        summary=summary,
-        details=details,
+        summary=filtered_summary,
+        details=filtered_details,
         as_of=as_of,
         overwrite=request.overwrite,
     )
