@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import io
 import json
 import re
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from urllib.error import HTTPError
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.response import addinfourl
 
 
@@ -60,6 +61,13 @@ class _SourceFileRequest:
     project_url: str
     ref: str
     file_path: str
+
+
+@dataclass(frozen=True)
+class _SourceLogRequest:
+    project_url: str
+    package: str
+    ref: str
 
 
 @dataclass(frozen=True)
@@ -335,7 +343,12 @@ class ReplayCache:
         patch_response = self._source_patch_response(url)
         if patch_response is not None:
             return patch_response
-        return self._source_file_response(url)
+        file_response = self._source_file_response(url)
+        if file_response is not None:
+            return file_response
+        log_response = self._source_log_response(url)
+        if log_response is not None:
+            return log_response
 
     def _source_patch_response(self, url: str) -> _SourcePatchResponse | None:
         request = _source_patch_request(url)
@@ -401,6 +414,28 @@ class ReplayCache:
             headers={"Content-Type": _content_type_for(Path(request.file_path), body)},
         )
 
+    def _source_log_response(self, url: str) -> _SourcePatchResponse | None:
+        request = _source_log_request(url)
+        if request is None:
+            return None
+
+        repo_path = self._source_repo_for_project(request.project_url)
+        if repo_path is None:
+            return None
+
+        body = _git_cgit_log_html(repo_path, request.package, request.ref)
+        if body is None:
+            return _SourcePatchResponse(
+                body=f"{request.ref} is not available in source cache\n".encode("utf-8"),
+                status=404,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+            )
+        return _SourcePatchResponse(
+            body=body,
+            status=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+        )
+
     def _source_repo_for_url(self, url: str) -> Path | None:
         patch_request = _source_patch_request(url)
         if patch_request is not None:
@@ -408,6 +443,9 @@ class ReplayCache:
         file_request = _source_file_request(url)
         if file_request is not None:
             return self._source_repo_for_project(file_request.project_url)
+        log_request = _source_log_request(url)
+        if log_request is not None:
+            return self._source_repo_for_project(log_request.project_url)
         return None
 
     def _source_repo_for_project(self, project_url: str) -> Path | None:
@@ -529,6 +567,26 @@ def _cgit_source_file_request(parsed) -> _SourceFileRequest | None:
     return _SourceFileRequest(project_url=project_url, ref=ref, file_path=file_path)
 
 
+def _source_log_request(url: Any) -> _SourceLogRequest | None:
+    url = _url_text(url)
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        return None
+    if parsed.hostname.lower() != "pkgs.devel.redhat.com":
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 4 or parts[:2] != ["cgit", "rpms"] or parts[3] != "log":
+        return None
+
+    package = parts[2]
+    project_url = f"{parsed.scheme}://gitlab.com/redhat/rhel/rpms/{package}"
+    return _SourceLogRequest(
+        project_url=project_url,
+        package=package,
+        ref=_cgit_query_ref(parsed),
+    )
+
 def _cgit_query_ref(parsed) -> str:
     ref = (parse_qs(parsed.query).get("h") or ["HEAD"])[0].strip()
     return ref or "HEAD"
@@ -620,6 +678,74 @@ def _git_commit_reachable(repo_path: Path, commit: str, ref: str) -> bool:
 
 def _looks_like_git_object(value: str) -> bool:
     return re.fullmatch(r"[0-9a-fA-F]{7,64}", value) is not None
+
+
+def _git_cgit_log_html(repo_path: Path, package: str, ref: str) -> bytes | None:
+    start = _git_resolve_commit(repo_path, ref)
+    if start is None:
+        return None
+
+    completed = subprocess.run(
+        _git_command(
+            repo_path,
+            [
+                "log",
+                "--max-count=50",
+                "--date=iso-strict",
+                "--pretty=format:%H%x00%an%x00%ad%x00%s",
+                start,
+            ],
+        ),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+
+    ref_text = html.escape(ref)
+    rows = []
+    for line in completed.stdout.splitlines():
+        parts = line.split("\0")
+        if len(parts) != 4:
+            continue
+        commit, author, authored_date, subject = parts
+        commit_text = html.escape(commit)
+        rows.append(
+            "<tr>"
+            "<td><a href='/cgit/rpms/"
+            f"{html.escape(package)}/commit/?h={quote(ref)}&amp;id={commit_text}'>"
+            f"{html.escape(subject)}</a></td>"
+            f"<td>{html.escape(author)}</td>"
+            f"<td>{html.escape(authored_date)}</td>"
+            "</tr>"
+        )
+    body = (
+        "<!doctype html><html><head>"
+        f"<title>{html.escape(package)} log</title>"
+        "</head><body>"
+        f"<h1>{html.escape(package)} log for {ref_text}</h1>"
+        "<table class='list nowrap'>"
+        "<tr><th>Commit message</th><th>Author</th><th>Date</th></tr>"
+        + "".join(rows)
+        + "</table></body></html>\n"
+    )
+    return body.encode("utf-8")
+
+
+def _git_resolve_commit(repo_path: Path, ref: str) -> str | None:
+    completed = subprocess.run(
+        _git_command(repo_path, ["rev-parse", "--verify", f"{ref}^{{commit}}"]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    commit = completed.stdout.strip()
+    return commit if commit else None
 
 
 def _git_format_patch(repo_path: Path, commit: str) -> bytes:
