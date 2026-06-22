@@ -447,6 +447,10 @@ def _source_patch_request(url: Any) -> _SourcePatchRequest | None:
     if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
         return None
 
+    cgit_request = _cgit_source_patch_request(parsed)
+    if cgit_request is not None:
+        return cgit_request
+
     markers = ("/-/commit/", "/commit/")
     marker = next((candidate for candidate in markers if candidate in parsed.path), None)
     if marker is None:
@@ -468,6 +472,23 @@ def _source_patch_request(url: Any) -> _SourcePatchRequest | None:
 
     project_url = f"{parsed.scheme}://{parsed.netloc}{project_path.rstrip('/')}"
     return _SourcePatchRequest(project_url=project_url, commit=commit, output=output)
+
+
+def _cgit_source_patch_request(parsed) -> _SourcePatchRequest | None:
+    if parsed.hostname is None or parsed.hostname.lower() != "pkgs.devel.redhat.com":
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 4 or parts[:2] != ["cgit", "rpms"] or parts[3] != "patch":
+        return None
+
+    commit = (parse_qs(parsed.query).get("id") or [""])[0]
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
+        return None
+
+    package = parts[2]
+    project_url = f"{parsed.scheme}://gitlab.com/redhat/rhel/rpms/{package}"
+    return _SourcePatchRequest(project_url=project_url, commit=commit, output="patch")
 
 
 def _source_file_request(url: Any) -> _SourceFileRequest | None:
