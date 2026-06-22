@@ -318,6 +318,52 @@ def test_strict_validation_reports_web_cache_recorded_file_escape(tmp_path: Path
     )
 
 
+def test_strict_validation_reports_future_koji_candidate_build(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "reconstruction.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "as_of": "2026-05-31T07:21:36Z",
+            "method": "first_historical_result_comment",
+        },
+    )
+    manifest_path = cases_dir / "web_cache" / "RHEL-12345" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["koji_candidate_builds"] = {
+        "dnsmasq|rhel-8.10.z": {
+            "build": {
+                "completion_time": "2026-06-10 17:58:04.467277",
+            },
+            "evr": {
+                "epoch": 0,
+                "version": "1.0",
+                "release": "1.el8",
+            },
+            "source_ref": "future-ref",
+        }
+    }
+    _write_json(manifest_path, manifest)
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "timestamp_leakage"
+        and "Koji candidate build record is newer than case as_of" in issue.message
+        for issue in issues
+    )
+
+
 def test_strict_validation_reports_network_denied_patch_urls(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
