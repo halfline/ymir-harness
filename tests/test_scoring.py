@@ -1031,7 +1031,7 @@ def test_score_result_directory_accepts_recorded_patch_commit_coverage(
     )
     _write_text(
         cases_dir / "web_cache" / "RHEL-12345" / "patches" / "commit.patch",
-        f"From {commit_sha} Mon Sep 17 00:00:00 2001\n",
+        "diff --git a/redis.spec b/redis.spec\n",
     )
     _write_text(
         cases_dir / "web_cache" / "RHEL-12345" / "patches" / "mr.patch",
@@ -1039,6 +1039,67 @@ def test_score_result_directory_accepts_recorded_patch_commit_coverage(
             f"From {commit_sha} Mon Sep 17 00:00:00 2001\n"
             f"From {extra_sha} Mon Sep 17 00:00:00 2001\n"
         ),
+    )
+
+    report = score_result_directory(cases_dir, actual_dir)
+
+    assert report.entries[0].status == "passed"
+    metrics = {metric.name: metric for metric in report.entries[0].score.metrics}
+    assert metrics["patch_urls"].status == "pass"
+    assert metrics["patch_urls"].notes == (
+        "actual patch URLs include the expected patch commit IDs"
+    )
+
+
+def test_score_result_directory_accepts_equivalent_pkgs_devel_patch_url(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    actual_dir = tmp_path / "actual-results"
+    commit_sha = "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
+    expected_url = f"https://gitlab.com/redhat/rhel/rpms/redis/-/commit/{commit_sha}.patch"
+    actual_url = (
+        "https://pkgs.devel.redhat.com/cgit/rpms/redis/patch/"
+        f"?h=rhel-9.8.0&id={commit_sha}"
+    )
+
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "redis",
+            "case_status": "active",
+            "patch_urls": [expected_url],
+        },
+    )
+    _write_json(
+        actual_dir / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "redis",
+            "patch_urls": [actual_url],
+        },
+    )
+    _write_json(
+        cases_dir / "web_cache" / "RHEL-12345" / "manifest.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "required_urls": [expected_url],
+            "recorded_files": {
+                expected_url: "patches/commit.patch",
+            },
+        },
+    )
+    _write_text(
+        cases_dir / "web_cache" / "RHEL-12345" / "patches" / "commit.patch",
+        f"From {commit_sha} Mon Sep 17 00:00:00 2001\n",
     )
 
     report = score_result_directory(cases_dir, actual_dir)
