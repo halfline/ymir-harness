@@ -257,7 +257,14 @@ def collect_case(request: CollectCaseRequest) -> CollectCaseResult:
     fetched = _fetch_evidence(request, result)
     request = _complete_request(request, fetched)
     request = _localize_mock_repo_cache(request)
-    fetched = replace(fetched, koji_candidate_builds=_fetch_koji_candidate_builds(request, result))
+    fetched = replace(
+        fetched,
+        koji_candidate_builds=_fetch_koji_candidate_builds(
+            request,
+            result,
+            as_of=derive_as_of_from_comments(_evidence_comments(request, fetched)),
+        ),
+    )
     _validate_request(request, require_metadata=True)
     cases_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1383,6 +1390,8 @@ def _complete_request(
 def _fetch_koji_candidate_builds(
     request: CollectCaseRequest,
     result: CollectCaseResult,
+    *,
+    as_of: str | None,
 ) -> dict[str, Any]:
     if request.network_mode == "network_denied":
         return {}
@@ -1396,7 +1405,7 @@ def _fetch_koji_candidate_builds(
     records: dict[str, Any] = {}
     for branch in candidate_build_branches(request.target_branch):
         try:
-            record = fetch_candidate_build(request.package, branch)
+            record = fetch_candidate_build(request.package, branch, as_of=as_of)
         except Exception as exc:
             result.warnings.append(
                 f"skipped Koji candidate build for {request.package} {branch}: {exc}"
