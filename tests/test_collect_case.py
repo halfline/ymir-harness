@@ -23,10 +23,11 @@ from ymir_harness.validation import validate_case_directory
 
 @pytest.fixture(autouse=True)
 def _stub_koji_candidate_builds(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_fetch_candidate_build(package: str, branch: str):
+    def fake_fetch_candidate_build(package: str, branch: str, *, as_of: str | None = None):
         return {
             "package": package,
             "dist_git_branch": branch,
+            "replay_as_of": as_of,
             "evr": {
                 "epoch": 0,
                 "version": "1.0",
@@ -480,7 +481,19 @@ def test_collect_case_records_koji_candidate_builds(
     cases_dir = tmp_path / "benchmark_cases"
     mr_url = "https://gitlab.com/redhat/rhel/rpms/redis/-/merge_requests/1"
     patch_url = f"{mr_url}.patch"
-    calls: list[tuple[str, str]] = []
+    as_of = "2026-01-02T03:04:04.999999Z"
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "created": "2026-01-02T03:04:05Z",
+                    "body": "Output from triage agent",
+                }
+            ]
+        },
+    )
+    calls: list[tuple[str, str, str | None]] = []
 
     def fake_fetch_gitlab_mr_evidence(_gitlab_mr_url, _request, _result):
         return (
@@ -504,11 +517,12 @@ def test_collect_case_records_koji_candidate_builds(
             body=b"",
         )
 
-    def fake_fetch_candidate_build(package: str, branch: str):
-        calls.append((package, branch))
+    def fake_fetch_candidate_build(package: str, branch: str, *, as_of: str | None = None):
+        calls.append((package, branch, as_of))
         return {
             "package": package,
             "dist_git_branch": branch,
+            "replay_as_of": as_of,
             "evr": {
                 "epoch": 0,
                 "version": "6.2.20",
@@ -541,6 +555,7 @@ def test_collect_case_records_koji_candidate_builds(
             network_mode="replay_only",
             cve_ids=("CVE-2026-0001",),
             gitlab_mr_url=mr_url,
+            jira_comments_json=comments_json,
             overwrite=True,
         )
     )
@@ -549,7 +564,7 @@ def test_collect_case_records_koji_candidate_builds(
         (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
     )
 
-    assert calls == [("redis", "rhel-9.6.0"), ("redis", "rhel-9.7.0")]
+    assert calls == [("redis", "rhel-9.6.0", as_of), ("redis", "rhel-9.7.0", as_of)]
     assert manifest["koji_candidate_builds"]["redis|rhel-9.6.0"]["evr"] == {
         "epoch": 0,
         "version": "6.2.20",
