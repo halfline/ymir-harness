@@ -132,6 +132,90 @@ def test_fixture_search_results_includes_recorded_urls_and_source_remotes(
     ]
 
 
+def test_fixture_search_results_historical_replay_uses_starting_jira_state(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    jira_dir = cases_dir / "jiras" / "RHEL-12345"
+    jira_dir.mkdir(parents=True)
+    (jira_dir / "reconstruction.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "case_id": "RHEL-12345",
+                "as_of": "2026-05-31T07:21:36Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (jira_dir / "starting-issue.json").write_text(
+        json.dumps(
+            {
+                "fields": {
+                    "description": (
+                        "Redis advisory before triage: "
+                        "https://example.invalid/contemporary-advisory"
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (jira_dir / "links.json").write_text(
+        json.dumps(
+            {
+                "links": [
+                    {
+                        "object": {
+                            "title": "Future merge request",
+                            "url": "https://gitlab.example/pkg/-/merge_requests/7",
+                        }
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (jira_dir / "comments.json").write_text(
+        json.dumps(
+            [
+                {
+                    "body": (
+                        "Future patch: "
+                        "https://gitlab.example/pkg/-/commit/future.patch"
+                    )
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    web_cache = cases_dir / "web_cache" / "RHEL-12345"
+    web_cache.mkdir(parents=True)
+    (web_cache / "manifest.json").write_text(
+        json.dumps(
+            {
+                "recorded_files": {
+                    "https://gitlab.example/pkg/-/commit/scoring.patch": "patches/scoring.patch"
+                },
+                "required_urls": [
+                    "https://gitlab.example/pkg/-/commit/scoring.patch",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    results = _fixture_search_results(
+        _request(tmp_path),
+        "redis future patch merge request advisory",
+        max_results=10,
+    )
+
+    assert [result["url"] for result in results] == [
+        "https://example.invalid/contemporary-advisory",
+    ]
+
+
 def test_fixture_search_results_returns_empty_for_unknown_query(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     jira_dir = cases_dir / "jiras" / "RHEL-12345"
