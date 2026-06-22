@@ -289,6 +289,54 @@ def test_enforcement_replays_gitlab_commit_patch_from_source_cache(tmp_path: Pat
     assert "Subject: [PATCH] fix" in completed.stdout
 
 
+def test_enforcement_replays_pkgs_devel_cgit_patch_from_source_cache(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    source_repo, commit_sha = _create_git_repo(tmp_path)
+    cached_repo = tmp_path / "source_cache" / "RHEL-12345" / "upstream" / "pkg.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            "https://gitlab.com/redhat/rhel/rpms/pkg.git",
+        ],
+        check=True,
+    )
+
+    patch_url = (
+        "https://pkgs.devel.redhat.com/cgit/rpms/pkg/patch/"
+        f"?h=rhel-9.2.0&id={commit_sha}"
+    )
+    commit_url = (
+        "https://pkgs.devel.redhat.com/cgit/rpms/pkg/commit/"
+        f"?h=rhel-9.2.0&id={commit_sha}"
+    )
+    environment = {
+        **_environment(manifest_path),
+        "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
+    }
+
+    cache = ReplayCache(manifest_path, source_cache_dir=cached_repo.parent.parent)
+    assert cache.has_url(patch_url)
+    assert not cache.has_url(commit_url)
+
+    with enforce_benchmark_boundaries(environment):
+        response = urllib.request.urlopen(patch_url)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(commit_url)
+
+    assert b"Subject: [PATCH] fix" in response.read()
+    assert exc_info.value.code == 404
+
+
 def test_enforcement_returns_404_for_missing_source_cache_commit(tmp_path: Path) -> None:
     manifest_path = _write_replay_manifest(tmp_path, {})
     source_repo, _commit_sha = _create_git_repo(tmp_path)
