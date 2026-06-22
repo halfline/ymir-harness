@@ -1411,6 +1411,7 @@ def _fixture_search_results(
 def _fixture_search_candidates(request: RunCaseRequest) -> list[dict[str, str]]:
     candidates: list[dict[str, str]] = []
     seen_urls: set[str] = set()
+    historical_replay = _fixture_search_as_of(request) is not None
 
     def add(url: str, title: str, description: str) -> None:
         url = _normalize_fixture_url(url)
@@ -1420,33 +1421,40 @@ def _fixture_search_candidates(request: RunCaseRequest) -> list[dict[str, str]]:
         candidates.append({"url": url, "title": title or url, "description": description})
 
     jira_dir = request.cases_dir / "jiras" / request.case_id
-    for link in _json_list(jira_dir / "links.json", "links"):
-        obj = link.get("object") if isinstance(link, Mapping) else None
-        if not isinstance(obj, Mapping):
-            continue
-        url = _string_value(obj.get("url"))
-        title = _string_value(obj.get("title")) or url
-        add(url, title, "Known Jira remote link.")
+    if not historical_replay:
+        for link in _json_list(jira_dir / "links.json", "links"):
+            obj = link.get("object") if isinstance(link, Mapping) else None
+            if not isinstance(obj, Mapping):
+                continue
+            url = _string_value(obj.get("url"))
+            title = _string_value(obj.get("title")) or url
+            add(url, title, "Known Jira remote link.")
 
-    for path in (
-        jira_dir / "starting-issue.json",
-        jira_dir / "issue.json",
-        jira_dir / "comments.json",
-    ):
+    jira_sources = (
+        (jira_dir / "starting-issue.json",)
+        if historical_replay
+        else (
+            jira_dir / "starting-issue.json",
+            jira_dir / "issue.json",
+            jira_dir / "comments.json",
+        )
+    )
+    for path in jira_sources:
         _add_urls_from_json(path, add, "Known Jira issue content.")
     for path in sorted((jira_dir / "linked").glob("*/starting-issue.json")):
         _add_urls_from_json(path, add, "Known linked Jira issue content.")
 
-    manifest_path = request.cases_dir / "web_cache" / request.case_id / "manifest.json"
-    manifest = _read_json_object(manifest_path)
-    recorded_files = manifest.get("recorded_files")
-    if isinstance(recorded_files, Mapping):
-        for url in recorded_files:
-            add(str(url), str(url), "Recorded fixture URL.")
-    required_urls = manifest.get("required_urls")
-    if isinstance(required_urls, Sequence) and not isinstance(required_urls, str | bytes):
-        for url in required_urls:
-            add(str(url), str(url), "Required fixture URL.")
+    if not historical_replay:
+        manifest_path = request.cases_dir / "web_cache" / request.case_id / "manifest.json"
+        manifest = _read_json_object(manifest_path)
+        recorded_files = manifest.get("recorded_files")
+        if isinstance(recorded_files, Mapping):
+            for url in recorded_files:
+                add(str(url), str(url), "Recorded fixture URL.")
+        required_urls = manifest.get("required_urls")
+        if isinstance(required_urls, Sequence) and not isinstance(required_urls, str | bytes):
+            for url in required_urls:
+                add(str(url), str(url), "Required fixture URL.")
 
     source_cache = request.cases_dir / "source_cache" / request.case_id / "upstream"
     for manifest_path in sorted(source_cache.glob("*.json")):
@@ -1456,6 +1464,13 @@ def _fixture_search_candidates(request: RunCaseRequest) -> list[dict[str, str]]:
             add(url, url, "Cached source fixture.")
 
     return candidates
+
+
+def _fixture_search_as_of(request: RunCaseRequest) -> str | None:
+    reconstruction = _read_json_object(
+        request.cases_dir / "jiras" / request.case_id / "reconstruction.json"
+    )
+    return _string_value(reconstruction.get("as_of")) or None
 
 
 def _add_urls_from_json(path: Path, add: Callable[[str, str, str], None], description: str) -> None:
