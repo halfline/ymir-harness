@@ -7,6 +7,7 @@ import subprocess
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from ymir_harness import __version__
 from ymir_harness.models import (
@@ -735,15 +736,37 @@ def _actual_patch_urls_cover_expected_commits(
         return False
 
     url_commits = _recorded_patch_commits(cases_dir, case_id)
-    if not url_commits:
-        return False
-
-    actual_commits = set().union(*(url_commits.get(url, set()) for url in actual_urls))
+    actual_commits = set().union(
+        *(url_commits.get(url, set()) or _patch_url_commit_ids(url) for url in actual_urls)
+    )
     if not actual_commits:
         return False
 
-    expected_commits = set().union(*(url_commits.get(url, set()) for url in expected_urls))
+    expected_commits = set().union(
+        *(url_commits.get(url, set()) or _patch_url_commit_ids(url) for url in expected_urls)
+    )
     return bool(expected_commits) and expected_commits <= actual_commits
+
+
+def _patch_url_commit_ids(url: str) -> set[str]:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    path = parsed.path
+    if (
+        hostname == "pkgs.devel.redhat.com"
+        and path.startswith("/cgit/rpms/")
+        and path.rstrip("/").endswith("/patch")
+    ):
+        commit = (parse_qs(parsed.query).get("id") or [""])[0]
+        return {commit.lower()} if re.fullmatch(r"[0-9a-fA-F]{40}", commit) else set()
+
+    markers = ("/-/commit/", "/commit/")
+    marker = next((candidate for candidate in markers if candidate in path), None)
+    if marker is None:
+        return set()
+    commit = path.split(marker, 1)[1].strip("/").split("/", 1)[0]
+    commit = commit.removesuffix(".patch").removesuffix(".diff")
+    return {commit.lower()} if re.fullmatch(r"[0-9a-fA-F]{40}", commit) else set()
 
 
 def _recorded_patch_commits(cases_dir: Path, case_id: str) -> dict[str, set[str]]:
