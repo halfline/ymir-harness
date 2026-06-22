@@ -325,6 +325,7 @@ def write_source_fixture_from_repository(
     *,
     remote_url: str | None = None,
     name: str | None = None,
+    as_of: str | None = None,
     overwrite: bool = False,
 ) -> Path:
     remote_url = remote_url or git_remote_url(repository)
@@ -340,12 +341,19 @@ def write_source_fixture_from_repository(
     if not is_git_worktree(cases_dir):
         raise SourceFixtureError(f"cases directory is not in a git worktree: {cases_dir}")
 
-    refs = git_refs(repository)
+    refs = git_refs(repository, as_of=as_of)
     if not refs:
         raise SourceFixtureError(f"source repository has no heads or tags: {repository}")
 
     head_ref = git_symbolic_ref(repository, "HEAD")
-    head_object = git_rev_parse(repository, "HEAD")
+    refs_by_name = dict(refs)
+    head_object = (
+        refs_by_name.get(head_ref)
+        if head_ref is not None
+        else _git_rev_list_before(repository, "HEAD", as_of)
+    )
+    if head_object is None:
+        head_object = git_rev_parse(repository, "HEAD") if as_of is None else None
     _ensure_writable_submodule(
         cases_dir,
         submodule_path,
@@ -370,7 +378,9 @@ def write_source_fixture_from_repository(
         "remote_url": remote_url,
         "refs": payload_refs,
     }
-    if head_ref is not None:
+    if as_of is not None:
+        payload["replay_as_of"] = as_of
+    if head_ref is not None and head_ref in refs_by_name:
         payload["head"] = head_ref
     if head_object is not None:
         payload["head_object"] = head_object
@@ -475,11 +485,17 @@ def git_object_exists(repository: Path, obj: str) -> bool:
     return completed.returncode == 0
 
 
-def git_refs(repository: Path) -> tuple[tuple[str, str], ...]:
+def git_refs(repository: Path, *, as_of: str | None = None) -> tuple[tuple[str, str], ...]:
     completed = subprocess.run(
         git_command(
             repository,
-            ["for-each-ref", "--format=%(refname)%09%(objectname)", "refs/heads", "refs/tags"],
+            [
+                "for-each-ref",
+                "--format=%(refname)%09%(objectname)",
+                "refs/heads",
+                "refs/tags",
+                "refs/remotes/origin",
+            ],
         ),
         check=False,
         stdout=subprocess.PIPE,
@@ -491,11 +507,44 @@ def git_refs(repository: Path) -> tuple[tuple[str, str], ...]:
         detail = f": {stderr}" if stderr else ""
         raise SourceFixtureError(f"cannot list source repository refs for {repository}{detail}")
 
-    refs = []
+    refs = {}
     for line in completed.stdout.splitlines():
         ref_name, object_name = line.split("\t", 1)
-        refs.append((ref_name, object_name))
-    return tuple(refs)
+        ref_name = _source_fixture_ref_name(ref_name)
+        if ref_name is None or ref_name in refs:
+            continue
+        if as_of is not None:
+            object_name = _git_rev_list_before(repository, object_name, as_of) or ""
+            if not object_name:
+                continue
+        refs[ref_name] = object_name
+    return tuple(refs.items())
+
+
+def _source_fixture_ref_name(ref_name: str) -> str | None:
+    if ref_name == "refs/remotes/origin/HEAD":
+        return None
+    prefix = "refs/remotes/origin/"
+    if ref_name.startswith(prefix):
+        return f"refs/heads/{ref_name.removeprefix(prefix)}"
+    return ref_name
+
+
+def _git_rev_list_before(repository: Path, rev: str, as_of: str | None) -> str | None:
+    if as_of is None:
+        return git_rev_parse(repository, rev)
+    completed = subprocess.run(
+        git_command(repository, ["rev-list", "-n", "1", f"--before={as_of}", rev]),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        detail = f": {stderr}" if stderr else ""
+        raise SourceFixtureError(f"cannot resolve source repository ref {rev} as of {as_of}{detail}")
+    return completed.stdout.strip() or None
 
 
 def git_object_dir(repository: Path) -> Path:
