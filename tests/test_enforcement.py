@@ -484,6 +484,64 @@ def test_enforcement_source_cache_overrides_recorded_unadvertised_cgit_patch(
     )
 
 
+def test_enforcement_source_cache_overrides_recorded_cgit_plain_log_and_refs(
+    tmp_path: Path,
+) -> None:
+    source_repo, branch, pre_fix_ref, future_ref = _create_dated_git_repo(tmp_path)
+    plain_url = f"https://pkgs.devel.redhat.com/cgit/rpms/pkg/plain/source.c?h={branch}"
+    log_url = f"https://pkgs.devel.redhat.com/cgit/rpms/pkg/log/?h={branch}"
+    refs_url = "https://pkgs.devel.redhat.com/cgit/rpms/pkg/refs/"
+    manifest_path = _write_replay_manifest(
+        tmp_path,
+        {
+            plain_url: "captured/source.c",
+            log_url: "captured/log.html",
+            refs_url: "captured/refs.html",
+        },
+    )
+    captured_dir = manifest_path.parent / "captured"
+    captured_dir.mkdir()
+    (captured_dir / "source.c").write_text("after\n", encoding="utf-8")
+    (captured_dir / "log.html").write_text(f"log {future_ref}\n", encoding="utf-8")
+    (captured_dir / "refs.html").write_text(f"refs {future_ref}\n", encoding="utf-8")
+    cached_repo = tmp_path / "source_cache" / "RHEL-12345" / "upstream" / "pkg.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", f"--git-dir={cached_repo}", "update-ref", f"refs/heads/{branch}", pre_fix_ref],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            "https://gitlab.com/redhat/rhel/rpms/pkg.git",
+        ],
+        check=True,
+    )
+
+    environment = {
+        **_environment(manifest_path),
+        "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
+    }
+
+    with enforce_benchmark_boundaries(environment):
+        plain_body = urllib.request.urlopen(plain_url).read()
+        log_body = urllib.request.urlopen(log_url).read().decode("utf-8")
+        refs_body = urllib.request.urlopen(refs_url).read().decode("utf-8")
+
+    assert plain_body == b"before\n"
+    assert pre_fix_ref in log_body
+    assert future_ref not in log_body
+    assert pre_fix_ref in refs_body
+    assert future_ref not in refs_body
+
+
 def test_enforcement_does_not_replay_unaliased_same_path_source_cache_url(
     tmp_path: Path,
 ) -> None:
