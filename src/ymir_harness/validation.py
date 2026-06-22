@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -511,6 +512,82 @@ def _validate_web_cache_manifest(
                     path=str(recorded_path),
                 )
             )
+
+    _validate_koji_candidate_builds_as_of(cases_dir, manifest, manifest_path, result)
+
+
+def _validate_koji_candidate_builds_as_of(
+    cases_dir: Path,
+    manifest: Mapping[str, Any],
+    manifest_path: Path,
+    result: CaseValidationResult,
+) -> None:
+    as_of = _case_as_of(cases_dir, result.case_id)
+    if as_of is None:
+        return
+
+    records = manifest.get("koji_candidate_builds")
+    if not isinstance(records, Mapping):
+        return
+
+    for key, record in records.items():
+        if not isinstance(key, str) or not isinstance(record, Mapping):
+            continue
+        for section_name in ("build", "metadata"):
+            section = record.get(section_name)
+            if not isinstance(section, Mapping):
+                continue
+            for field_name in (
+                "completion_time",
+                "creation_time",
+                "start_time",
+                "promotion_time",
+            ):
+                timestamp = _parse_timestamp(section.get(field_name))
+                if timestamp is None or timestamp <= as_of:
+                    continue
+                result.issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="timestamp_leakage",
+                        message=(
+                            "Koji candidate build record is newer than case as_of: "
+                            f"{key} {section_name}.{field_name}={section.get(field_name)}"
+                        ),
+                        case_id=result.case_id,
+                        path=str(manifest_path),
+                    )
+                )
+
+
+def _case_as_of(cases_dir: Path, case_id: str) -> datetime | None:
+    reconstruction_path = cases_dir / "jiras" / case_id / "reconstruction.json"
+    try:
+        reconstruction = json.loads(reconstruction_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(reconstruction, Mapping):
+        return None
+    return _parse_timestamp(reconstruction.get("as_of"))
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = value
+    if " " in candidate and "T" not in candidate:
+        candidate = candidate.replace(" ", "T", 1)
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    if len(candidate) >= 5 and candidate[-5] in {"+", "-"} and candidate[-3] != ":":
+        candidate = f"{candidate[:-2]}:{candidate[-2:]}"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _recorded_cache_path(manifest_path: Path, recorded: str) -> Path | None:
