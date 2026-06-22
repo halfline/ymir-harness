@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -138,6 +139,56 @@ def test_capture_missing_mirrors_replay_miss_project_url(
         check=True,
     )
     assert manifest["remote_url"] == f"{url}.git"
+
+
+def test_capture_missing_mirrors_source_refs_as_of(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    source_repo, branch, pre_fix_ref, future_ref = _create_dated_git_repo(tmp_path)
+    gitconfig_path = tmp_path / "gitconfig"
+    gitconfig_path.write_text(
+        "\n".join(
+            [
+                f'[url "{source_repo.resolve().as_uri()}"]',
+                "\tinsteadOf = https://github.com/opencontainers/runc.git",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig_path))
+    run_file = tmp_path / "run.json"
+    url = "https://github.com/opencontainers/runc"
+    as_of = "2025-09-12T09:46:42Z"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(run_file, f'{{"reason": "external subprocess URL blocked: {url}"}}\n')
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            as_of=as_of,
+            overwrite=True,
+        )
+    )
+
+    assert result.failed == []
+    manifest_path = cases_dir / result.captured_source[0].relative_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["replay_as_of"] == as_of
+    assert manifest["head_object"] == pre_fix_ref
+    assert {ref["name"]: ref["object"] for ref in manifest["refs"]} == {
+        f"refs/heads/{branch}": pre_fix_ref
+    }
+    checkout = manifest_path.with_suffix("")
+    subprocess.run(
+        ["git", "-C", str(checkout), "cat-file", "-e", f"{future_ref}^{{commit}}"],
+        check=True,
+    )
 
 
 def test_capture_missing_mirrors_source_from_suite_worktree_path(
@@ -1165,6 +1216,45 @@ def _create_git_repo(tmp_path: Path) -> tuple[Path, str]:
         text=True,
     ).strip()
     return repo_path, pre_fix_ref
+
+
+def _create_dated_git_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
+    repo_path = tmp_path / "dated-source-repo"
+    repo_path.mkdir()
+    subprocess.run(["git", "-C", str(repo_path), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_path), "config", "user.email", "dev@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo_path), "config", "user.name", "Dev"], check=True)
+    branch = subprocess.check_output(
+        ["git", "-C", str(repo_path), "symbolic-ref", "--short", "HEAD"],
+        text=True,
+    ).strip()
+    _commit_with_date(repo_path, "pre-fix\n", "initial", "2025-09-01T00:00:00+0000")
+    pre_fix_ref = subprocess.check_output(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    _commit_with_date(repo_path, "future\n", "future", "2025-09-20T00:00:00+0000")
+    future_ref = subprocess.check_output(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    return repo_path, branch, pre_fix_ref, future_ref
+
+
+def _commit_with_date(repo_path: Path, text: str, message: str, date: str) -> None:
+    (repo_path / "source.c").write_text(text, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "add", "source.c"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_path), "commit", "-q", "-m", message],
+        check=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_DATE": date,
+            "GIT_COMMITTER_DATE": date,
+        },
+    )
 
 
 def _environment(manifest_path: Path) -> dict[str, str]:
