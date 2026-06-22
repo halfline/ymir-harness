@@ -223,6 +223,79 @@ def test_materialize_ymir_jira_mock_embeds_dev_status(tmp_path: Path) -> None:
     ] == [{"url": "https://gitlab.example/group/pkg/-/commit/1"}]
 
 
+def test_materialize_ymir_jira_mock_filters_dev_status_as_of(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "issue.json",
+        {
+            "id": "10001",
+            "key": "RHEL-12345",
+            "fields": {"summary": "Backport CVE fix"},
+        },
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "reconstruction.json",
+        {"as_of": "2025-09-12T09:46:42Z"},
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "dev-status.json",
+        {
+            "summary": {
+                "repository": {
+                    "overall": {"count": 1, "lastUpdated": "2025-10-02T00:00:00.000+0000"},
+                    "byInstanceType": {"GitLab": {"count": 1}},
+                },
+                "pullrequest": {
+                    "overall": {"count": 1, "lastUpdated": "2025-10-02T00:00:00.000+0000"}
+                },
+            },
+            "details": {
+                "GitLab:repository": [
+                    {
+                        "repositories": [
+                            {
+                                "url": "https://gitlab.example/group/pkg",
+                                "commits": [
+                                    {
+                                        "authorTimestamp": "2025-09-02T00:00:00.000+0000",
+                                        "url": "https://gitlab.example/group/pkg/-/commit/1",
+                                    },
+                                    {
+                                        "authorTimestamp": "2025-10-02T00:00:00.000+0000",
+                                        "url": "https://gitlab.example/group/pkg/-/commit/2",
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            },
+        },
+    )
+
+    target_dir = materialize_ymir_jira_mock(
+        cases_dir,
+        results_dir,
+        "RHEL-12345",
+        repetition=1,
+    )
+
+    payload = json.loads((target_dir / "RHEL-12345").read_text(encoding="utf-8"))
+    assert payload["dev_status"]["summary"]["repository"]["byInstanceType"]["GitLab"] == {
+        "count": 1
+    }
+    assert payload["dev_status"]["summary"]["pullrequest"]["overall"]["count"] == 0
+    assert payload["dev_status"]["details"]["GitLab:repository"][0]["repositories"][0][
+        "commits"
+    ] == [
+        {
+            "authorTimestamp": "2025-09-02T00:00:00.000+0000",
+            "url": "https://gitlab.example/group/pkg/-/commit/1",
+        }
+    ]
+
+
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
