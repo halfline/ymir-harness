@@ -2402,6 +2402,7 @@ def _write_source_cache(
     fetched: FetchedEvidence,
     result: CollectCaseResult,
 ) -> None:
+    as_of = _source_fixture_as_of(fetched)
     for source in request.source_upstream:
         _copy_into_dir(
             source,
@@ -2410,7 +2411,7 @@ def _write_source_cache(
             result=result,
         )
     for project_url in _auto_source_project_urls(request, fetched):
-        _cache_upstream_source_repo(cases_dir, request, project_url, result)
+        _cache_upstream_source_repo(cases_dir, request, project_url, result, as_of=as_of)
     for source in request.source_lookaside:
         _copy_into_dir(
             source,
@@ -2419,6 +2420,12 @@ def _write_source_cache(
             result=result,
         )
     _cache_mock_repo_lookaside_sources(cases_dir, request, result)
+
+
+def _source_fixture_as_of(fetched: FetchedEvidence) -> str | None:
+    if fetched.jira_comments is None:
+        return None
+    return derive_as_of_from_comments(fetched.jira_comments)
 
 
 def _auto_source_project_urls(
@@ -2484,6 +2491,8 @@ def _cache_upstream_source_repo(
     request: CollectCaseRequest,
     project_url: str,
     result: CollectCaseResult,
+    *,
+    as_of: str | None,
 ) -> None:
     remote_url = _git_clone_url(project_url)
     fixture_path = (
@@ -2511,6 +2520,7 @@ def _cache_upstream_source_repo(
                 request.case_id,
                 mirror,
                 remote_url=remote_url,
+                as_of=as_of,
                 overwrite=request.overwrite,
             )
         _record_written(manifest_path, result)
