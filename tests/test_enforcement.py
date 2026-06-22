@@ -542,6 +542,83 @@ def test_enforcement_source_cache_overrides_recorded_cgit_plain_log_and_refs(
     assert future_ref not in refs_body
 
 
+def test_enforcement_source_cache_overrides_recorded_gitlab_branches(
+    tmp_path: Path,
+) -> None:
+    source_repo, branch, pre_fix_ref, future_ref = _create_dated_git_repo(tmp_path)
+    project_url = "https://gitlab.com/redhat/rhel/rpms/pkg"
+    project_api_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fpkg"
+    branches_url = "https://gitlab.com/api/v4/projects/42/repository/branches"
+    manifest_path = _write_replay_manifest(
+        tmp_path,
+        {
+            project_api_url: "gitlab/project.json",
+            branches_url: "gitlab/branches.json",
+        },
+    )
+    gitlab_dir = manifest_path.parent / "gitlab"
+    gitlab_dir.mkdir()
+    (gitlab_dir / "project.json").write_text(
+        json.dumps(
+            {
+                "id": 42,
+                "path_with_namespace": "redhat/rhel/rpms/pkg",
+                "web_url": project_url,
+                "http_url_to_repo": f"{project_url}.git",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (gitlab_dir / "branches.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": branch,
+                    "commit": {
+                        "id": future_ref,
+                        "title": "future",
+                        "created_at": "2025-09-20T00:00:00+00:00",
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cached_repo = tmp_path / "source_cache" / "RHEL-12345" / "upstream" / "pkg.git"
+    cached_repo.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--mirror", "--quiet", str(source_repo), str(cached_repo)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", f"--git-dir={cached_repo}", "update-ref", f"refs/heads/{branch}", pre_fix_ref],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={cached_repo}",
+            "config",
+            "remote.origin.url",
+            f"{project_url}.git",
+        ],
+        check=True,
+    )
+
+    environment = {
+        **_environment(manifest_path),
+        "YMIR_BENCHMARK_SOURCE_CACHE_DIR": str(cached_repo.parent.parent),
+    }
+
+    with enforce_benchmark_boundaries(environment):
+        branches = json.loads(urllib.request.urlopen(branches_url).read().decode("utf-8"))
+
+    assert branches[0]["name"] == branch
+    assert branches[0]["commit"]["id"] == pre_fix_ref
+    assert branches[0]["commit"]["title"] == "initial"
+    assert future_ref not in json.dumps(branches)
+
+
 def test_enforcement_does_not_replay_unaliased_same_path_source_cache_url(
     tmp_path: Path,
 ) -> None:
