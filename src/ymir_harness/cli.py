@@ -42,6 +42,7 @@ from ymir_harness.models import (
     ALLOWED_REFERENCE_PATCH_MODES,
     ALLOWED_RESOLUTIONS,
 )
+from ymir_harness.replay import canonicalize_replay_url
 from ymir_harness.reports import write_validation_reports
 from ymir_harness.runner import (
     append_global_issues,
@@ -52,7 +53,11 @@ from ymir_harness.runner import (
 )
 from ymir_harness.provenance import parse_provenance_items
 from ymir_harness.scoring import load_json_file, score_case, score_result_directory
-from ymir_harness.source_fixtures import resolve_source_cache_ref
+from ymir_harness.source_fixtures import (
+    SourceFixtureError,
+    resolve_source_cache_ref,
+    source_cache_repo_for_object,
+)
 from ymir_harness.validation import validate_case_directory
 from ymir_harness.ymir_workflows import (
     make_ymir_backport_executor,
@@ -713,6 +718,7 @@ def _cmd_capture_missing(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(
             f"captured {len(result.captured)} missing URL(s), "
+            f"{len(result.captured_source)} source fixture(s), "
             f"{len(result.captured_git_failures)} git failure(s), "
             f"{len(result.captured_subprocesses)} subprocess replay(s); "
             f"skipped {len(result.skipped)}; failed {len(result.failed)}\n"
@@ -751,6 +757,7 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
                     "  capture: "
                     f"{len(capture['captured'])} URL(s), "
                     f"{len(capture['captured_jira'])} Jira request(s), "
+                    f"{len(capture.get('captured_source', []))} source fixture(s), "
                     f"{len(capture['captured_git_failures'])} git failure(s), "
                     f"{len(capture.get('captured_subprocesses', []))} subprocess replay(s), "
                     f"{len(capture['failed'])} failure(s)\n"
@@ -807,7 +814,11 @@ def _prepare_case(
             exit_code = run_exit_code
             break
 
-        if not report.has_failures and not _prepare_has_replay_candidates(results_dir):
+        if not report.has_failures and not _prepare_has_replay_candidates(
+            results_dir,
+            args.cases,
+            args.case_id,
+        ):
             payload["status"] = "succeeded"
             exit_code = 0
             break
@@ -835,7 +846,13 @@ def _prepare_case(
         )
         if captured_count == 0:
             if _prepare_has_only_recorded_replay_candidates(capture_result):
-                continue
+                if not report.has_failures:
+                    payload["status"] = "succeeded"
+                    exit_code = 0
+                    break
+                payload["status"] = "blocked"
+                exit_code = run_exit_code or 1
+                break
             payload["status"] = "blocked"
             exit_code = run_exit_code or 1
             break
@@ -992,13 +1009,72 @@ def _string_or_none(value: Any) -> str | None:
     return value or None
 
 
-def _prepare_has_replay_candidates(results_dir: Path) -> bool:
+def _prepare_has_replay_candidates(
+    results_dir: Path,
+    cases_dir: Path | None = None,
+    case_id: str | None = None,
+) -> bool:
     try:
-        return bool(
-            blocked_urls_from_run_path(results_dir) or jira_requests_from_run_path(results_dir)
-        )
+        blocked_urls = blocked_urls_from_run_path(results_dir)
+        recorded_urls = _prepare_recorded_replay_urls(cases_dir, case_id)
+        blocked_urls = [
+            blocked
+            for blocked in blocked_urls
+            if not _prepare_blocked_url_is_recorded(
+                blocked.url,
+                recorded_urls,
+                cases_dir,
+                case_id,
+            )
+        ]
+        return bool(blocked_urls or jira_requests_from_run_path(results_dir))
     except CaptureMissingError:
         return False
+
+
+def _prepare_blocked_url_is_recorded(
+    url: str,
+    recorded_urls: set[str],
+    cases_dir: Path | None,
+    case_id: str | None,
+) -> bool:
+    canonical_url = canonicalize_replay_url(url)
+    if canonical_url in recorded_urls:
+        return True
+    if cases_dir is None or case_id is None:
+        return False
+    try:
+        return source_cache_repo_for_object(cases_dir, case_id, canonical_url) is not None
+    except SourceFixtureError:
+        return False
+
+
+def _prepare_recorded_replay_urls(cases_dir: Path | None, case_id: str | None) -> set[str]:
+    if cases_dir is None or case_id is None:
+        return set()
+    manifest_path = cases_dir / "web_cache" / case_id / "manifest.json"
+    try:
+        manifest = load_json_file(manifest_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return set()
+
+    recorded: set[str] = set()
+    required_urls = manifest.get("required_urls")
+    if isinstance(required_urls, list):
+        recorded.update(
+            canonicalize_replay_url(url)
+            for url in required_urls
+            if isinstance(url, str) and canonicalize_replay_url(url)
+        )
+
+    recorded_files = manifest.get("recorded_files")
+    if isinstance(recorded_files, Mapping):
+        recorded.update(
+            canonicalize_replay_url(url)
+            for url in recorded_files
+            if isinstance(url, str) and canonicalize_replay_url(url)
+        )
+    return recorded
 
 
 def _prepare_capture_missing(
