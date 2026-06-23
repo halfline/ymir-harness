@@ -1662,6 +1662,50 @@ def test_build_run_report_rewrites_source_cache_git_remotes(tmp_path: Path) -> N
     assert fedora_url in blocked_urls
 
 
+def test_source_cache_directory_passes_base_env_to_materialization(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cases_dir = tmp_path / "cases"
+    results_dir = tmp_path / "results"
+    base_env = {"GITLAB_TOKEN_FILE": str(tmp_path / "gitlab-token")}
+    captured = []
+
+    def fake_materialize_case_source_cache(
+        cases_dir_arg: Path,
+        case_id: str,
+        destination: Path,
+        *,
+        git_env=None,
+    ) -> Path:
+        captured.append((cases_dir_arg, case_id, destination, git_env))
+        return destination
+
+    monkeypatch.setattr(
+        runner_module,
+        "materialize_case_source_cache",
+        fake_materialize_case_source_cache,
+    )
+
+    source_cache_dir = runner_module._source_cache_directory(
+        cases_dir,
+        results_dir,
+        "RHEL-12345",
+        2,
+        base_env=base_env,
+    )
+
+    assert source_cache_dir == results_dir / "repeat-2" / "source-cache" / "RHEL-12345"
+    assert captured == [
+        (
+            cases_dir,
+            "RHEL-12345",
+            source_cache_dir,
+            base_env,
+        )
+    ]
+
+
 def test_source_cache_git_aliases_include_related_forges() -> None:
     distgit_aliases = source_cache_git_aliases(
         "https://gitlab.com/redhat/centos-stream/rpms/qt6-qtdeclarative.git"
