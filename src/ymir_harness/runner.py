@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -49,6 +50,7 @@ MAX_COST_PER_RUN_ENV = "BENCHMARK_MAX_COST_PER_RUN"
 COST_ALERT_THRESHOLD_ENV = "BENCHMARK_COST_ALERT_THRESHOLD"
 FILESYSTEM_ISOLATION_ENV = "YMIR_HARNESS_FS_ISOLATION"
 FILESYSTEM_ISOLATION_WORKER_ENV = "YMIR_HARNESS_WORKFLOW_WORKER"
+AGENT_TIMEOUT_ENV = "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS"
 EVENT_TRACE_FIELDS = ("events", "tool_events", "tool_calls", "trace")
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
@@ -597,6 +599,20 @@ def _run_case_result(
                 reason=f"benchmark boundary blocked: {exc}",
             )
         except Exception as exc:
+            if timeout_failure(exc, request.environment):
+                return RunCaseResult(
+                    case_id=case_id,
+                    case_type=case_type,
+                    status="timeout",
+                    repetition=repetition,
+                    expected_path=expected_path if expected_path.is_file() else None,
+                    actual_path=actual_path,
+                    reason=workflow_timeout_reason(
+                        getattr(executor, "ymir_workflow", None),
+                        request.environment,
+                        exc,
+                    ),
+                )
             replay_violations = _artifact_replay_violations(results_dir, case_id, repetition)
             return RunCaseResult(
                 case_id=case_id,
@@ -606,6 +622,22 @@ def _run_case_result(
                 expected_path=expected_path if expected_path.is_file() else None,
                 actual_path=actual_path,
                 reason=_with_replay_violations(_executor_failure_reason(exc), replay_violations),
+            )
+        except BaseException as exc:
+            if not timeout_failure(exc, request.environment):
+                raise
+            return RunCaseResult(
+                case_id=case_id,
+                case_type=case_type,
+                status="timeout",
+                repetition=repetition,
+                expected_path=expected_path if expected_path.is_file() else None,
+                actual_path=actual_path,
+                reason=workflow_timeout_reason(
+                    getattr(executor, "ymir_workflow", None),
+                    request.environment,
+                    exc,
+                ),
             )
         execution_actual_path = execution.actual_path or actual_path
         score = None
@@ -671,6 +703,74 @@ def _run_case_result(
 
 def _executor_failure_reason(exc: Exception) -> str:
     return "executor failed: " + _exception_summary(exc)
+
+
+def timeout_exception(exc: BaseException, seen: set[int] | None = None) -> bool:
+    if seen is None:
+        seen = set()
+    if id(exc) in seen:
+        return False
+    seen.add(id(exc))
+    if isinstance(exc, TimeoutError):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(timeout_exception(child, seen) for child in exc.exceptions)
+    if exc.__cause__ is not None and timeout_exception(exc.__cause__, seen):
+        return True
+    if exc.__context__ is not None and timeout_exception(exc.__context__, seen):
+        return True
+    return False
+
+
+def timeout_failure(exc: BaseException, environment: Mapping[str, str]) -> bool:
+    if timeout_exception(exc):
+        return True
+    if _positive_float_environment(environment, AGENT_TIMEOUT_ENV) is None:
+        return False
+    return cancelled_exception(exc)
+
+
+def cancelled_exception(exc: BaseException, seen: set[int] | None = None) -> bool:
+    if seen is None:
+        seen = set()
+    if id(exc) in seen:
+        return False
+    seen.add(id(exc))
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(cancelled_exception(child, seen) for child in exc.exceptions)
+    if exc.__cause__ is not None and cancelled_exception(exc.__cause__, seen):
+        return True
+    if exc.__context__ is not None and cancelled_exception(exc.__context__, seen):
+        return True
+    return False
+
+
+def workflow_timeout_reason(
+    workflow: object,
+    environment: Mapping[str, str],
+    exc: BaseException,
+) -> str:
+    label = f"{workflow} workflow" if isinstance(workflow, str) and workflow else "executor"
+    timeout = _positive_float_environment(environment, AGENT_TIMEOUT_ENV)
+    if timeout is not None:
+        return f"{label} timed out after {timeout:g}s"
+    return f"{label} timed out: {_exception_summary(exc)}"
+
+
+def _positive_float_environment(
+    environment: Mapping[str, str],
+    name: str,
+) -> float | None:
+    raw_value = environment.get(name)
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 def _with_replay_violations(reason: str, replay_violations: Sequence[str]) -> str:
