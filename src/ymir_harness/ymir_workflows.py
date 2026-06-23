@@ -1115,7 +1115,6 @@ def _patch_backport_workflow_step_logging(backport_module: Any) -> None:
                     state=_workflow_state_snapshot(state),
                 )
                 raise
-            result = _recover_backport_stage_changes(step_name, state, result)
             _workflow_debug(
                 request,
                 "ymir_step_finished",
@@ -1214,63 +1213,6 @@ def _replace_release_line(text: str, release_line: str) -> str | None:
     return None
 
 
-def _recover_backport_stage_changes(step_name: Any, state: Any, result: Any) -> Any:
-    if (
-        os.getenv("DRY_RUN", "False").lower() != "true"
-        or str(step_name) != "stage_changes"
-        or str(result) != "comment_in_jira"
-    ):
-        return result
-
-    backport_result = _field_value(state, "backport_result")
-    error = _string_or_none(_field_value(backport_result, "error"))
-    if error is None or not _is_system_rpm_bindings_error(RuntimeError(error)):
-        return result
-
-    local_clone = _field_value(state, "local_clone")
-    package = _string_or_none(_field_value(state, "package"))
-    if not isinstance(local_clone, Path) or package is None:
-        return result
-
-    if not _stage_spec_patch_files_from_text(local_clone, package):
-        return result
-
-    _set_field(backport_result, "success", True)
-    _set_field(backport_result, "error", None)
-    return "commit_push_and_open_mr" if _field_value(state, "log_result") else "run_log_agent"
-
-
-def _stage_spec_patch_files_from_text(local_clone: Path, package: str) -> bool:
-    spec_path = local_clone / f"{package}.spec"
-    try:
-        spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-
-    files_to_stage = [f"{package}.spec", *_spec_patch_filenames(spec_text)]
-    completed = subprocess.run(
-        ["git", "add", "--all", *files_to_stage],
-        cwd=local_clone,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    return completed.returncode == 0
-
-
-def _spec_patch_filenames(spec_text: str) -> list[str]:
-    filenames = []
-    for line in spec_text.splitlines():
-        match = re.match(r"^\s*Patch\d*:\s*(?P<filename>\S+)", line, flags=re.IGNORECASE)
-        if match is None:
-            continue
-        filename = match.group("filename")
-        if "%" not in filename:
-            filenames.append(filename)
-    return list(dict.fromkeys(filenames))
-
-
 def _source_changelog_from_replay_patch_files(local_clone: Path, package: str) -> str | None:
     case_id = os.getenv("YMIR_BENCHMARK_CASE_ID")
     if not case_id:
@@ -1335,13 +1277,6 @@ def _source_changelog_from_patch_text(patch_text: str, package: str) -> list[str
 
 def _diff_git_mentions_file(line: str, file_name: str) -> bool:
     return f" a/{file_name} " in line and f" b/{file_name}" in line
-
-
-def _set_field(value: Any, name: str, item: Any) -> None:
-    if isinstance(value, dict):
-        value[name] = item
-    else:
-        setattr(value, name, item)
 
 
 def _patch_fixture_duckduckgo_search(agent_module: Any) -> None:
@@ -1582,155 +1517,6 @@ def _patch_no_write_candidate_build_lookup() -> None:
         specfile_module._ymir_harness_original_get_latest_candidate_build = (
             original_specfile_get_latest_candidate_build
         )
-
-    _patch_no_write_update_release(specfile_module)
-
-
-def _patch_no_write_update_release(specfile_module: Any) -> None:
-    if getattr(specfile_module, "_ymir_harness_update_release_patched", False):
-        return
-
-    original_update_release_run = specfile_module.UpdateReleaseTool._run
-
-    async def harness_update_release_run(
-        self: Any,
-        tool_input: Any,
-        options: Any,
-        context: Any,
-    ) -> Any:
-        try:
-            return await original_update_release_run(self, tool_input, options, context)
-        except Exception as exc:
-            if os.getenv("DRY_RUN", "False").lower() != "true" or not _is_system_rpm_bindings_error(
-                exc
-            ):
-                raise
-
-            spec_path = specfile_module.get_absolute_path(tool_input.spec, self)
-            _fallback_update_release_text(
-                spec_path,
-                rebase=bool(tool_input.rebase),
-                dist_git_branch=str(tool_input.dist_git_branch),
-                abandon_autorelease=bool(getattr(tool_input, "abandon_autorelease", False)),
-            )
-            return specfile_module.StringToolOutput(
-                result=f"Successfully updated release in {spec_path}"
-            )
-
-    specfile_module.UpdateReleaseTool._run = harness_update_release_run
-    specfile_module._ymir_harness_update_release_patched = True
-    specfile_module._ymir_harness_original_update_release_run = original_update_release_run
-
-
-def _is_system_rpm_bindings_error(exc: BaseException) -> bool:
-    return "rpm.expandMacro requires system RPM bindings" in str(exc)
-
-
-def _fallback_update_release_text(
-    spec_path: Path,
-    *,
-    rebase: bool,
-    dist_git_branch: str,
-    abandon_autorelease: bool,
-) -> None:
-    try:
-        lines = spec_path.read_text(encoding="utf-8").splitlines(keepends=True)
-    except OSError as exc:
-        raise RuntimeError(f"could not read spec file {spec_path}: {exc}") from exc
-
-    for index, line in enumerate(lines):
-        match = re.match(r"^(?P<prefix>\s*Release:\s*)(?P<value>.*?)(?P<newline>\r?\n?)$", line)
-        if match is None:
-            continue
-        release = match.group("value").rstrip()
-        trailing = match.group("value")[len(release) :]
-        lines[index] = (
-            match.group("prefix")
-            + _fallback_release_value(
-                release,
-                rebase=rebase,
-                dist_git_branch=dist_git_branch,
-                abandon_autorelease=abandon_autorelease,
-            )
-            + trailing
-            + match.group("newline")
-        )
-        spec_path.write_text("".join(lines), encoding="utf-8")
-        return
-
-    raise RuntimeError(f"Release field not found in {spec_path}")
-
-
-def _fallback_release_value(
-    release: str,
-    *,
-    rebase: bool,
-    dist_git_branch: str,
-    abandon_autorelease: bool,
-) -> str:
-    if _is_zstream_branch(dist_git_branch):
-        return _fallback_zstream_release_value(
-            release,
-            rebase=rebase,
-            abandon_autorelease=abandon_autorelease,
-        )
-    return _fallback_stream_release_value(release, rebase=rebase)
-
-
-def _fallback_stream_release_value(release: str, *, rebase: bool) -> str:
-    if "%autorelease" in release:
-        return "%autorelease"
-
-    prefix, dist_token, suffix = _split_release_dist_token(release)
-    match = re.match(r"^(\d+)(.*)$", prefix)
-    if match is not None:
-        prefix = str(1 if rebase else int(match.group(1)) + 1) + match.group(2)
-    else:
-        prefix += ".1"
-    if dist_token is None:
-        return prefix + "%{?dist}"
-    if re.fullmatch(r"\.\d+", suffix):
-        suffix = ""
-    return prefix + dist_token + suffix
-
-
-def _fallback_zstream_release_value(
-    release: str,
-    *,
-    rebase: bool,
-    abandon_autorelease: bool,
-) -> str:
-    if "%autorelease" in release:
-        if abandon_autorelease:
-            return f"{'0' if rebase else 1}%{{?dist}}.1"
-        prefix, dist_token, suffix = _split_release_dist_token(release)
-        if dist_token is not None and "%autorelease" in suffix and not rebase:
-            return release
-        return "0%{?dist}.%{autorelease -n}" if rebase else "1%{?dist}.%{autorelease -n}"
-
-    if rebase:
-        return "0%{?dist}.1"
-
-    prefix, dist_token, suffix = _split_release_dist_token(release)
-    if dist_token is None:
-        return release + "%{?dist}.1"
-    if match := re.fullmatch(r"\.(\d+)", suffix):
-        return prefix + dist_token + "." + str(int(match.group(1)) + 1)
-    if suffix:
-        return "1%{?dist}.1"
-    return release + ".1"
-
-
-def _split_release_dist_token(release: str) -> tuple[str, str | None, str]:
-    for token in ("%{?dist}", "%dist"):
-        if token in release:
-            prefix, suffix = release.split(token, 1)
-            return prefix, token, suffix
-    return release, None, ""
-
-
-def _is_zstream_branch(dist_git_branch: str) -> bool:
-    return bool(re.match(r"^rhel-\d+\.\d+(?:\.\d+)?$", dist_git_branch))
 
 
 def _is_package_prep_command(cmd: str | list[str]) -> bool:
