@@ -44,6 +44,10 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
             "JIRA_PASSWORD": "prod-password",
             "KEYTAB_FILE": "/etc/ymir/prod.keytab",
             "KRB5CCNAME": "/tmp/prod-krb5",
+            "ANTHROPIC_API_KEY": "prod-anthropic-key",
+            "OPENAI_API_TOKEN": "prod-openai-token",
+            "FREEDESKTOP_API_KEY": "prod-freedesktop-key",
+            "XDG_SESSION_ID": "desktop-session",
             "YMIR_BENCHMARK_CASE_ID": "RHEL-OLD",
             "BENCHMARK_MAX_ITERATIONS_OVERRIDE": "50",
             "BEEAI_MAX_ITERATIONS": "255",
@@ -73,6 +77,10 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert "JIRA_PASSWORD" not in env
     assert "KEYTAB_FILE" not in env
     assert "KRB5CCNAME" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "OPENAI_API_TOKEN" not in env
+    assert "FREEDESKTOP_API_KEY" not in env
+    assert "XDG_SESSION_ID" not in env
     assert "YMIR_BENCHMARK_CASE_ID" not in env
     assert env["JIRA_MOCK_FILES"] == str((cases_dir / "jiras").resolve())
     assert env["MOCK_REPOS_DIR"] == str((cases_dir / "mock_data").resolve())
