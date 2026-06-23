@@ -1262,6 +1262,56 @@ def test_cli_prepare_case_infers_mock_data_from_matching_source_branch(
     }
 
 
+def test_cli_prepare_case_overwrites_backport_expected_branch_from_triage_result(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    case_id = "RHEL-12345"
+    expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
+    _write_json(
+        expected_path,
+        {
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "package": "qt6-qtdeclarative",
+            "target_branch": "c10s",
+        },
+    )
+    _write_json(
+        cases_dir / "triage_results" / f"{case_id}.actual.json",
+        {
+            "case_id": case_id,
+            "data": {
+                "package": "qt6-qtdeclarative",
+            },
+            "resolution": "backport",
+            "target_branch": "rhel-10.2",
+        },
+    )
+
+    warnings: list[str] = []
+    written_paths: list[Path] = []
+    expected = cli_module._prepare_load_expected(cases_dir, case_id)
+    assert expected is not None
+    updated = cli_module._prepare_write_inferred_expected_data(
+        argparse.Namespace(
+            cases=cases_dir,
+            case_id=case_id,
+            workflow="ymir-backport",
+            overwrite=True,
+        ),
+        expected,
+        written_paths,
+        warnings,
+    )
+
+    expected_fixture = json.loads(expected_path.read_text(encoding="utf-8"))
+    assert warnings == []
+    assert written_paths == [expected_path]
+    assert updated["target_branch"] == "rhel-10.2"
+    assert expected_fixture["target_branch"] == "rhel-10.2"
+
+
 def test_cli_prepare_case_reruns_after_passing_run_captures_replay_miss(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
