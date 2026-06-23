@@ -175,16 +175,7 @@ def test_fixture_search_results_historical_replay_uses_starting_jira_state(
         encoding="utf-8",
     )
     (jira_dir / "comments.json").write_text(
-        json.dumps(
-            [
-                {
-                    "body": (
-                        "Future patch: "
-                        "https://gitlab.example/pkg/-/commit/future.patch"
-                    )
-                }
-            ]
-        ),
+        json.dumps([{"body": ("Future patch: https://gitlab.example/pkg/-/commit/future.patch")}]),
         encoding="utf-8",
     )
     web_cache = cases_dir / "web_cache" / "RHEL-12345"
@@ -329,8 +320,7 @@ def test_backport_inputs_prefer_generated_triage_result(tmp_path: Path) -> None:
                         "package": "qt6-qtdeclarative",
                         "pre_fix_ref": "abc123",
                         "remote_url": (
-                            "https://gitlab.com/redhat/centos-stream/"
-                            "rpms/qt6-qtdeclarative.git"
+                            "https://gitlab.com/redhat/centos-stream/rpms/qt6-qtdeclarative.git"
                         ),
                     }
                 ],
