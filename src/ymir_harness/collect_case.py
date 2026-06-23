@@ -2958,7 +2958,6 @@ def _backport_source_for_url(url: str) -> str | None:
 
 
 def _historical_result_patch_urls(comments: Any, *, agent: str | None = None) -> list[str]:
-    urls: list[str] = []
     for comment in _comment_values(comments):
         if not _is_result_comment(comment):
             continue
@@ -2968,8 +2967,10 @@ def _historical_result_patch_urls(comments: Any, *, agent: str | None = None) ->
         if body is None:
             continue
         body_text = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
-        urls.extend(_patch_urls_from_jira_evidence(body_text))
-    return list(dict.fromkeys(urls))
+        urls = _patch_urls_from_jira_evidence(body_text)
+        if urls:
+            return list(dict.fromkeys(urls))
+    return []
 
 
 def _result_comment_agents(comment: Mapping[str, Any]) -> set[str]:
