@@ -2574,12 +2574,20 @@ def _cache_mock_repo_lookaside_sources(
                 package=request.package,
                 branch=request.mock_repo.branch,
             )
-            if warning is not None and not _download_lookaside_sources(
-                checkout,
-                package=request.package,
-                branch=request.mock_repo.branch,
-                sources=source_entries,
-                timeout=request.http_timeout,
+            if (
+                warning is not None
+                and not _download_lookaside_sources(
+                    checkout,
+                    package=request.package,
+                    branch=request.mock_repo.branch,
+                    sources=source_entries,
+                    timeout=request.http_timeout,
+                )
+                and not _download_spec_sources(
+                    checkout,
+                    sources=source_entries,
+                    timeout=request.http_timeout,
+                )
             ):
                 result.warnings.append(
                     f"skipped lookaside source cache for {request.package}: {warning}; "
@@ -2666,6 +2674,94 @@ def _download_lookaside_sources(
         destination.write_bytes(body)
         success = True
     return success and all((checkout / source.filename).is_file() for source in sources)
+
+
+def _download_spec_sources(
+    checkout: Path,
+    *,
+    sources: Sequence[LookasideSource],
+    timeout: float,
+) -> bool:
+    source_by_filename = {source.filename: source for source in sources}
+    for spec_path in sorted(checkout.glob("*.spec")):
+        for url in _spec_source_urls(spec_path):
+            filename = unquote(Path(urlparse(url).path).name)
+            source = source_by_filename.get(filename)
+            if source is None or (checkout / filename).is_file():
+                continue
+            request = Request(url, headers={"User-Agent": "ymir-harness"})
+            try:
+                with urlopen(request, timeout=timeout) as response:
+                    body = response.read()
+            except OSError:
+                continue
+            if not _lookaside_checksum_matches(body, source):
+                continue
+            (checkout / filename).write_bytes(body)
+    return all((checkout / source.filename).is_file() for source in sources)
+
+
+def _spec_source_urls(spec_path: Path) -> tuple[str, ...]:
+    try:
+        lines = spec_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ()
+    macros = _spec_macros(lines)
+    urls: list[str] = []
+    for line in lines:
+        source_match = re.match(r"\s*Source\d*\s*:\s*(\S+)", line, re.IGNORECASE)
+        if source_match is None:
+            continue
+        url = _expand_spec_macros(source_match.group(1), macros)
+        parsed = urlparse(url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc and "%{" not in url:
+            urls.append(url)
+    return tuple(dict.fromkeys(urls))
+
+
+def _spec_macros(lines: Sequence[str]) -> dict[str, str]:
+    macros: dict[str, str] = {}
+    for line in lines:
+        tag_match = re.match(
+            r"\s*(Name|Version|Release|Epoch)\s*:\s*(\S+)",
+            line,
+            re.IGNORECASE,
+        )
+        if tag_match is not None:
+            macros[tag_match.group(1).lower()] = _expand_spec_macros(
+                tag_match.group(2),
+                macros,
+            )
+            continue
+        macro_match = re.match(r"\s*%(?:global|define)\s+(\S+)\s+(.+)", line)
+        if macro_match is not None:
+            macros[macro_match.group(1).lower()] = _expand_spec_macros(
+                macro_match.group(2).strip().split()[0],
+                macros,
+            )
+    return macros
+
+
+def _expand_spec_macros(value: str, macros: Mapping[str, str]) -> str:
+    expanded = value
+    for _ in range(10):
+        previous = expanded
+        expanded = re.sub(
+            r"%\{\?([^}:]+)(?::([^}]*))?\}",
+            lambda match: macros.get(
+                match.group(1).lower(),
+                _expand_spec_macros(match.group(2) or "", macros) if match.group(2) else "",
+            ),
+            expanded,
+        )
+        expanded = re.sub(
+            r"%\{([^}:]+)\}",
+            lambda match: macros.get(match.group(1).lower(), match.group(0)),
+            expanded,
+        )
+        if expanded == previous:
+            break
+    return expanded
 
 
 def _lookaside_base_url(branch: str) -> str | None:
