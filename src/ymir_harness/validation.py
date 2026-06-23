@@ -1296,11 +1296,26 @@ def _validate_mock_fixtures(
     expected: Mapping[str, Any] | None,
     result: CaseValidationResult,
 ) -> list[ReferencePatchTarget]:
-    expected_package = expected.get("package") if expected else None
+    triage_result = _mock_fixture_triage_result(mock_paths, result)
+    triage_data = _mapping_or_empty(triage_result.get("data")) if triage_result else {}
+    expected_package = (
+        triage_data.get("package")
+        or (triage_result or {}).get("package")
+        or (expected.get("package") if expected else None)
+    )
     expected_case_type = expected.get("case_type") if expected else None
     expected_target_branch = None
+    if triage_result:
+        expected_target_branch = (
+            triage_data.get("target_branch")
+            or triage_result.get("target_branch")
+            or triage_data.get("fix_version")
+            or triage_result.get("fix_version")
+        )
     if expected:
-        expected_target_branch = expected.get("target_branch") or expected.get("fix_version")
+        expected_target_branch = (
+            expected_target_branch or expected.get("target_branch") or expected.get("fix_version")
+        )
     packages_seen: set[str] = set()
     branches_seen: set[str] = set()
     reference_patch_targets: list[ReferencePatchTarget] = []
@@ -1390,6 +1405,24 @@ def _validate_mock_fixtures(
         )
 
     return reference_patch_targets
+
+
+def _mock_fixture_triage_result(
+    mock_paths: list[Path],
+    result: CaseValidationResult,
+) -> Mapping[str, Any] | None:
+    if not mock_paths:
+        return None
+    cases_dir = _mock_fixture_cases_dir(mock_paths[0])
+    if cases_dir is None:
+        return None
+    path = cases_dir / "triage_results" / f"{result.case_id}.actual.json"
+    loaded = _load_json_object(path, result, required=False)
+    return loaded if isinstance(loaded, Mapping) else None
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _validate_mock_repo_entry(
