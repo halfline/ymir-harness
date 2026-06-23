@@ -666,7 +666,13 @@ def _run_case_result(
         expected = _load_expected_for_policy(expected_path)
         replay_policy = _replay_policy(cases_dir, case_id, expected)
         try:
-            source_cache_dir = _source_cache_directory(cases_dir, results_dir, case_id, repetition)
+            source_cache_dir = _source_cache_directory(
+                cases_dir,
+                results_dir,
+                case_id,
+                repetition,
+                base_env=base_env,
+            )
             mock_repo_env = _mock_repo_environment(
                 cases_dir,
                 results_dir,
@@ -975,11 +981,14 @@ def _source_cache_directory(
     results_dir: Path,
     case_id: str,
     repetition: int,
+    *,
+    base_env: Mapping[str, str] | None,
 ) -> Path:
     return materialize_case_source_cache(
         cases_dir,
         case_id,
         results_dir / f"repeat-{repetition}" / "source-cache" / case_id,
+        git_env=base_env,
     )
 
 
