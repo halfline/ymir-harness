@@ -1,0 +1,13 @@
+.cache
+.git
+.git-stage-batch
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.pyc
+uv.lock
+ymir-harness-cases
+ai-workflows/*
+!ai-workflows/ymir
+!ai-workflows/ymir/**

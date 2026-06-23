@@ -1,0 +1,27 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+WORKDIR /opt/ymir-harness
+
+COPY src /opt/ymir-harness/src
+COPY VERSION pyproject.toml rhel-config.json /opt/ymir-harness/
+COPY ai-workflows/ymir /opt/ymir-harness/ai-workflows/ymir
+
+RUN python -m pip install --no-cache-dir \
+        "PyYAML>=6.0" \
+        "backoff>=2.2.1" \
+        "beautifulsoup4>=4.13.4" \
+        "copr>=1.129" \
+        "flexmock>=0.12.2" \
+        "ogr>=0.55.0" \
+        "rpm>=0.4.0" \
+        "tomli-w>=1.2.0" \
+    && chgrp -R root /opt/ymir-harness \
+    && chmod -R g+rwX /opt/ymir-harness
+
+USER beeai
+ENV PYTHONPATH=/opt/ymir-harness/src:/home/beeai
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "ymir_harness.workflow_worker"]
