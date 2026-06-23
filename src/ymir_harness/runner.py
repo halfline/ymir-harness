@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,8 @@ WORKER_IMAGE_PREFIX_ENV = "YMIR_HARNESS_WORKER_IMAGE_PREFIX"
 WORKER_BASE_IMAGE_PREFIX_ENV = "YMIR_HARNESS_WORKER_BASE_IMAGE_PREFIX"
 AGENT_TIMEOUT_ENV = "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS"
 EVENT_TRACE_FIELDS = ("events", "tool_events", "tool_calls", "trace")
+DEFAULT_WORKER_CONTAINER_VERSION = "c10s"
+WORKER_CONTAINER_VERSIONS = frozenset({"c9s", "c10s"})
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
     "MOCK_JIRA": "true",
@@ -919,6 +922,69 @@ def _execute_case_workflow(
 def _filesystem_isolation_enabled(environment: Mapping[str, str]) -> bool:
     value = environment.get(FILESYSTEM_ISOLATION_ENV, "bwrap").strip().lower()
     return value not in {"", "0", "false", "no", "none", "off", "disabled"}
+
+
+def _workflow_container_version(workflow: str, request: RunCaseRequest) -> str:
+    override = request.environment.get(WORKER_CONTAINER_VERSION_ENV)
+    if override:
+        return _validate_worker_container_version(override)
+    if workflow == "ymir-triage":
+        return DEFAULT_WORKER_CONTAINER_VERSION
+    return _branch_container_version(_request_target_branch(request))
+
+
+def _validate_worker_container_version(value: str) -> str:
+    version = value.strip().lower()
+    if version in WORKER_CONTAINER_VERSIONS:
+        return version
+    allowed = ", ".join(sorted(WORKER_CONTAINER_VERSIONS))
+    raise RuntimeError(f"unsupported {WORKER_CONTAINER_VERSION_ENV}={value!r}; expected {allowed}")
+
+
+def _request_target_branch(request: RunCaseRequest) -> str | None:
+    candidates = [
+        request.cases_dir / "triage_results" / f"{request.case_id}.actual.json",
+        request.expected_path,
+    ]
+    for path in candidates:
+        payload = _load_optional_mapping(path)
+        if payload is None:
+            continue
+        if branch := _target_branch_from_payload(payload):
+            return branch
+    return None
+
+
+def _load_optional_mapping(path: Path) -> Mapping[str, Any] | None:
+    try:
+        payload = load_json_file(path)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _target_branch_from_payload(payload: Mapping[str, Any]) -> str | None:
+    data = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
+    assert isinstance(data, Mapping)
+    for source in (data, payload):
+        for field in ("target_branch", "dist_git_branch", "fix_version"):
+            value = source.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _branch_container_version(branch: str | None) -> str:
+    if branch is None:
+        return DEFAULT_WORKER_CONTAINER_VERSION
+    normalized = branch.strip().lower()
+    if normalized in {"c8s", "c9s"}:
+        return "c9s"
+    if normalized == "c10s":
+        return "c10s"
+    if match := re.match(r"^rhel-(\d+)(?:[.\-]|$)", normalized):
+        return "c9s" if int(match.group(1)) <= 9 else "c10s"
+    return DEFAULT_WORKER_CONTAINER_VERSION
 
 
 def _execute_isolated_case_workflow(
