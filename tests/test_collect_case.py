@@ -1326,6 +1326,56 @@ def test_triage_expected_patch_urls_ignore_backport_only_result_comment(
     )
 
 
+def test_historical_expected_patch_urls_use_first_completed_agent_result(
+    tmp_path: Path,
+) -> None:
+    first_patch_url = "https://github.example/upstream/pkg/commit/first.patch"
+    later_patch_url = "https://github.example/upstream/pkg/commit/later.patch"
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": (
+                        "Output from Ymir Triage Agent:\n\n"
+                        "Ymir picked up your request and started processing."
+                    ),
+                    "author": {"displayName": "Red Hat Comaintainer Ymir Agent"},
+                },
+                {
+                    "body": (
+                        "Output from Ymir Triage Agent:\n\n"
+                        "*Resolution*: backport\n"
+                        f"*Patch URL 1*: {first_patch_url}\n"
+                    ),
+                    "author": {"displayName": "Red Hat Comaintainer Ymir Agent"},
+                },
+                {
+                    "body": (
+                        "Output from Ymir Triage Agent:\n\n"
+                        "*Resolution*: backport\n"
+                        f"*Patch URL 1*: {first_patch_url}\n"
+                        f"*Patch URL 2*: {later_patch_url}\n"
+                    ),
+                    "author": {"displayName": "Red Hat Comaintainer Ymir Agent"},
+                },
+            ]
+        },
+    )
+    request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-12345",
+        expected_basis="historical_jira_state",
+        mock_agent="triage",
+        jira_comments_json=comments_json,
+    )
+
+    assert collect_case_module._expected_patch_urls(
+        request,
+        collect_case_module.FetchedEvidence(),
+    ) == (first_patch_url,)
+
+
 def test_collect_case_scrubs_comments_after_historical_as_of(tmp_path: Path) -> None:
     issue_json = _write_json(
         tmp_path / "issue.json",
