@@ -288,15 +288,15 @@ def materialize_source_fixture_repository(
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    _run_git(["init", "--bare", str(destination)], cwd=destination.parent)
-    objects_dir = git_object_dir(submodule)
-    alternates = destination / "objects" / "info" / "alternates"
-    alternates.parent.mkdir(parents=True, exist_ok=True)
-    alternates.write_text(str(objects_dir.resolve()) + "\n", encoding="utf-8")
+    _run_git(
+        ["clone", "--bare", "--no-hardlinks", str(submodule), str(destination)],
+        cwd=destination.parent,
+    )
     _run_git(
         ["--git-dir", str(destination), "config", "remote.origin.url", fixture.remote_url],
         cwd=destination.parent,
     )
+    _delete_git_refs(destination)
 
     for ref in fixture.refs:
         _run_git(
@@ -316,6 +316,13 @@ def materialize_source_fixture_repository(
         )
 
     return destination
+
+
+def _delete_git_refs(repository: Path) -> None:
+    refs = _git_output(["--git-dir", str(repository), "for-each-ref", "--format=%(refname)"])
+    for ref_name in refs.splitlines():
+        if ref_name:
+            _run_git(["--git-dir", str(repository), "update-ref", "-d", ref_name], cwd=repository)
 
 
 def write_source_fixture_from_repository(
