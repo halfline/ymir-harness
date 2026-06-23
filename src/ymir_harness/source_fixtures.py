@@ -574,7 +574,9 @@ def _git_rev_list_before(repository: Path, rev: str, as_of: str | None) -> str |
     if completed.returncode != 0:
         stderr = completed.stderr.strip()
         detail = f": {stderr}" if stderr else ""
-        raise SourceFixtureError(f"cannot resolve source repository ref {rev} as of {as_of}{detail}")
+        raise SourceFixtureError(
+            f"cannot resolve source repository ref {rev} as of {as_of}{detail}"
+        )
     return completed.stdout.strip() or None
 
 
