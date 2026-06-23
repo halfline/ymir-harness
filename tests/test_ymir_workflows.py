@@ -263,7 +263,7 @@ def test_backport_replay_agent_wraps_uncached_upstream_clone(tmp_path: Path) -> 
         asyncio.run(
             tool._run(
                 CloneUpstreamRepositoryToolInput(
-                    repo_url="https://code.qt.io/qt/qtdeclarative.git",
+                    repo_url="https://github.com/redis/redis.git",
                     clone_directory=tmp_path / "qt6-qtdeclarative",
                 ),
                 None,
@@ -272,7 +272,9 @@ def test_backport_replay_agent_wraps_uncached_upstream_clone(tmp_path: Path) -> 
         )
 
     assert "pre-downloaded patch files" in str(exc_info.value)
-    assert "code.qt.io" not in str(exc_info.value)
+    assert "external subprocess URL blocked: https://github.com/redis/redis.git" in str(
+        exc_info.value
+    )
 
 
 def test_backport_inputs_prefer_generated_triage_result(tmp_path: Path) -> None:
