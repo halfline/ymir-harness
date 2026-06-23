@@ -1205,6 +1205,11 @@ def test_build_run_report_materializes_https_mock_repo_from_source_fixture_manif
     assert branch_ref == pre_fix_ref
     assert source_cache_dir.is_relative_to(results_dir)
     assert materialized_repo.is_dir()
+    assert not (materialized_repo / "objects" / "info" / "alternates").exists()
+    subprocess.run(
+        ["git", "--git-dir", str(materialized_repo), "cat-file", "-e", f"{pre_fix_ref}^{{commit}}"],
+        check=True,
+    )
     assert not (cases_dir / "source_cache" / "RHEL-12345" / "upstream" / "dnsmasq.git").exists()
 
 
