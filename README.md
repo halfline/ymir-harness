@@ -25,7 +25,8 @@ Prerequisites:
 - `uv`
 - initialized submodules
 - model credentials only when running live Ymir workflows
-- Jira and GitLab read tokens only when collecting or refreshing fixture evidence
+- Jira and GitLab read tokens only when collecting evidence or materializing
+  private fixture source submodules
 
 ```bash
 git submodule update --init --recursive
@@ -138,6 +139,13 @@ when `collect-case`, `prepare-case`, or `capture-missing` fetches GitLab merge
 request metadata, commits, changes, patches, or other recorded GitLab responses.
 Use `--gitlab-token-env NAME` if the token is stored in a different environment
 variable.
+
+Benchmark runs also use GitLab credentials to initialize private source fixture
+submodules on demand. Set `GITLAB_TOKEN`, `GITLAB_API_TOKEN`, or one of
+`GITLAB_TOKEN_FILE`, `GITLAB_API_TOKEN_FILE`, or `YMIR_GITLAB_TOKEN_FILE` before
+`run` or `prepare-case`. The harness passes the credential to the individual Git
+command through temporary environment-backed config and does not write it into
+repository config.
 
 For GitLab.com, create a personal access token from your avatar menu:
 `Edit profile` -> `Access` -> `Personal access tokens` -> `Generate token`.
