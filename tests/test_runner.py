@@ -499,6 +499,45 @@ def _bwrap_pairs(command: list[str], option: str) -> list[tuple[str, str]]:
     ]
 
 
+def test_workflow_container_version_follows_target_branch(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    _write_json(
+        expected_path,
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "target_branch": "rhel-9.8.0",
+        },
+    )
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="cve_backport",
+        repetition=1,
+        cases_dir=cases_dir,
+        results_dir=tmp_path / "results",
+        expected_path=expected_path,
+        actual_path=tmp_path / "results" / "actual.json",
+        environment={},
+        variant="baseline",
+        features=(),
+    )
+
+    assert runner_module._workflow_container_version("ymir-backport", request) == "c9s"
+
+    _write_json(
+        expected_path,
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "target_branch": "rhel-10.2",
+        },
+    )
+
+    assert runner_module._workflow_container_version("ymir-backport", request) == "c10s"
+    assert runner_module._workflow_container_version("ymir-triage", request) == "c10s"
+
+
 def test_build_run_report_fails_invalid_structured_jira(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
