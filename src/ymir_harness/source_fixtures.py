@@ -159,15 +159,17 @@ def find_source_cache_repository(
     *,
     obj: str | None = None,
 ) -> Path | None:
-    expected_aliases = set(source_cache_git_aliases(remote_url))
-    for repository in source_cache_repositories(source_cache_dir):
-        cached_remote = git_remote_url(repository)
-        if cached_remote is None:
-            continue
-        if expected_aliases & set(source_cache_git_aliases(cached_remote)):
-            if obj is not None and not git_object_exists(repository, obj):
+    repositories = source_cache_repositories(source_cache_dir)
+    for exact in (True, False):
+        expected_aliases = _source_cache_match_aliases(remote_url, exact=exact)
+        for repository in repositories:
+            cached_remote = git_remote_url(repository)
+            if cached_remote is None:
                 continue
-            return repository
+            if expected_aliases & _source_cache_match_aliases(cached_remote, exact=exact):
+                if obj is not None and not git_object_exists(repository, obj):
+                    continue
+                return repository
     return None
 
 
@@ -179,20 +181,27 @@ def find_source_fixture_repository(
     ref_name: str | None = None,
     obj: str | None = None,
 ) -> SourceFixtureRepository | None:
-    expected_aliases = set(source_cache_git_aliases(remote_url))
-    for repository in load_source_fixture_repositories(cases_dir, case_id):
-        if expected_aliases & set(source_cache_git_aliases(repository.remote_url)):
-            if ref_name is not None and repository.ref_object(ref_name) is None:
-                continue
-            if obj is not None and not _source_fixture_has_object(
-                cases_dir,
-                case_id,
-                repository,
-                obj,
-            ):
-                continue
-            return repository
+    repositories = load_source_fixture_repositories(cases_dir, case_id)
+    for exact in (True, False):
+        expected_aliases = _source_cache_match_aliases(remote_url, exact=exact)
+        for repository in repositories:
+            if expected_aliases & _source_cache_match_aliases(repository.remote_url, exact=exact):
+                if ref_name is not None and repository.ref_object(ref_name) is None:
+                    continue
+                if obj is not None and not _source_fixture_has_object(
+                    cases_dir,
+                    case_id,
+                    repository,
+                    obj,
+                ):
+                    continue
+                return repository
     return None
+
+
+def _source_cache_match_aliases(remote_url: str, *, exact: bool) -> set[str]:
+    aliases = remote_git_aliases(remote_url) if exact else source_cache_git_aliases(remote_url)
+    return set(aliases)
 
 
 def resolve_source_cache_ref(
@@ -398,14 +407,29 @@ def write_source_fixture_from_repository(
 
 
 def source_cache_git_rewrites(source_cache_dir: Path) -> tuple[tuple[str, str], ...]:
-    rewrites = []
-    for repository in source_cache_repositories(source_cache_dir):
+    repositories = source_cache_repositories(source_cache_dir)
+    exact_rewrites: dict[str, str] = {}
+    fallback_rewrites: dict[str, str] = {}
+
+    for repository in repositories:
         remote_url = git_remote_url(repository)
         if remote_url is None:
             continue
         local_url = repository.resolve().as_uri()
-        rewrites.extend((alias, local_url) for alias in source_cache_git_aliases(remote_url))
-    return tuple(dict.fromkeys(rewrites))
+        for alias in remote_git_aliases(remote_url):
+            exact_rewrites.setdefault(alias, local_url)
+
+    for repository in repositories:
+        remote_url = git_remote_url(repository)
+        if remote_url is None:
+            continue
+        local_url = repository.resolve().as_uri()
+        for alias in source_cache_git_aliases(remote_url):
+            if alias in exact_rewrites:
+                continue
+            fallback_rewrites.setdefault(alias, local_url)
+
+    return tuple(exact_rewrites.items()) + tuple(fallback_rewrites.items())
 
 
 def source_cache_git_aliases(remote_url: str) -> tuple[str, ...]:
