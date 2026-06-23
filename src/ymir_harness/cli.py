@@ -895,6 +895,7 @@ def _prepare_complete_existing_case(args: argparse.Namespace) -> dict[str, objec
 
     written_paths: list[Path] = []
     warnings: list[str] = []
+    expected = _prepare_write_inferred_expected_data(args, expected, written_paths, warnings)
     _prepare_write_inferred_mock_data(args, expected, written_paths, warnings)
     if not written_paths and not warnings:
         return None
@@ -914,6 +915,34 @@ def _prepare_load_expected(cases_dir: Path, case_id: str) -> Mapping[str, Any] |
     loaded = load_json_file(path)
     return loaded if isinstance(loaded, Mapping) else None
 
+
+def _prepare_write_inferred_expected_data(
+    args: argparse.Namespace,
+    expected: Mapping[str, Any],
+    written_paths: list[Path],
+    warnings: list[str],
+) -> Mapping[str, Any]:
+    requested_branch = _prepare_mock_requested_branch(args, expected)
+    current_branch = _string_or_none(expected.get("target_branch"))
+    if (
+        args.workflow != "ymir-backport"
+        or requested_branch is None
+        or requested_branch == current_branch
+    ):
+        return expected
+    if not args.overwrite:
+        warnings.append(
+            "expected fixture target_branch differs from generated triage result "
+            f"({current_branch!r} != {requested_branch!r}); rerun with --overwrite to update it"
+        )
+        return expected
+
+    updated = dict(expected)
+    updated["target_branch"] = requested_branch
+    expected_path = args.cases / "expected" / f"{args.case_id}.expected.json"
+    expected_path.write_text(json.dumps(updated, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    written_paths.append(expected_path)
+    return updated
 
 def _prepare_write_inferred_mock_data(
     args: argparse.Namespace,
@@ -978,6 +1007,36 @@ def _prepare_write_inferred_mock_data(
     mock_path.parent.mkdir(parents=True, exist_ok=True)
     mock_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     written_paths.append(mock_path)
+
+
+def _prepare_mock_requested_branch(
+    args: argparse.Namespace,
+    expected: Mapping[str, Any],
+) -> str | None:
+    triage_result = _prepare_load_backport_triage_result(args)
+    triage_data = _mapping_or_empty(triage_result.get("data")) if triage_result else {}
+    return _string_or_none(
+        triage_data.get("target_branch")
+        or (triage_result or {}).get("target_branch")
+        or triage_data.get("fix_version")
+        or (triage_result or {}).get("fix_version")
+        or expected.get("target_branch")
+        or expected.get("fix_version")
+    )
+
+
+def _prepare_load_backport_triage_result(args: argparse.Namespace) -> Mapping[str, Any] | None:
+    if args.workflow != "ymir-backport":
+        return None
+    path = args.cases / "triage_results" / f"{args.case_id}.actual.json"
+    if not path.is_file():
+        return None
+    loaded = load_json_file(path)
+    return loaded if isinstance(loaded, Mapping) else None
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _prepare_centos_stream_branch(expected_branch: str) -> str | None:
