@@ -318,7 +318,11 @@ def _unsafe_operations(actual: Mapping[str, Any]) -> Any:
 
 
 def _replay_violations(actual: Mapping[str, Any]) -> Any:
-    return _actual_result_field(actual, "replay_violations")
+    violations = _normalize_list(_actual_result_field(actual, "replay_violations"))
+    violations.extend(
+        message for message in _replay_error_messages(actual) if message not in violations
+    )
+    return violations
 
 
 def _workflow_error(actual: Mapping[str, Any]) -> str | None:
@@ -335,6 +339,29 @@ def _workflow_error(actual: Mapping[str, Any]) -> str | None:
             if isinstance(value, str) and value:
                 return value
     return None
+
+
+def _replay_error_messages(actual: Mapping[str, Any]) -> list[str]:
+    messages: list[str] = []
+    data = actual.get("data")
+    for payload in (actual, data if isinstance(data, Mapping) else {}):
+        for field in (
+            "error",
+            "backport_error",
+            "rebase_error",
+            "rebuild_error",
+            "triage_error",
+            "build_error",
+        ):
+            value = payload.get(field)
+            if isinstance(value, str) and _is_replay_error_message(value):
+                messages.append(value)
+    return messages
+
+
+def _is_replay_error_message(message: str) -> bool:
+    lowered = message.lower()
+    return "replay miss" in lowered or "replay cache" in lowered
 
 
 def _unrelated_source_changes(actual: Mapping[str, Any]) -> Any:
