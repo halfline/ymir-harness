@@ -897,7 +897,11 @@ def blocked_urls_from_run_path(run_path: Path) -> list[BlockedUrl]:
     if run_path.is_file():
         paths = [run_path]
     elif run_path.is_dir():
-        paths = sorted(path for path in run_path.rglob("*") if _looks_like_text_artifact(path))
+        paths = sorted(
+            path
+            for path in run_path.rglob("*")
+            if _looks_like_text_artifact(path) and not _is_worker_case_view_artifact(run_path, path)
+        )
     else:
         raise CaptureMissingError(f"run path does not exist: {run_path}")
 
@@ -917,6 +921,17 @@ def blocked_urls_from_run_path(run_path: Path) -> list[BlockedUrl]:
 
 def _looks_like_text_artifact(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in TEXT_SUFFIXES
+
+
+def _is_worker_case_view_artifact(root: Path, path: Path) -> bool:
+    try:
+        relative_parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    for index in range(len(relative_parts) - 1):
+        if relative_parts[index : index + 2] == ("workflow-worker", "cases-view"):
+            return True
+    return False
 
 
 def _clean_url(url: str) -> str:
