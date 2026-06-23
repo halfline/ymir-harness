@@ -1146,8 +1146,7 @@ def test_score_result_directory_accepts_equivalent_pkgs_devel_patch_url(
     commit_sha = "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
     expected_url = f"https://gitlab.com/redhat/rhel/rpms/redis/-/commit/{commit_sha}.patch"
     actual_url = (
-        "https://pkgs.devel.redhat.com/cgit/rpms/redis/patch/"
-        f"?h=rhel-9.8.0&id={commit_sha}"
+        f"https://pkgs.devel.redhat.com/cgit/rpms/redis/patch/?h=rhel-9.8.0&id={commit_sha}"
     )
 
     _write_json(
