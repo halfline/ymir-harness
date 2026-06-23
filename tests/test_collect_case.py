@@ -2091,6 +2091,77 @@ def test_collect_case_caches_lookaside_sources_from_prefixed_mock_repo(
     assert result.warnings == []
 
 
+def test_collect_case_caches_lookaside_sources_from_spec_source_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_body = b"source archive\n"
+    archive_hash = hashlib.sha512(archive_body).hexdigest()
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    (source_repo / "redis.spec").write_text(
+        "\n".join(
+            [
+                "Name: redis",
+                "Version: 6.2.20",
+                "Source0: https://downloads.example.invalid/%{name}-%{version}.tar.gz",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (source_repo / "sources").write_text(
+        f"SHA512 (redis-6.2.20.tar.gz) = {archive_hash}\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source_repo), "add", "redis.spec", "sources"], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-q", "-m", "add sources"], check=True)
+    pre_fix_ref = subprocess.check_output(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    monkeypatch.setattr(
+        collect_case_module,
+        "_run_package_sources_command",
+        lambda *args, **kwargs: "rhpkg is not installed",
+    )
+    seen_urls: list[str] = []
+    source_url = "https://downloads.example.invalid/redis-6.2.20.tar.gz"
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen({source_url: archive_body}, seen_urls),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.6.0",
+            mock_repo=MockRepoInput(
+                remote_url="https://gitlab.example/group/redis.git",
+                source_url=str(source_repo),
+                pre_fix_ref=pre_fix_ref,
+                branch="rhel-9.6.0",
+            ),
+        )
+    )
+
+    cached_archive = (
+        tmp_path
+        / "benchmark_cases"
+        / "source_cache"
+        / "RHEL-12345"
+        / "lookaside"
+        / "redis-6.2.20.tar.gz"
+    )
+    assert cached_archive.read_bytes() == archive_body
+    assert source_url in seen_urls
+    assert result.warnings == []
+
+
 def test_collect_case_caches_gitlab_project_source_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2221,6 +2292,8 @@ def _fake_urlopen(
         body = responses[url]
         if isinstance(body, BaseException):
             raise body
+        if isinstance(body, bytes):
+            return _FakeHttpResponse(body)
         if not isinstance(body, str):
             body = json.dumps(body)
         return _FakeHttpResponse(body.encode("utf-8"))
