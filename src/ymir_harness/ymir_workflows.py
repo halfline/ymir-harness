@@ -2135,8 +2135,14 @@ def _backport_triage_dist_git_branch(
     *,
     package: str | None,
 ) -> str | None:
-    return _mock_repo_branch(request, package=package) or _string_or_none(
-        triage_result.get("target_branch")
+    data = triage_result.get("data") if isinstance(triage_result.get("data"), Mapping) else {}
+    assert isinstance(data, Mapping)
+    return (
+        _string_or_none(data.get("target_branch"))
+        or _string_or_none(triage_result.get("target_branch"))
+        or _string_or_none(data.get("fix_version"))
+        or _string_or_none(triage_result.get("fix_version"))
+        or _mock_repo_branch(request, package=package)
     )
 
 
