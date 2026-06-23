@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -71,7 +72,7 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert env["GOOGLE_VERTEX_LOCATION"] == "global"
     assert env["BENCHMARK_MAX_ITERATIONS_OVERRIDE"] == "50"
     assert env["BEEAI_MAX_ITERATIONS"] == "50"
-    assert env["YMIR_HARNESS_FS_ISOLATION"] == "bwrap"
+    assert env["YMIR_HARNESS_FS_ISOLATION"] == "podman"
     assert "GITLAB_TOKEN" not in env
     assert "UV_PUBLISH_TOKEN" not in env
     assert "JIRA_PASSWORD" not in env
@@ -107,6 +108,34 @@ def test_build_no_write_environment_normalizes_vertex_claude_env(tmp_path: Path)
     assert env["CLOUD_ML_REGION"] == "global"
     assert env["GOOGLE_VERTEX_LOCATION"] == "global"
     assert "GOOGLE_CLOUD_PROJECT" not in env
+
+
+def test_isolated_worker_environment_omits_build_only_and_sensitive_values(
+    tmp_path: Path,
+) -> None:
+    env = runner_module._isolated_worker_environment(
+        {
+            "CHAT_MODEL": "vertexai:claude-sonnet-4-6",
+            "YMIR_BENCHMARK_CASE_ID": "RHEL-12345",
+            "INTERNAL_REPO_URL_C9S": "https://repo.example/c9s",
+            "EXTRA_PACKAGES": "python3-rpm",
+            "YMIR_HARNESS_WORKER_IMAGE": "localhost/custom-worker:test",
+            "ANTHROPIC_API_KEY": "prod-anthropic-key",
+            "OPENAI_API_TOKEN": "prod-openai-token",
+        },
+        tmp_path / "worker-home",
+        container_version="c9s",
+    )
+
+    assert env["CHAT_MODEL"] == "vertexai:claude-sonnet-4-6"
+    assert env["YMIR_BENCHMARK_CASE_ID"] == "RHEL-12345"
+    assert env["YMIR_HARNESS_CONTAINER_VERSION"] == "c9s"
+    assert env["CONTAINER_VERSION"] == "c9s"
+    assert "INTERNAL_REPO_URL_C9S" not in env
+    assert "EXTRA_PACKAGES" not in env
+    assert "YMIR_HARNESS_WORKER_IMAGE" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "OPENAI_API_TOKEN" not in env
 
 
 def test_build_no_write_environment_records_case_id(tmp_path: Path) -> None:
@@ -441,12 +470,12 @@ def test_build_run_report_isolates_real_ymir_executor_by_default(
 
     assert len(isolated_calls) == 1
     assert isolated_calls[0][0] == "ymir-triage"
-    assert isolated_calls[0][1].environment["YMIR_HARNESS_FS_ISOLATION"] == "bwrap"
+    assert isolated_calls[0][1].environment["YMIR_HARNESS_FS_ISOLATION"] == "podman"
     assert report.entries[0].status == "passed"
     assert report.entries[0].reason == "isolated workflow completed"
 
 
-def test_filesystem_isolation_command_binds_harness_without_parent(
+def test_filesystem_isolation_command_runs_container_without_harness_bind(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -459,7 +488,7 @@ def test_filesystem_isolation_command_binds_harness_without_parent(
     result_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.result.json"
     results_dir.mkdir(parents=True)
     worker_home.mkdir(parents=True)
-    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
 
     request = runner_module.RunCaseRequest(
         case_id="RHEL-12345",
@@ -479,24 +508,19 @@ def test_filesystem_isolation_command_binds_harness_without_parent(
         request_path=request_path,
         result_path=result_path,
         worker_home=worker_home,
+        worker_image="localhost/ymir-harness-worker:c10s",
     )
 
-    ro_binds = _bwrap_pairs(command, "--ro-bind")
-    rw_binds = _bwrap_pairs(command, "--bind")
+    volumes = _option_values(command, "--volume")
     harness_root = runner_module._harness_root()
-    assert (str(harness_root), str(harness_root)) in ro_binds
-    assert (str(harness_root.parent), str(harness_root.parent)) not in ro_binds
-    assert (str(harness_root.parent), str(harness_root.parent)) not in rw_binds
-    assert (str(results_dir), str(results_dir)) in rw_binds
-    assert "--unshare-pid" in command
-
-
-def _bwrap_pairs(command: list[str], option: str) -> list[tuple[str, str]]:
-    return [
-        (command[index + 1], command[index + 2])
-        for index, item in enumerate(command[:-2])
-        if item == option
-    ]
+    assert command[:4] == ["podman", "run", "--rm", "--pull=never"]
+    assert command[command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+    assert "localhost/ymir-harness-worker:c10s" in command
+    assert f"{cases_dir}:{cases_dir}:ro" in volumes
+    assert f"{results_dir}:{results_dir}:rw" in volumes
+    assert not any(str(harness_root) in volume for volume in volumes)
+    assert not any(str(harness_root.parent) in volume for volume in volumes)
+    assert "--unshare-pid" not in command
 
 
 def test_workflow_container_version_follows_target_branch(tmp_path: Path) -> None:
@@ -600,6 +624,10 @@ def test_ensure_worker_container_image_allows_debug_override(monkeypatch) -> Non
 
     assert image == "localhost/custom-worker:debug"
     assert commands == []
+
+
+def _option_values(command: list[str], option: str) -> list[str]:
+    return [command[index + 1] for index, item in enumerate(command[:-1]) if item == option]
 
 
 def test_build_run_report_fails_invalid_structured_jira(tmp_path: Path) -> None:
