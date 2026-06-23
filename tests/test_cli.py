@@ -1153,7 +1153,7 @@ def test_cli_prepare_case_writes_existing_triage_mock_data(
     monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
     monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
     monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
-    monkeypatch.setattr(cli_module, "_prepare_has_replay_candidates", lambda _results_dir: False)
+    monkeypatch.setattr(cli_module, "_prepare_has_replay_candidates", lambda *_args: False)
     monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
 
     assert (
@@ -1335,7 +1335,7 @@ def test_cli_prepare_case_reruns_after_passing_run_captures_replay_miss(
     monkeypatch.setattr(
         cli_module,
         "_prepare_has_replay_candidates",
-        lambda _results_dir: has_replay_candidates.pop(0),
+        lambda *_args: has_replay_candidates.pop(0),
     )
     monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
 
@@ -1371,7 +1371,7 @@ def test_cli_prepare_case_reruns_after_passing_run_captures_replay_miss(
     assert "capture" not in output["iterations"][1]
 
 
-def test_cli_prepare_case_reruns_after_recorded_replay_candidate(
+def test_cli_prepare_case_succeeds_after_recorded_replay_candidate(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -1379,7 +1379,7 @@ def test_cli_prepare_case_reruns_after_recorded_replay_candidate(
     cases_dir = tmp_path / "benchmark_cases"
     capture_requests = []
     run_ids = []
-    has_replay_candidates = [True, False]
+    has_replay_candidates = [True]
 
     def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
         return ValidationReport(
@@ -1433,7 +1433,7 @@ def test_cli_prepare_case_reruns_after_recorded_replay_candidate(
     monkeypatch.setattr(
         cli_module,
         "_prepare_has_replay_candidates",
-        lambda _results_dir: has_replay_candidates.pop(0),
+        lambda *_args: has_replay_candidates.pop(0),
     )
     monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
 
@@ -1459,7 +1459,7 @@ def test_cli_prepare_case_reruns_after_recorded_replay_candidate(
 
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "succeeded"
-    assert run_ids == ["baseline-RHEL-12345-iter-1", "baseline-RHEL-12345-iter-2"]
+    assert run_ids == ["baseline-RHEL-12345-iter-1"]
     assert len(capture_requests) == 1
     assert output["iterations"][0]["capture"]["skipped"] == [
         {
@@ -1467,7 +1467,6 @@ def test_cli_prepare_case_reruns_after_recorded_replay_candidate(
             "url": "https://gitlab.example/project/raw/c9s/package.spec",
         }
     ]
-    assert "capture" not in output["iterations"][1]
 
 
 def test_prepare_recorded_replay_candidate_supersedes_earlier_skip(tmp_path: Path) -> None:
@@ -1496,6 +1495,80 @@ def test_prepare_recorded_replay_candidate_supersedes_earlier_skip(tmp_path: Pat
     )
 
     assert cli_module._prepare_has_only_recorded_replay_candidates(result)
+
+
+def test_prepare_has_replay_candidates_ignores_recorded_urls(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_dir = tmp_path / "run"
+    manifest_path = cases_dir / "web_cache" / "RHEL-12345" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "recorded_files": {
+                    "https://example.invalid/recorded.spec": "captured/recorded.spec"
+                },
+                "required_urls": ["https://example.invalid/recorded.spec"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    log_path = run_dir / "repeat-1" / "workflow-trace" / "RHEL-12345.stdout.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text(
+        "replay miss: URL is not recorded in replay cache: https://example.invalid/recorded.spec\n",
+        encoding="utf-8",
+    )
+
+    assert not cli_module._prepare_has_replay_candidates(
+        run_dir,
+        cases_dir,
+        "RHEL-12345",
+    )
+
+
+def test_prepare_has_replay_candidates_ignores_recorded_source_cache_repo(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    case_id = "RHEL-12345"
+    run_dir = tmp_path / "run"
+    blocked_url = "https://github.com/example/project.git"
+    log_path = run_dir / "repeat-1" / "workflow-trace" / f"{case_id}.stdout.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text(
+        f"external subprocess URL blocked: {blocked_url}\n",
+        encoding="utf-8",
+    )
+
+    assert cli_module._prepare_has_replay_candidates(run_dir, cases_dir, case_id)
+
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "-C", str(source_repo), "init", "-q"], check=True)
+    (source_repo / "source.c").write_text("source\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "source.c"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    _write_source_fixture(cases_dir, tmp_path, case_id, source_repo, blocked_url)
+
+    assert not cli_module._prepare_has_replay_candidates(run_dir, cases_dir, case_id)
 
 
 def test_cli_prepare_case_blocks_passing_run_with_uncaptured_replay_miss(
@@ -1547,7 +1620,7 @@ def test_cli_prepare_case_blocks_passing_run_with_uncaptured_replay_miss(
     monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
     monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
     monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
-    monkeypatch.setattr(cli_module, "_prepare_has_replay_candidates", lambda _results_dir: True)
+    monkeypatch.setattr(cli_module, "_prepare_has_replay_candidates", lambda *_args: True)
     monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
 
     assert (
