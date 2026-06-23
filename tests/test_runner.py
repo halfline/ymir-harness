@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -1792,6 +1793,119 @@ def test_build_run_report_records_executor_exception_group_details(tmp_path: Pat
         "[RuntimeError: inner stopped]"
     )
 
+
+def test_build_run_report_records_timeout_exception_groups_as_timeout(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        raise ExceptionGroup("workflow failed", [TimeoutError()])
+
+    executor.ymir_workflow = "ymir-backport"
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+        base_env={"YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "300"},
+    )
+
+    assert report.has_failures
+    assert report.summary()["timeout"] == 1
+    entry = report.entries[0]
+    assert entry.status == "timeout"
+    assert entry.reason == "ymir-backport workflow timed out after 300s"
+
+
+def test_build_run_report_records_chained_timeout_groups_as_timeout(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        raise RuntimeError("framework wrapper") from ExceptionGroup(
+            "workflow failed",
+            [TimeoutError()],
+        )
+
+    executor.ymir_workflow = "ymir-backport"
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+        base_env={"YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "300"},
+    )
+
+    entry = report.entries[0]
+    assert entry.status == "timeout"
+    assert entry.reason == "ymir-backport workflow timed out after 300s"
+
+
+def test_build_run_report_records_configured_timeout_cancellations_as_timeout(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(cases_dir, "RHEL-12345")
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="not_affected",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        raise asyncio.CancelledError()
+
+    executor.ymir_workflow = "ymir-backport"
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+        base_env={"YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "10"},
+    )
+
+    assert report.has_failures
+    assert report.summary()["timeout"] == 1
+    entry = report.entries[0]
+    assert entry.status == "timeout"
+    assert entry.reason == "ymir-backport workflow timed out after 10s"
 
 def _write_expected(cases_dir: Path, case_id: str, data: object | None = None) -> None:
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
