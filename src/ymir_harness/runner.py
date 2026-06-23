@@ -1163,9 +1163,7 @@ def _execute_isolated_case_workflow(
         json.dumps(
             {
                 "workflow": workflow,
-                "request": _request_payload(
-                    _request_with_environment(request, worker_environment)
-                ),
+                "request": _request_payload(_request_with_environment(request, worker_environment)),
             },
             indent=2,
             sort_keys=True,
@@ -1245,7 +1243,9 @@ def _google_application_credentials_path(environment: Mapping[str, str]) -> Path
     candidates = [Path(explicit).expanduser()] if explicit else []
     home = os.environ.get("HOME")
     if home:
-        candidates.append(Path(home) / ".config" / "gcloud" / "application_default_credentials.json")
+        candidates.append(
+            Path(home) / ".config" / "gcloud" / "application_default_credentials.json"
+        )
 
     for candidate in candidates:
         try:
@@ -1552,8 +1552,7 @@ def request_from_payload(payload: Mapping[str, Any]) -> RunCaseRequest:
         expected_path=Path(str(payload["expected_path"])),
         actual_path=Path(str(payload["actual_path"])),
         environment={
-            str(key): str(value)
-            for key, value in dict(payload.get("environment") or {}).items()
+            str(key): str(value) for key, value in dict(payload.get("environment") or {}).items()
         },
         variant=str(payload["variant"]),
         features=tuple(str(feature) for feature in payload.get("features") or ()),

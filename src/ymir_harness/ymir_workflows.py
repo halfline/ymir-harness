@@ -1028,7 +1028,9 @@ def _replay_safe_clone_upstream_tool(tool: Any, *, request: RunCaseRequest) -> A
 
         async def _run(self, tool_input: Any, options: Any, context: Any) -> Any:
             source_cache = request.environment.get("YMIR_BENCHMARK_SOURCE_CACHE_DIR")
-            if source_cache and find_source_cache_repository(Path(source_cache), tool_input.repo_url):
+            if source_cache and find_source_cache_repository(
+                Path(source_cache), tool_input.repo_url
+            ):
                 return await super()._run(tool_input, options, context)
             raise ToolError(
                 "Upstream repository is not available in the harness source cache. "
@@ -1876,7 +1878,9 @@ def _backport_inputs_from_triage_result(
         ),
         "upstream_patches": upstream_patches,
         "jira_issue": _string_or_none(
-            data.get("jira_issue") or triage_result.get("jira_issue") or triage_result.get("case_id")
+            data.get("jira_issue")
+            or triage_result.get("jira_issue")
+            or triage_result.get("case_id")
         )
         or request.case_id,
     }
@@ -1897,7 +1901,9 @@ def _backport_inputs_from_triage_result(
         dist_git_branch=values["dist_git_branch"],
         upstream_patches=upstream_patches,
         jira_issue=values["jira_issue"],
-        cve_id=_first_string(data.get("cve_id"), triage_result.get("cve_id"), triage_result.get("cve_ids")),
+        cve_id=_first_string(
+            data.get("cve_id"), triage_result.get("cve_id"), triage_result.get("cve_ids")
+        ),
         justification=_string_or_none(
             data.get("justification")
             or triage_result.get("justification")
