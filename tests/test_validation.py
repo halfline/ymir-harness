@@ -263,6 +263,43 @@ def test_strict_validation_accepts_zstream_override_target_branch(tmp_path: Path
     assert not report.has_blocking_errors
 
 
+def test_strict_validation_uses_backport_triage_result_branch_for_mock_fixture(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={},
+        reference_patch_mode="applies",
+    )
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    expected["target_branch"] = "c9s"
+    _write_json(expected_path, expected)
+    mock_path = cases_dir / "mock_data" / "triage" / "RHEL-12345.json"
+    mock_data = json.loads(mock_path.read_text(encoding="utf-8"))
+    mock_data["repos"][0]["branch"] = "rhel-8.10.z"
+    _write_json(mock_path, mock_data)
+    _write_json(
+        cases_dir / "triage_results" / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "data": {
+                "package": "dnsmasq",
+            },
+            "resolution": "backport",
+            "target_branch": "rhel-8.10.z",
+        },
+    )
+
+    report = validate_case_directory(cases_dir, workflow="ymir-backport")
+
+    assert not report.has_blocking_errors
+
+
 def test_strict_validation_reports_web_cache_missing_expected_patch_url(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
