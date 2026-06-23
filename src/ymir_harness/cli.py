@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import os
 import re
 import sys
 from collections.abc import Mapping, Sequence
@@ -1207,6 +1208,7 @@ def _prepare_run_iteration(
         features=args.features,
         repeat=args.repeat,
         executor=_run_executor(args.workflow),
+        base_env=_prepare_run_environment(),
         provenance=provenance,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1225,6 +1227,11 @@ def _prepare_run_iteration(
         report,
         1 if report.has_failures else 0,
     )
+
+
+def _prepare_run_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    return environment
 
 
 def _prepare_iteration_run_id(args: argparse.Namespace, iteration: int) -> str:
