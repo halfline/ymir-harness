@@ -50,6 +50,11 @@ MAX_COST_PER_RUN_ENV = "BENCHMARK_MAX_COST_PER_RUN"
 COST_ALERT_THRESHOLD_ENV = "BENCHMARK_COST_ALERT_THRESHOLD"
 FILESYSTEM_ISOLATION_ENV = "YMIR_HARNESS_FS_ISOLATION"
 FILESYSTEM_ISOLATION_WORKER_ENV = "YMIR_HARNESS_WORKFLOW_WORKER"
+WORKER_CONTAINER_TOOL_ENV = "YMIR_HARNESS_CONTAINER_TOOL"
+WORKER_CONTAINER_VERSION_ENV = "YMIR_HARNESS_CONTAINER_VERSION"
+WORKER_IMAGE_ENV = "YMIR_HARNESS_WORKER_IMAGE"
+WORKER_IMAGE_PREFIX_ENV = "YMIR_HARNESS_WORKER_IMAGE_PREFIX"
+WORKER_BASE_IMAGE_PREFIX_ENV = "YMIR_HARNESS_WORKER_BASE_IMAGE_PREFIX"
 AGENT_TIMEOUT_ENV = "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS"
 EVENT_TRACE_FIELDS = ("events", "tool_events", "tool_calls", "trace")
 NO_WRITE_ENVIRONMENT = {
@@ -64,6 +69,12 @@ NO_WRITE_ENVIRONMENT = {
 }
 SENSITIVE_ENVIRONMENT_NAMES = frozenset(
     {
+        "ANTHROPIC_API_KEY",
+        "FREEDESKTOP_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_API_TOKEN",
         "JIRA_API_TOKEN",
         "JIRA_PASSWORD",
         "JIRA_TOKEN",
@@ -77,6 +88,55 @@ SENSITIVE_ENVIRONMENT_NAMES = frozenset(
         "LOOKASIDE_TOKEN",
         "UV_PUBLISH_TOKEN",
     }
+)
+PASSTHROUGH_ENVIRONMENT_NAMES = frozenset(
+    {
+        "AGENTIC_SKILLS_CHECKSUM",
+        "AGENTIC_SKILLS_SHA",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "BEEAI_MAX_ITERATIONS",
+        "BENCHMARK_MODEL_SETTINGS",
+        "BENCHMARK_PROMPT_CONFIG",
+        "CHAT_MODEL",
+        "CHAT_MODEL_BACKPORT",
+        "CHAT_MODEL_REBASE",
+        "CHAT_MODEL_REBUILD",
+        "CHAT_MODEL_TRIAGE",
+        "CLOUD_ML_REGION",
+        "CONTAINER_IMAGE_DIGEST",
+        "CURL_CA_BUNDLE",
+        "EXTRA_PACKAGES",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_VERTEX_LOCATION",
+        "GOOGLE_VERTEX_PROJECT",
+        "INTERNAL_PACKAGES",
+        "INTERNAL_REPO_URL",
+        "LLM_JUDGE_MODEL",
+        "PATH",
+        "REASONING_EFFORT",
+        "REQUESTS_CA_BUNDLE",
+        "RUN_LLM_JUDGE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "YMIR_HARNESS_LLM_JUDGE",
+        "YMIR_HARNESS_LLM_JUDGE_MODEL",
+        "YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL",
+        AGENT_TIMEOUT_ENV,
+        COST_ALERT_THRESHOLD_ENV,
+        FILESYSTEM_ISOLATION_ENV,
+        MAX_COST_PER_RUN_ENV,
+        MAX_ITERATIONS_OVERRIDE_ENV,
+        WORKER_BASE_IMAGE_PREFIX_ENV,
+        WORKER_CONTAINER_TOOL_ENV,
+        WORKER_CONTAINER_VERSION_ENV,
+        WORKER_IMAGE_ENV,
+        WORKER_IMAGE_PREFIX_ENV,
+    }
+)
+PASSTHROUGH_ENVIRONMENT_PREFIXES = (
+    "INTERNAL_PACKAGES_",
+    "INTERNAL_REPO_URL_",
 )
 RunCaseExecutor = Callable[["RunCaseRequest"], "RunCaseExecution"]
 
@@ -142,10 +202,7 @@ def build_no_write_environment(
     recorded_urls: Sequence[str] = (),
     source_cache_dir: Path | None = None,
 ) -> dict[str, str]:
-    env = dict(os.environ if base_env is None else base_env)
-    for name in SENSITIVE_ENVIRONMENT_NAMES:
-        env.pop(name, None)
-
+    env = _passthrough_environment(base_env)
     env.update(NO_WRITE_ENVIRONMENT)
     env.setdefault("CHAT_MODEL", DEFAULT_CHAT_MODEL)
     env.setdefault(FILESYSTEM_ISOLATION_ENV, "bwrap")
@@ -187,6 +244,24 @@ def build_no_write_environment(
         env.pop("YMIR_BENCHMARK_WEB_CACHE_DIR", None)
         env.pop("YMIR_BENCHMARK_SOURCE_CACHE_DIR", None)
     return env
+
+
+def _passthrough_environment(base_env: Mapping[str, str] | None) -> dict[str, str]:
+    source = os.environ if base_env is None else base_env
+    env = {
+        str(name): str(value)
+        for name, value in source.items()
+        if _passes_environment_allowlist(str(name))
+    }
+    for name in SENSITIVE_ENVIRONMENT_NAMES:
+        env.pop(name, None)
+    return env
+
+
+def _passes_environment_allowlist(name: str) -> bool:
+    return name in PASSTHROUGH_ENVIRONMENT_NAMES or name.startswith(
+        PASSTHROUGH_ENVIRONMENT_PREFIXES
+    )
 
 
 def _install_dry_run_command_shims(
