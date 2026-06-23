@@ -2079,6 +2079,11 @@ def _backport_actual_result(
         ]
     if capture.touched_files:
         actual["touched_files"] = [*actual.get("touched_files", []), *capture.touched_files]
+    if capture.uncommitted_files:
+        actual["uncommitted_files"] = [
+            *actual.get("uncommitted_files", []),
+            *capture.uncommitted_files,
+        ]
     if capture.patch_touched_files:
         actual["patch_touched_files"] = [
             *actual.get("patch_touched_files", []),
