@@ -346,10 +346,70 @@ def test_backport_inputs_prefer_generated_triage_result(tmp_path: Path) -> None:
 
     assert not isinstance(inputs, RunCaseExecution)
     assert inputs.package == "qt6-qtdeclarative"
-    assert inputs.dist_git_branch == "c10s"
+    assert inputs.dist_git_branch == "rhel-10.2"
     assert inputs.upstream_patches == ("https://example.invalid/triaged.patch",)
     assert inputs.cve_id == "CVE-2026-12345"
     assert inputs.fix_version == "rhel-10.2.z"
+
+
+def test_backport_inputs_fall_back_to_mock_branch_when_triage_result_has_no_target(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    _write_expected(
+        request,
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "package": "synthetic-package",
+            "target_branch": "synthetic-branch",
+            "patch_urls": ["https://example.invalid/synthetic.patch"],
+        },
+    )
+    triage_result_path = request.cases_dir / "triage_results" / "RHEL-12345.actual.json"
+    triage_result_path.parent.mkdir(parents=True)
+    triage_result_path.write_text(
+        json.dumps(
+            {
+                "case_id": "RHEL-12345",
+                "workflow": "ymir-triage",
+                "resolution": "backport",
+                "data": {
+                    "jira_issue": "RHEL-12345",
+                    "package": "qt6-qtdeclarative",
+                    "patch_urls": ["https://example.invalid/triaged.patch"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    mock_path = request.cases_dir / "mock_data" / "backport" / "RHEL-12345.json"
+    mock_path.parent.mkdir(parents=True)
+    mock_path.write_text(
+        json.dumps(
+            {
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "repos": [
+                    {
+                        "branch": "c10s",
+                        "package": "qt6-qtdeclarative",
+                        "pre_fix_ref": "abc123",
+                        "remote_url": (
+                            "https://gitlab.com/redhat/centos-stream/rpms/qt6-qtdeclarative.git"
+                        ),
+                    }
+                ],
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    inputs = _backport_inputs(request)
+
+    assert not isinstance(inputs, RunCaseExecution)
+    assert inputs.dist_git_branch == "c10s"
 
 
 def test_backport_inputs_reject_non_backport_triage_result(tmp_path: Path) -> None:
