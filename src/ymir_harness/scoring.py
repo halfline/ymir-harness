@@ -217,6 +217,17 @@ def _score_case_once(
             )
         )
 
+    if workflow_error := _workflow_error(actual):
+        metrics.append(
+            ScoreMetric(
+                name="workflow_error",
+                status="fail",
+                expected=None,
+                actual=workflow_error,
+                notes="actual result contains a workflow error field",
+            )
+        )
+
     return ScoreReport(
         case_id=case_id,
         case_type=case_type,
@@ -308,6 +319,22 @@ def _unsafe_operations(actual: Mapping[str, Any]) -> Any:
 
 def _replay_violations(actual: Mapping[str, Any]) -> Any:
     return _actual_result_field(actual, "replay_violations")
+
+
+def _workflow_error(actual: Mapping[str, Any]) -> str | None:
+    data = actual.get("data")
+    for payload in (actual, data if isinstance(data, Mapping) else {}):
+        for field in (
+            "backport_error",
+            "rebase_error",
+            "rebuild_error",
+            "triage_error",
+            "build_error",
+        ):
+            value = payload.get(field)
+            if isinstance(value, str) and value:
+                return value
+    return None
 
 
 def _unrelated_source_changes(actual: Mapping[str, Any]) -> Any:
