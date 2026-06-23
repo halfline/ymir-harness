@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -254,6 +256,8 @@ def materialize_case_source_cache(
     cases_dir: Path,
     case_id: str,
     destination: Path,
+    *,
+    git_env: Mapping[str, str] | None = None,
 ) -> Path:
     source_cache_dir = cases_dir / "source_cache" / case_id
     fixtures = load_source_fixture_repositories(cases_dir, case_id)
@@ -266,7 +270,7 @@ def materialize_case_source_cache(
 
     for fixture in fixtures:
         upstream_destination.mkdir(parents=True, exist_ok=True)
-        _ensure_source_fixture_submodule(cases_dir, case_id, fixture)
+        _ensure_source_fixture_submodule(cases_dir, case_id, fixture, git_env=git_env)
         materialize_source_fixture_repository(
             cases_dir,
             case_id,
@@ -684,10 +688,12 @@ def _ensure_source_fixture_submodule(
     cases_dir: Path,
     case_id: str,
     fixture: SourceFixtureRepository,
+    *,
+    git_env: Mapping[str, str] | None = None,
 ) -> None:
     path = source_fixture_path(cases_dir, case_id, fixture)
     if not is_git_checkout(path):
-        _git_submodule_update(cases_dir, path)
+        _git_submodule_update(cases_dir, path, remote_url=fixture.remote_url, git_env=git_env)
     if not is_git_checkout(path):
         raise SourceFixtureError(f"source fixture submodule is not initialized: {path}")
 
@@ -703,6 +709,7 @@ def _ensure_source_fixture_submodule(
         _run_git(
             ["fetch", "--no-tags", "origin", *tuple(dict.fromkeys(missing_refspecs))],
             cwd=path,
+            env=_git_auth_environment(fixture.remote_url, git_env),
         )
     if fixture.head_object:
         _run_git(["checkout", "--quiet", "--detach", fixture.head_object], cwd=path)
@@ -749,7 +756,13 @@ def _ensure_writable_submodule(
         _run_git(["checkout", "--quiet", "--detach", head_object], cwd=path)
 
 
-def _git_submodule_update(cases_dir: Path, path: Path) -> None:
+def _git_submodule_update(
+    cases_dir: Path,
+    path: Path,
+    *,
+    remote_url: str,
+    git_env: Mapping[str, str] | None,
+) -> None:
     root = git_worktree_root(cases_dir)
     if root is None:
         raise SourceFixtureError(f"cases directory is not in a git worktree: {cases_dir}")
@@ -765,10 +778,104 @@ def _git_submodule_update(cases_dir: Path, path: Path) -> None:
         "--",
         rel_path,
     ]
+    env = _git_auth_environment(remote_url, git_env)
     try:
-        _run_git(command, cwd=root)
+        _run_git(command, cwd=root, env=env)
     except SourceFixtureError:
-        _run_git(["submodule", "update", "--init", "--recursive", "--", rel_path], cwd=root)
+        _run_git(
+            ["submodule", "update", "--init", "--recursive", "--", rel_path],
+            cwd=root,
+            env=env,
+        )
+
+
+def _git_auth_environment(
+    remote_url: str,
+    git_env: Mapping[str, str] | None,
+) -> dict[str, str] | None:
+    host = _gitlab_https_host(remote_url)
+    if host is None:
+        return None
+    environment = os.environ if git_env is None else git_env
+    token = _gitlab_token(git_env)
+    if token is None:
+        return {"GIT_TERMINAL_PROMPT": "0"}
+
+    authorization = base64.b64encode(f"oauth2:{token}".encode("utf-8")).decode("ascii")
+    return _git_config_environment(
+        (
+            (
+                f"http.https://{host}/.extraHeader",
+                f"Authorization: Basic {authorization}",
+            ),
+        ),
+        environment,
+    )
+
+
+def _gitlab_https_host(remote_url: str) -> str | None:
+    parsed = urlparse(remote_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    if parsed.hostname == "gitlab.com" or parsed.hostname.endswith(".gitlab.com"):
+        return parsed.hostname
+    return None
+
+
+def _gitlab_token(git_env: Mapping[str, str] | None) -> str | None:
+    environment = os.environ if git_env is None else git_env
+    for name in ("GITLAB_TOKEN", "GITLAB_API_TOKEN"):
+        value = environment.get(name)
+        if value:
+            return value.strip() or None
+    for name in ("GITLAB_TOKEN_FILE", "GITLAB_API_TOKEN_FILE", "YMIR_GITLAB_TOKEN_FILE"):
+        value = environment.get(name)
+        if not value:
+            continue
+        path = Path(value).expanduser()
+        try:
+            token = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SourceFixtureError(f"cannot read {name}: {exc}") from exc
+        if token:
+            return token
+    return None
+
+
+def _git_config_environment(
+    entries: Sequence[tuple[str, str]],
+    base_environment: Mapping[str, str],
+) -> dict[str, str]:
+    combined_entries = (*_git_config_entries(base_environment), *entries)
+    env = {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_COUNT": str(len(combined_entries)),
+    }
+    for index, (key, value) in enumerate(combined_entries):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
+
+
+def _git_config_entries(environment: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    entries = []
+    for index in range(_git_config_count(environment)):
+        key = environment.get(f"GIT_CONFIG_KEY_{index}")
+        value = environment.get(f"GIT_CONFIG_VALUE_{index}")
+        if key is not None and value is not None:
+            entries.append((key, value))
+    return tuple(entries)
+
+
+def _git_config_count(environment: Mapping[str, str]) -> int:
+    value = environment.get("GIT_CONFIG_COUNT")
+    if value is None:
+        return 0
+    try:
+        count = int(value)
+    except ValueError:
+        return 0
+    return max(count, 0)
 
 
 def _write_submodule_config(
@@ -866,10 +973,16 @@ def _git_output(command: Sequence[str]) -> str:
     return completed.stdout
 
 
-def _run_git(command: Sequence[str], *, cwd: Path) -> None:
+def _run_git(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str] | None = None,
+) -> None:
     completed = subprocess.run(
         ["git", *command],
         cwd=cwd,
+        env={**os.environ, **env} if env else None,
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
