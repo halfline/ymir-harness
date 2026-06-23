@@ -18,13 +18,11 @@ from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseReq
 from ymir_harness.ymir_source import ensure_ymir_source_path
 from ymir_harness.ymir_workflows import (
     _backport_inputs,
-    _fallback_update_release_text,
     _fixture_search_results,
     _instrument_agent_factory,
     _is_package_prep_command,
     _materialize_replay_unpacked_sources,
     _patch_no_write_candidate_build_lookup,
-    _recover_backport_stage_changes,
     _wrap_backport_replay_agent,
     make_ymir_backport_executor,
     make_ymir_rebuild_executor,
@@ -1182,27 +1180,6 @@ def test_patch_no_write_candidate_build_lookup_replays_brewhub(
     assert source_ref == "real-source-ref"
 
 
-def test_fallback_update_release_text_bumps_stream_release(tmp_path: Path) -> None:
-    spec_path = tmp_path / "dnsmasq.spec"
-    spec_path.write_text(
-        "Name:           dnsmasq\n"
-        "Version:        2.79\n"
-        "Release:        31%{?extraversion:.%{extraversion}}%{?dist}\n",
-        encoding="utf-8",
-    )
-
-    _fallback_update_release_text(
-        spec_path,
-        rebase=False,
-        dist_git_branch="c8s",
-        abandon_autorelease=False,
-    )
-
-    assert "Release:        32%{?extraversion:.%{extraversion}}%{?dist}\n" in spec_path.read_text(
-        encoding="utf-8"
-    )
-
-
 def test_restore_backport_release_from_head_discards_agent_release_bump(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1273,59 +1250,6 @@ def test_source_changelog_from_replay_patch_files_reads_spec_entry(
         workflow_module._source_changelog_from_replay_patch_files(local_clone, "dnsmasq")
         == "- Fix crash when parsing --synth-domain option with no prefix (RHEL-12345)"
     )
-
-
-def test_recover_backport_stage_changes_stages_spec_patch_files_from_text(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo_path = tmp_path / "dist-git"
-    repo_path.mkdir()
-    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "ymir-harness@example.invalid"],
-        cwd=repo_path,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Ymir Harness"],
-        cwd=repo_path,
-        check=True,
-    )
-    spec_path = repo_path / "dnsmasq.spec"
-    spec_path.write_text("Name: dnsmasq\nVersion: 1\n", encoding="utf-8")
-    subprocess.run(["git", "add", "dnsmasq.spec"], cwd=repo_path, check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, check=True)
-
-    spec_path.write_text(
-        "Name: dnsmasq\nVersion: 1\nPatch0001: fix.patch\n",
-        encoding="utf-8",
-    )
-    (repo_path / "fix.patch").write_text(_source_patch_text(), encoding="utf-8")
-    state = _State(
-        local_clone=repo_path,
-        package="dnsmasq",
-        backport_result=_State(
-            success=False,
-            error="Could not stage changes: rpm.expandMacro requires system RPM bindings",
-        ),
-        log_result=None,
-    )
-    monkeypatch.setenv("DRY_RUN", "true")
-
-    next_step = _recover_backport_stage_changes("stage_changes", state, "comment_in_jira")
-
-    assert next_step == "run_log_agent"
-    assert state.backport_result.success is True
-    assert state.backport_result.error is None
-    staged = subprocess.run(
-        ["git", "diff", "--cached", "--name-only"],
-        cwd=repo_path,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-    assert staged == ["dnsmasq.spec", "fix.patch"]
 
 
 def test_materialize_replay_unpacked_sources_reports_missing_archive(tmp_path: Path) -> None:
