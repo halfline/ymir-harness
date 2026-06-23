@@ -512,7 +512,7 @@ def _patch_touched_files_metric(
         and cases_dir is not None
         and (actual_files or _actual_result_field(actual, "workflow") != "ymir-triage")
     ):
-        expected_files = _reference_patch_touched_files(cases_dir, case_id)
+        expected_files = _reference_patch_touched_files(cases_dir, case_id, expected=expected)
 
     if not expected_files:
         return ScoreMetric(
@@ -559,7 +559,12 @@ def _patch_urls_metric(
     return exact_metric
 
 
-def _reference_patch_touched_files(cases_dir: Path, case_id: str) -> list[str]:
+def _reference_patch_touched_files(
+    cases_dir: Path,
+    case_id: str,
+    *,
+    expected: Mapping[str, Any],
+) -> list[str]:
     paths: list[str] = []
     for patch_path in sorted(
         (cases_dir / "mock_data").glob(f"*/reference_patches/{case_id}.patch")
@@ -571,7 +576,26 @@ def _reference_patch_touched_files(cases_dir: Path, case_id: str) -> list[str]:
         touched_paths = _patch_file_touched_paths(patch_path)
         if touched_paths is not None:
             paths.extend(touched_paths)
+    if _normalize_token(expected.get("resolution")) == "backport":
+        paths = [path for path in paths if not _is_top_level_changelog_path(path)]
     return _normalize_file_list(paths)
+
+
+def _is_top_level_changelog_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    if "/" in normalized:
+        return False
+    stem = normalized.lower().split(".", 1)[0]
+    return stem in {
+        "changes",
+        "changelog",
+        "change-log",
+        "change_log",
+        "history",
+        "news",
+        "release-notes",
+        "release_notes",
+    }
 
 
 def _actual_generated_patch_touched_files(actual: Mapping[str, Any]) -> list[str]:
