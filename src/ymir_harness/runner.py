@@ -60,6 +60,9 @@ AGENT_TIMEOUT_ENV = "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS"
 EVENT_TRACE_FIELDS = ("events", "tool_events", "tool_calls", "trace")
 DEFAULT_WORKER_CONTAINER_TOOL = "podman"
 DEFAULT_WORKER_CONTAINER_VERSION = "c10s"
+WORKER_CONTAINER_PATH = (
+    "/opt/beeai-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
 WORKER_CONTAINER_VERSIONS = frozenset({"c9s", "c10s"})
 _BUILT_WORKER_IMAGES: set[tuple[str, str, str, str]] = set()
 NO_WRITE_ENVIRONMENT = {
@@ -143,6 +146,21 @@ PASSTHROUGH_ENVIRONMENT_PREFIXES = (
     "INTERNAL_PACKAGES_",
     "INTERNAL_REPO_URL_",
 )
+BUILD_ONLY_ENVIRONMENT_NAMES = frozenset(
+    {
+        "EXTRA_PACKAGES",
+        "INTERNAL_PACKAGES",
+        "INTERNAL_REPO_URL",
+        WORKER_BASE_IMAGE_PREFIX_ENV,
+        WORKER_CONTAINER_TOOL_ENV,
+        WORKER_IMAGE_ENV,
+        WORKER_IMAGE_PREFIX_ENV,
+    }
+)
+BUILD_ONLY_ENVIRONMENT_PREFIXES = (
+    "INTERNAL_PACKAGES_",
+    "INTERNAL_REPO_URL_",
+)
 RunCaseExecutor = Callable[["RunCaseRequest"], "RunCaseExecution"]
 
 
@@ -210,7 +228,7 @@ def build_no_write_environment(
     env = _passthrough_environment(base_env)
     env.update(NO_WRITE_ENVIRONMENT)
     env.setdefault("CHAT_MODEL", DEFAULT_CHAT_MODEL)
-    env.setdefault(FILESYSTEM_ISOLATION_ENV, "bwrap")
+    env.setdefault(FILESYSTEM_ISOLATION_ENV, DEFAULT_WORKER_CONTAINER_TOOL)
     _normalize_model_environment(env)
     env["JIRA_MOCK_FILES"] = str((jira_mock_dir or cases_dir / "jiras").resolve())
     env["MOCK_REPOS_DIR"] = str((cases_dir / "mock_data").resolve())
@@ -922,7 +940,7 @@ def _execute_case_workflow(
 
 
 def _filesystem_isolation_enabled(environment: Mapping[str, str]) -> bool:
-    value = environment.get(FILESYSTEM_ISOLATION_ENV, "bwrap").strip().lower()
+    value = environment.get(FILESYSTEM_ISOLATION_ENV, DEFAULT_WORKER_CONTAINER_TOOL).strip().lower()
     return value not in {"", "0", "false", "no", "none", "off", "disabled"}
 
 
@@ -1127,6 +1145,7 @@ def _execute_isolated_case_workflow(
     workflow: str,
     request: RunCaseRequest,
 ) -> RunCaseExecution:
+    container_version = _workflow_container_version(workflow, request)
     worker_dir = request.results_dir / f"repeat-{request.repetition}" / "workflow-worker"
     worker_dir.mkdir(parents=True, exist_ok=True)
     worker_home = worker_dir / "home"
@@ -1134,7 +1153,11 @@ def _execute_isolated_case_workflow(
     request_path = worker_dir / f"{request.case_id}.request.json"
     result_path = worker_dir / f"{request.case_id}.result.json"
 
-    worker_environment = _isolated_worker_environment(request.environment, worker_home)
+    worker_environment = _isolated_worker_environment(
+        request.environment,
+        worker_home,
+        container_version=container_version,
+    )
     request_path.write_text(
         json.dumps(
             {
@@ -1150,24 +1173,25 @@ def _execute_isolated_case_workflow(
         encoding="utf-8",
     )
 
+    worker_image = _ensure_worker_container_image(container_version, request.environment)
     command = _filesystem_isolation_command(
         request,
         request_path=request_path,
         result_path=result_path,
         worker_home=worker_home,
+        worker_image=worker_image,
+    )
     )
     completed = subprocess.run(
         command,
         cwd=str(_harness_root()),
-        env=worker_environment,
+        env=_container_tool_environment(),
         stdout=sys.stdout,
         stderr=sys.stderr,
         check=False,
     )
     if completed.returncode != 0:
-        raise RuntimeError(
-            f"isolated {workflow} worker exited with status {completed.returncode}"
-        )
+        raise RuntimeError(f"isolated {workflow} worker exited with status {completed.returncode}")
     return _execution_from_payload(
         json.loads(result_path.read_text(encoding="utf-8")),
         base_dir=_harness_root(),
@@ -1177,18 +1201,35 @@ def _execute_isolated_case_workflow(
 def _isolated_worker_environment(
     environment: Mapping[str, str],
     worker_home: Path,
+    *,
+    container_version: str,
 ) -> dict[str, str]:
-    env = dict(environment)
+    env = {
+        str(name): str(value)
+        for name, value in environment.items()
+        if not _build_only_environment_name(str(name))
+    }
+    for name in SENSITIVE_ENVIRONMENT_NAMES:
+        env.pop(name, None)
     env["HOME"] = str(worker_home)
+    env["PATH"] = WORKER_CONTAINER_PATH
+    env["PYTHONPATH"] = _container_pythonpath()
     env["PYTHONUNBUFFERED"] = "1"
     env[FILESYSTEM_ISOLATION_WORKER_ENV] = "1"
+    env[WORKER_CONTAINER_VERSION_ENV] = container_version
+    env["CONTAINER_VERSION"] = container_version
 
     adc_path = _google_application_credentials_path(env)
     if adc_path is not None:
+        (worker_home / ".config" / "gcloud").mkdir(parents=True, exist_ok=True)
         env["GOOGLE_APPLICATION_CREDENTIALS"] = str(
             worker_home / ".config" / "gcloud" / "application_default_credentials.json"
         )
     return env
+
+
+def _build_only_environment_name(name: str) -> bool:
+    return name in BUILD_ONLY_ENVIRONMENT_NAMES or name.startswith(BUILD_ONLY_ENVIRONMENT_PREFIXES)
 
 
 def _google_application_credentials_path(environment: Mapping[str, str]) -> Path | None:
@@ -1213,86 +1254,51 @@ def _filesystem_isolation_command(
     request_path: Path,
     result_path: Path,
     worker_home: Path,
+    worker_image: str,
 ) -> list[str]:
-    bwrap = shutil.which("bwrap")
-    if bwrap is None:
+    tool = _container_tool(request.environment)
+    if shutil.which(tool) is None:
         raise RuntimeError(
-            f"{FILESYSTEM_ISOLATION_ENV}=bwrap requested, but bwrap is not installed"
+            f"{FILESYSTEM_ISOLATION_ENV}={tool} requested, but {tool} is not installed"
         )
 
     command = [
-        bwrap,
-        "--unshare-pid",
-        "--die-with-parent",
-        "--new-session",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-        "--ro-bind-try",
-        "/bin",
-        "/bin",
-        "--ro-bind-try",
-        "/sbin",
-        "/sbin",
-        "--ro-bind-try",
-        "/lib",
-        "/lib",
-        "--ro-bind-try",
-        "/lib64",
-        "/lib64",
-        "--ro-bind-try",
-        "/etc/resolv.conf",
-        "/etc/resolv.conf",
-        "--ro-bind-try",
-        "/etc/hosts",
-        "/etc/hosts",
-        "--ro-bind-try",
-        "/etc/nsswitch.conf",
-        "/etc/nsswitch.conf",
-        "--ro-bind-try",
-        "/etc/passwd",
-        "/etc/passwd",
-        "--ro-bind-try",
-        "/etc/group",
-        "/etc/group",
-        "--ro-bind-try",
-        "/etc/pki",
-        "/etc/pki",
-        "--ro-bind-try",
-        "/etc/ssl",
-        "/etc/ssl",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-        "--tmpfs",
-        "/var/tmp",
-        "--dir",
-        "/run",
+        tool,
+        "run",
+        "--rm",
+        "--pull=never",
+        "--userns=keep-id",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "--security-opt",
+        "label=disable",
+        "--workdir",
+        "/opt/ymir-harness",
+        "--volume",
+        _container_volume(request.cases_dir, request.cases_dir, "ro"),
+        "--volume",
+        _container_volume(request.results_dir, request.results_dir, "rw"),
+        "--env",
+        "PYTHONUNBUFFERED=1",
     ]
-
-    python_runtime = Path(sys.executable).resolve()
-    command.extend(_ro_bind_path(python_runtime.parent.parent, python_runtime.parent.parent))
-    command.extend(_ro_bind_path(_harness_root(), _harness_root()))
-    command.extend(_bind_path(request.results_dir, request.results_dir))
-    command.extend(_bind_path(worker_home, worker_home))
 
     adc_path = _google_application_credentials_path(request.environment)
     if adc_path is not None:
         command.extend(
-            _ro_bind_path(
-                adc_path,
-                worker_home / ".config" / "gcloud" / "application_default_credentials.json",
-            )
+            [
+                "--volume",
+                _container_volume(
+                    adc_path,
+                    worker_home / ".config" / "gcloud" / "application_default_credentials.json",
+                    "ro",
+                ),
+            ]
         )
 
     command.extend(
         [
-            "--chdir",
-            str(_harness_root()),
-            sys.executable,
+            worker_image,
+            "python",
             "-m",
             "ymir_harness.workflow_worker",
             str(request_path),
@@ -1308,6 +1314,14 @@ def _ro_bind_path(source: Path, destination: Path) -> list[str]:
 
 def _bind_path(source: Path, destination: Path) -> list[str]:
     return ["--bind", str(source), str(destination)]
+
+
+def _container_volume(source: Path, destination: Path, mode: str) -> str:
+    return f"{source}:{destination}:{mode}"
+
+
+def _container_pythonpath() -> str:
+    return "/opt/ymir-harness/src:/home/beeai"
 
 
 def _request_with_environment(
