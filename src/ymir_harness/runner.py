@@ -58,8 +58,10 @@ WORKER_IMAGE_PREFIX_ENV = "YMIR_HARNESS_WORKER_IMAGE_PREFIX"
 WORKER_BASE_IMAGE_PREFIX_ENV = "YMIR_HARNESS_WORKER_BASE_IMAGE_PREFIX"
 AGENT_TIMEOUT_ENV = "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS"
 EVENT_TRACE_FIELDS = ("events", "tool_events", "tool_calls", "trace")
+DEFAULT_WORKER_CONTAINER_TOOL = "podman"
 DEFAULT_WORKER_CONTAINER_VERSION = "c10s"
 WORKER_CONTAINER_VERSIONS = frozenset({"c9s", "c10s"})
+_BUILT_WORKER_IMAGES: set[tuple[str, str, str, str]] = set()
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
     "MOCK_JIRA": "true",
@@ -924,6 +926,19 @@ def _filesystem_isolation_enabled(environment: Mapping[str, str]) -> bool:
     return value not in {"", "0", "false", "no", "none", "off", "disabled"}
 
 
+def _container_tool(environment: Mapping[str, str]) -> str:
+    backend = (
+        environment.get(FILESYSTEM_ISOLATION_ENV, DEFAULT_WORKER_CONTAINER_TOOL).strip().lower()
+    )
+    if backend not in {"podman", "container"}:
+        raise RuntimeError(
+            f"{FILESYSTEM_ISOLATION_ENV}={backend} is unsupported; "
+            f"use {FILESYSTEM_ISOLATION_ENV}=podman or disable workflow isolation"
+        )
+    tool = environment.get(WORKER_CONTAINER_TOOL_ENV, DEFAULT_WORKER_CONTAINER_TOOL).strip()
+    return tool or DEFAULT_WORKER_CONTAINER_TOOL
+
+
 def _workflow_container_version(workflow: str, request: RunCaseRequest) -> str:
     override = request.environment.get(WORKER_CONTAINER_VERSION_ENV)
     if override:
@@ -985,6 +1000,127 @@ def _branch_container_version(branch: str | None) -> str:
     if match := re.match(r"^rhel-(\d+)(?:[.\-]|$)", normalized):
         return "c9s" if int(match.group(1)) <= 9 else "c10s"
     return DEFAULT_WORKER_CONTAINER_VERSION
+
+
+def _ensure_worker_container_image(
+    container_version: str,
+    environment: Mapping[str, str],
+) -> str:
+    version = _validate_worker_container_version(container_version)
+    tool = _container_tool(environment)
+    if shutil.which(tool) is None:
+        raise RuntimeError(
+            f"{FILESYSTEM_ISOLATION_ENV}={tool} requested, but {tool} is not installed"
+        )
+
+    if worker_image := environment.get(WORKER_IMAGE_ENV):
+        return worker_image
+
+    base_image = _worker_base_image(version, environment)
+    worker_image = _worker_image(version, environment)
+    build_key = (tool, version, base_image, worker_image)
+    if build_key in _BUILT_WORKER_IMAGES:
+        return worker_image
+
+    _build_worker_base_image(tool, version, base_image, environment)
+    _build_worker_image(tool, base_image, worker_image)
+    _BUILT_WORKER_IMAGES.add(build_key)
+    return worker_image
+
+
+def _worker_base_image(version: str, environment: Mapping[str, str]) -> str:
+    prefix = environment.get(
+        WORKER_BASE_IMAGE_PREFIX_ENV,
+        "localhost/ymir-harness-ymir-base",
+    ).rstrip(":")
+    return f"{prefix}:{version}"
+
+
+def _worker_image(version: str, environment: Mapping[str, str]) -> str:
+    prefix = environment.get(WORKER_IMAGE_PREFIX_ENV, "localhost/ymir-harness-worker").rstrip(":")
+    return f"{prefix}:{version}"
+
+
+def _build_worker_base_image(
+    tool: str,
+    version: str,
+    image: str,
+    environment: Mapping[str, str],
+) -> None:
+    root = _harness_root()
+    context = root / "ui-workflows"
+    containerfile = context / f"Containerfile.{version}"
+    if not containerfile.is_file():
+        raise RuntimeError(f"Ymir container definition is missing: {containerfile}")
+
+    command = [
+        tool,
+        "build",
+        "--pull=missing",
+        "-t",
+        image,
+        "-f",
+        str(containerfile),
+        *_worker_base_build_args(version, environment),
+        str(context),
+    ]
+    _run_container_tool(command, f"building local Ymir {version} worker base image")
+
+
+def _worker_base_build_args(version: str, environment: Mapping[str, str]) -> list[str]:
+    suffix = version.upper()
+    build_args = []
+    internal_repo = environment.get(f"INTERNAL_REPO_URL_{suffix}") or environment.get(
+        "INTERNAL_REPO_URL"
+    )
+    extra_packages = environment.get(f"INTERNAL_PACKAGES_{suffix}") or environment.get(
+        "EXTRA_PACKAGES"
+    )
+    if internal_repo:
+        build_args.extend(["--build-arg", f"INTERNAL_REPO_URL={internal_repo}"])
+    if extra_packages:
+        build_args.extend(["--build-arg", f"EXTRA_PACKAGES={extra_packages}"])
+    return build_args
+
+
+def _build_worker_image(tool: str, base_image: str, image: str) -> None:
+    root = _harness_root()
+    containerfile = root / "Containerfile.ymir-harness-worker"
+    if not containerfile.is_file():
+        raise RuntimeError(f"harness worker container definition is missing: {containerfile}")
+
+    command = [
+        tool,
+        "build",
+        "--pull=never",
+        "-t",
+        image,
+        "--build-arg",
+        f"BASE_IMAGE={base_image}",
+        "-f",
+        str(containerfile),
+        str(root),
+    ]
+    _run_container_tool(command, "building local ymir-harness worker image")
+
+
+def _run_container_tool(command: Sequence[str], action: str) -> None:
+    completed = subprocess.run(
+        list(command),
+        cwd=str(_harness_root()),
+        env=_container_tool_environment(),
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"{action} failed with status {completed.returncode}")
+
+
+def _container_tool_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    return env
 
 
 def _execute_isolated_case_workflow(
