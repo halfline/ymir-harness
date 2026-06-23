@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1181,6 +1182,13 @@ def _execute_isolated_case_workflow(
         worker_home=worker_home,
         worker_image=worker_image,
     )
+    _write_worker_container_artifacts(
+        worker_dir,
+        request=request,
+        workflow=workflow,
+        container_version=container_version,
+        worker_image=worker_image,
+        command=command,
     )
     completed = subprocess.run(
         command,
@@ -1306,6 +1314,183 @@ def _filesystem_isolation_command(
         ]
     )
     return command
+
+
+def _write_worker_container_artifacts(
+    worker_dir: Path,
+    *,
+    request: RunCaseRequest,
+    workflow: str,
+    container_version: str,
+    worker_image: str,
+    command: Sequence[str],
+) -> None:
+    run_script_path = worker_dir / f"{request.case_id}.container-run.sh"
+    debug_script_path = worker_dir / f"{request.case_id}.container-debug-shell.sh"
+    command_path = worker_dir / f"{request.case_id}.container-command.json"
+    metadata_path = worker_dir / f"{request.case_id}.container.json"
+    debug_command = _container_debug_shell_command(
+        request,
+        worker_home=worker_dir / "home",
+        worker_image=worker_image,
+    )
+
+    _write_shell_command(run_script_path, command)
+    _write_shell_command(debug_script_path, debug_command)
+    command_path.write_text(
+        json.dumps(
+            {
+                "cwd": str(_harness_root()),
+                "run_command": list(command),
+                "run_script": str(run_script_path),
+                "debug_shell_command": debug_command,
+                "debug_shell_script": str(debug_script_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    tool = command[0]
+    base_image = (
+        None
+        if request.environment.get(WORKER_IMAGE_ENV)
+        else _worker_base_image(
+            container_version,
+            request.environment,
+        )
+    )
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "workflow": workflow,
+                "case_id": request.case_id,
+                "repetition": request.repetition,
+                "container_tool": tool,
+                "container_version": container_version,
+                "run_as_uid": os.getuid(),
+                "run_as_gid": os.getgid(),
+                "worker_image": worker_image,
+                "worker_image_inspect": _container_image_metadata(tool, worker_image),
+                "base_image": base_image,
+                "base_image_inspect": (
+                    _container_image_metadata(tool, base_image) if base_image else None
+                ),
+                "harness_source": _git_source_metadata(_harness_root()),
+                "ymir_source": _git_source_metadata(_harness_root() / "ui-workflows"),
+                "command_file": str(command_path),
+                "run_script": str(run_script_path),
+                "debug_shell_script": str(debug_script_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _container_debug_shell_command(
+    request: RunCaseRequest,
+    *,
+    worker_home: Path,
+    worker_image: str,
+) -> list[str]:
+    command = _filesystem_isolation_command(
+        request,
+        request_path=Path("/dev/null"),
+        result_path=Path("/dev/null"),
+        worker_home=worker_home,
+        worker_image=worker_image,
+    )
+    image_index = command.index(worker_image)
+    return [
+        *command[:image_index],
+        "--interactive",
+        "--tty",
+        "--env",
+        f"HOME={worker_home}",
+        "--env",
+        f"PYTHONPATH={_container_pythonpath()}",
+        "--env",
+        f"PATH={WORKER_CONTAINER_PATH}",
+        worker_image,
+        "bash",
+        "-l",
+    ]
+
+
+def _write_shell_command(path: Path, command: Sequence[str]) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        f"cd {shlex.quote(str(_harness_root()))}\n"
+        f"exec {_shell_command(command)}\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _shell_command(command: Sequence[str]) -> str:
+    return " \\\n  ".join(shlex.quote(str(part)) for part in command)
+
+
+def _container_image_metadata(tool: str, image: str) -> dict[str, Any]:
+    completed = subprocess.run(
+        [tool, "image", "inspect", image, "--format", "{{json .}}"],
+        cwd=str(_harness_root()),
+        env=_container_tool_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return {
+            "inspect_status": completed.returncode,
+            "inspect_stderr": completed.stderr.strip(),
+        }
+
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {"inspect_stdout": completed.stdout.strip()}
+
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
+    if not isinstance(payload, Mapping):
+        return {"inspect_payload": payload}
+    return {
+        "id": payload.get("Id"),
+        "digest": payload.get("Digest"),
+        "repo_digests": payload.get("RepoDigests") or [],
+        "created": payload.get("Created"),
+    }
+
+
+def _git_source_metadata(path: Path) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"path": str(path)}
+    head = _git_output(path, "rev-parse", "HEAD")
+    if head:
+        metadata["head"] = head
+    dirty = _git_output(path, "status", "--porcelain")
+    if dirty is not None:
+        metadata["dirty"] = bool(dirty.strip())
+    return metadata
+
+
+def _git_output(path: Path, *args: str) -> str | None:
+    completed = subprocess.run(
+        ["git", "-C", str(path), *args],
+        cwd=str(_harness_root()),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
 
 
 def _ro_bind_path(source: Path, destination: Path) -> list[str]:
