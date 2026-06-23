@@ -99,6 +99,11 @@ def _score_case_once(
             _unrelated_source_changes(actual),
             "actual result reports unrelated source changes",
         ),
+        _hard_fail_gate(
+            "uncommitted_files",
+            _uncommitted_files(actual),
+            "actual result reports uncommitted tracked changes",
+        ),
         _required_artifacts_metric(expected, actual),
         _required_artifact_kinds_metric(expected, actual),
         _patch_file_patterns_metric(expected, actual),
@@ -366,6 +371,10 @@ def _is_replay_error_message(message: str) -> bool:
 
 def _unrelated_source_changes(actual: Mapping[str, Any]) -> Any:
     return _actual_result_field(actual, "unrelated_source_changes")
+
+
+def _uncommitted_files(actual: Mapping[str, Any]) -> Any:
+    return _actual_result_field(actual, "uncommitted_files")
 
 
 def _required_artifacts_metric(

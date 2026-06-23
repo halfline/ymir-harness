@@ -14,6 +14,7 @@ from typing import Any
 class BackportArtifactCapture:
     generated_artifacts: list[str] = field(default_factory=list)
     touched_files: list[str] = field(default_factory=list)
+    uncommitted_files: list[str] = field(default_factory=list)
     patch_touched_files: list[str] = field(default_factory=list)
     spec_patches: list[str] = field(default_factory=list)
     unrelated_source_changes: list[str] = field(default_factory=list)
@@ -98,6 +99,7 @@ def capture_backport_artifacts(
         "captured_files": {},
         "source_paths": {},
         "touched_files": [],
+        "uncommitted_files": [],
         "patch_touched_files": [],
         "spec_patches": [],
         "unrelated_source_changes": [],
@@ -143,6 +145,7 @@ def capture_backport_artifacts(
             capture.warnings.append(f"local_clone is not a directory: {local_clone}")
 
     manifest["touched_files"] = capture.touched_files
+    manifest["uncommitted_files"] = capture.uncommitted_files
     manifest["patch_touched_files"] = capture.patch_touched_files
     manifest["spec_patches"] = capture.spec_patches
     manifest["unrelated_source_changes"] = capture.unrelated_source_changes
@@ -187,6 +190,7 @@ def _capture_git_backport_files(
     touched_files = _unique_strings(
         [*delta.touched_files, *(_relative_repo_path(local_clone, path) for path in patch_files)]
     )
+    capture.uncommitted_files.extend(delta.uncommitted_files)
     if delta.diff is not None and delta.diff.strip():
         diff = delta.diff
         if delta.uses_worktree:
@@ -347,27 +351,32 @@ def _git_name_output(repo_path: Path, *args: str) -> list[str]:
 class _BackportGitDelta:
     diff: str | None
     touched_files: list[str]
+    uncommitted_files: list[str]
     added_spec_patch_names: list[str]
     uses_worktree: bool
 
 
 def _backport_git_delta(repo_path: Path, *, spec_path: Path | None) -> _BackportGitDelta:
+    committed_files = _git_name_output(repo_path, "diff", "HEAD~1", "HEAD", "--name-only")
+    committed_diff = _git_output(repo_path, "diff", "HEAD~1", "HEAD")
+    committed_spec_diff = _spec_diff(repo_path, spec_path, base_args=("diff", "HEAD~1", "HEAD"))
     worktree_files = _git_name_output(repo_path, "diff", "HEAD", "--name-only")
-    if worktree_files:
-        spec_diff = _spec_diff(repo_path, spec_path, base_args=("diff", "HEAD"))
-        return _BackportGitDelta(
-            diff=_git_output(repo_path, "diff", "HEAD"),
-            touched_files=worktree_files,
-            added_spec_patch_names=_added_spec_patch_names(spec_diff or ""),
-            uses_worktree=True,
-        )
-
-    spec_diff = _spec_diff(repo_path, spec_path, base_args=("diff", "HEAD~1", "HEAD"))
+    worktree_diff = _git_output(repo_path, "diff", "HEAD")
+    worktree_spec_diff = _spec_diff(repo_path, spec_path, base_args=("diff", "HEAD"))
+    diff = "\n".join(
+        part for part in (committed_diff, worktree_diff) if part is not None and part.strip()
+    )
+    spec_diff = "\n".join(
+        part
+        for part in (committed_spec_diff, worktree_spec_diff)
+        if part is not None and part.strip()
+    )
     return _BackportGitDelta(
-        diff=_git_output(repo_path, "diff", "HEAD~1", "HEAD"),
-        touched_files=_git_name_output(repo_path, "diff", "HEAD~1", "HEAD", "--name-only"),
+        diff=diff or None,
+        touched_files=_unique_strings([*committed_files, *worktree_files]),
+        uncommitted_files=worktree_files,
         added_spec_patch_names=_added_spec_patch_names(spec_diff or ""),
-        uses_worktree=False,
+        uses_worktree=bool(worktree_files),
     )
 
 
