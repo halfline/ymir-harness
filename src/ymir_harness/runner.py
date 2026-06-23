@@ -278,7 +278,8 @@ def _passthrough_environment(base_env: Mapping[str, str] | None) -> dict[str, st
         if _passes_environment_allowlist(str(name))
     }
     for name in SENSITIVE_ENVIRONMENT_NAMES:
-        env.pop(name, None)
+        if env.get(name) != NO_WRITE_ENVIRONMENT.get(name):
+            env.pop(name, None)
     return env
 
 
@@ -316,17 +317,58 @@ def _install_dry_run_command_shims(
 _PACKAGE_TOOL_SHIM = """#!/bin/sh
 set -eu
 
-last=
+command=
 for arg in "$@"; do
-    last=$arg
+    case "$arg" in
+        prep|sources|srpm)
+            command=$arg
+            ;;
+    esac
 done
 
-case "$last" in
-    prep|sources)
+copy_lookaside_sources() {
+    source_cache=${YMIR_BENCHMARK_SOURCE_CACHE_DIR:-}
+    [ -n "$source_cache" ] || return 0
+    lookaside="$source_cache/lookaside"
+    [ -d "$lookaside" ] || return 0
+    for source in "$lookaside"/*; do
+        [ -f "$source" ] || continue
+        destination="$(pwd)/$(basename "$source")"
+        [ -e "$destination" ] || cp -p "$source" "$destination"
+    done
+}
+
+find_spec() {
+    find . -maxdepth 1 -name '*.spec' -print | head -n 1
+}
+
+prep_sources() {
+    copy_lookaside_sources
+    spec=$(find_spec)
+    if [ -z "$spec" ]; then
+        printf 'ymir-harness dry-run %s prep: no spec file found\\n' "$(basename "$0")" >&2
+        exit 1
+    fi
+    exec /usr/bin/rpmbuild -bp --nodeps \\
+        --define "_topdir $(pwd)" \\
+        --define "_sourcedir $(pwd)" \\
+        --define "_builddir $(pwd)" \\
+        --define "_specdir $(pwd)" \\
+        --define "_srcrpmdir $(pwd)" \\
+        --define "_rpmdir $(pwd)" \\
+        "$spec"
+}
+
+case "$command" in
+    sources)
+        copy_lookaside_sources
         exit 0
         ;;
+    prep)
+        prep_sources
+        ;;
     srpm)
-        spec=$(find . -maxdepth 1 -name '*.spec' -print | head -n 1)
+        spec=$(find_spec)
         name=${spec#./}
         name=${name%.spec}
         if [ -z "$name" ]; then
@@ -352,13 +394,28 @@ _RPMBUILD_SHIM = """#!/bin/sh
 set -eu
 
 spec=
+prep=false
 for arg in "$@"; do
     case "$arg" in
+        -bp|-bp*)
+            prep=true
+            ;;
         *.spec)
             spec=$arg
             ;;
     esac
 done
+
+if $prep; then
+    exec /usr/bin/rpmbuild --nodeps \\
+        --define "_topdir $(pwd)" \\
+        --define "_sourcedir $(pwd)" \\
+        --define "_builddir $(pwd)" \\
+        --define "_specdir $(pwd)" \\
+        --define "_srcrpmdir $(pwd)" \\
+        --define "_rpmdir $(pwd)" \\
+        "$@"
+fi
 
 name=${spec##*/}
 name=${name%.spec}
@@ -1216,9 +1273,10 @@ def _isolated_worker_environment(
         if not _build_only_environment_name(str(name))
     }
     for name in SENSITIVE_ENVIRONMENT_NAMES:
-        env.pop(name, None)
+        if env.get(name) != NO_WRITE_ENVIRONMENT.get(name):
+            env.pop(name, None)
     env["HOME"] = str(worker_home)
-    env["PATH"] = WORKER_CONTAINER_PATH
+    env["PATH"] = _worker_container_path(env)
     env["PYTHONPATH"] = _container_pythonpath()
     env["PYTHONUNBUFFERED"] = "1"
     env[FILESYSTEM_ISOLATION_WORKER_ENV] = "1"
@@ -1236,6 +1294,11 @@ def _isolated_worker_environment(
 
 def _build_only_environment_name(name: str) -> bool:
     return name in BUILD_ONLY_ENVIRONMENT_NAMES or name.startswith(BUILD_ONLY_ENVIRONMENT_PREFIXES)
+
+
+def _worker_container_path(environment: Mapping[str, str]) -> str:
+    shim_dir = environment.get("YMIR_BENCHMARK_COMMAND_SHIMS")
+    return f"{shim_dir}{os.pathsep}{WORKER_CONTAINER_PATH}" if shim_dir else WORKER_CONTAINER_PATH
 
 
 def _google_application_credentials_path(environment: Mapping[str, str]) -> Path | None:
@@ -1415,7 +1478,7 @@ def _container_debug_shell_command(
         "--env",
         f"PYTHONPATH={_container_pythonpath()}",
         "--env",
-        f"PATH={WORKER_CONTAINER_PATH}",
+        f"PATH={_worker_container_path(request.environment)}",
         worker_image,
         "bash",
         "-l",
