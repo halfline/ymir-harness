@@ -2346,17 +2346,37 @@ def _write_mock_data(
             overwrite=request.overwrite,
             result=result,
         )
-    elif fetched.gitlab_patch_body is not None:
+    else:
+        reference_patch_body = _reference_patch_body(request, fetched)
+        if reference_patch_body is None:
+            return
         _write_bytes(
             cases_dir
             / "mock_data"
             / mock_repo.agent
             / "reference_patches"
             / f"{request.case_id}.patch",
-            fetched.gitlab_patch_body,
+            reference_patch_body,
             overwrite=request.overwrite,
             result=result,
         )
+
+
+def _reference_patch_body(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> bytes | None:
+    bodies: list[bytes] = []
+    recorded_bodies = {record.url: record.body for record in fetched.web_records}
+    for url in _expected_patch_urls(request, fetched) or _effective_patch_urls(request, fetched):
+        body = fetched.gitlab_patch_body if url == fetched.gitlab_patch_url else None
+        if body is None:
+            body = recorded_bodies.get(url)
+        if body is not None and _looks_like_patch(body):
+            bodies.append(body.rstrip() + b"\n")
+    if bodies:
+        return b"\n".join(bodies)
+    return fetched.gitlab_patch_body
 
 
 def _write_web_cache(
@@ -2890,6 +2910,11 @@ def _expected_patch_urls(
     if request.patch_urls:
         return tuple(dict.fromkeys(request.patch_urls))
 
+    if request.mock_agent == "backport":
+        triage_patch_urls = _triage_result_patch_urls(request)
+        if triage_patch_urls:
+            return triage_patch_urls
+
     historical_agent = (
         request.mock_agent if request.expected_basis == "historical_jira_state" else None
     )
@@ -2909,6 +2934,23 @@ def _expected_patch_urls(
         return tuple(fetched.jira_patch_urls)
 
     return _effective_patch_urls(request, fetched)
+
+
+def _triage_result_patch_urls(request: CollectCaseRequest) -> tuple[str, ...]:
+    path = request.cases_dir / "triage_results" / f"{request.case_id}.actual.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, Mapping):
+        return ()
+
+    data = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
+    assert isinstance(data, Mapping)
+    urls = list(_string_values(data.get("patch_urls"))) or list(
+        _string_values(payload.get("patch_urls"))
+    )
+    return tuple(dict.fromkeys(urls))
 
 
 def _expected_required_artifact_kinds(request: CollectCaseRequest) -> tuple[str, ...]:
