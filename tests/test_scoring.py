@@ -344,6 +344,36 @@ def test_score_case_fails_replay_violations() -> None:
     ]
 
 
+def test_score_case_fails_replay_miss_errors() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "redis",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "redis",
+        "backport_error": (
+            "Could not update release: Koji candidate build replay miss: "
+            "package=redis dist_git_branch=rhel-9.6.0"
+        ),
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["replay_violations"].actual == [
+        (
+            "Could not update release: Koji candidate build replay miss: "
+            "package=redis dist_git_branch=rhel-9.6.0"
+        )
+    ]
+
+
 def test_score_case_fails_workflow_errors() -> None:
     expected = {
         "case_id": "RHEL-12345",
