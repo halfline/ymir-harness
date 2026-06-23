@@ -1032,7 +1032,9 @@ def _replay_safe_clone_upstream_tool(tool: Any, *, request: RunCaseRequest) -> A
                 Path(source_cache), tool_input.repo_url
             ):
                 return await super()._run(tool_input, options, context)
+            repo_url = str(getattr(tool_input, "repo_url", ""))
             raise ToolError(
+                f"external subprocess URL blocked: {repo_url}\n"
                 "Upstream repository is not available in the harness source cache. "
                 "Use the pre-downloaded patch files and git-am fallback workflow."
             )
