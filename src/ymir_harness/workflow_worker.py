@@ -10,6 +10,8 @@ from ymir_harness.runner import (
     RunCaseExecution,
     execution_to_payload,
     request_from_payload,
+    timeout_failure,
+    workflow_timeout_reason,
 )
 from ymir_harness.ymir_workflows import (
     make_ymir_backport_executor,
@@ -33,7 +35,15 @@ def main(argv: list[str] | None = None) -> int:
 
     executor = _executor_for_workflow(workflow)
     with enforce_benchmark_boundaries(request.environment):
-        execution = executor(request)
+        try:
+            execution = executor(request)
+        except BaseException as exc:
+            if not timeout_failure(exc, request.environment):
+                raise
+            execution = RunCaseExecution(
+                status="timeout",
+                reason=workflow_timeout_reason(workflow, request.environment, exc),
+            )
 
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(
