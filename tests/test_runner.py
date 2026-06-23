@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import ymir_harness.runner as runner_module
+import ymir_harness.workflow_worker as workflow_worker
 from ymir_harness.models import CaseValidationResult, ValidationReport
 from ymir_harness.runner import (
     DEFAULT_CHAT_MODEL,
@@ -1906,6 +1907,88 @@ def test_build_run_report_records_configured_timeout_cancellations_as_timeout(
     entry = report.entries[0]
     assert entry.status == "timeout"
     assert entry.reason == "ymir-backport workflow timed out after 10s"
+
+
+def test_workflow_worker_serializes_timeout_exception_groups(tmp_path: Path, monkeypatch) -> None:
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        repetition=1,
+        cases_dir=tmp_path / "benchmark_cases",
+        results_dir=tmp_path / "results",
+        expected_path=tmp_path / "benchmark_cases" / "expected" / "RHEL-12345.expected.json",
+        actual_path=tmp_path / "results" / "repeat-1" / "actual-results" / "RHEL-12345.actual.json",
+        environment={"YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "42"},
+        variant="baseline",
+        features=(),
+    )
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "workflow": "ymir-backport",
+                "request": runner_module._request_payload(request),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def executor(_request):
+        raise ExceptionGroup("workflow failed", [TimeoutError()])
+
+    monkeypatch.setattr(workflow_worker, "_executor_for_workflow", lambda _workflow: executor)
+
+    assert workflow_worker.main([str(request_path), str(result_path)]) == 0
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "actual_path": None,
+        "actual_result": None,
+        "reason": "ymir-backport workflow timed out after 42s",
+        "status": "timeout",
+    }
+
+
+def test_workflow_worker_serializes_configured_timeout_cancellations(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        repetition=1,
+        cases_dir=tmp_path / "benchmark_cases",
+        results_dir=tmp_path / "results",
+        expected_path=tmp_path / "benchmark_cases" / "expected" / "RHEL-12345.expected.json",
+        actual_path=tmp_path / "results" / "repeat-1" / "actual-results" / "RHEL-12345.actual.json",
+        environment={"YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "10"},
+        variant="baseline",
+        features=(),
+    )
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "workflow": "ymir-backport",
+                "request": runner_module._request_payload(request),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def executor(_request):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(workflow_worker, "_executor_for_workflow", lambda _workflow: executor)
+
+    assert workflow_worker.main([str(request_path), str(result_path)]) == 0
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "timeout"
+    assert payload["reason"] == "ymir-backport workflow timed out after 10s"
+
 
 def _write_expected(cases_dir: Path, case_id: str, data: object | None = None) -> None:
     expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
