@@ -344,6 +344,34 @@ def test_score_case_fails_replay_violations() -> None:
     ]
 
 
+def test_score_case_fails_workflow_errors() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "redis",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "redis",
+        "backport_error": (
+            "Could not update release: Failed to update release: "
+            "rpm.labelCompare requires system RPM bindings"
+        ),
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["workflow_error"].actual == (
+        "Could not update release: Failed to update release: "
+        "rpm.labelCompare requires system RPM bindings"
+    )
+
+
 def test_score_case_fails_missing_required_artifacts() -> None:
     expected = {
         "case_id": "RHEL-12345",
