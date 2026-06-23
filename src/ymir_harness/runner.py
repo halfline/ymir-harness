@@ -1219,6 +1219,7 @@ def _execute_isolated_case_workflow(
     worker_home.mkdir(parents=True, exist_ok=True)
     request_path = worker_dir / f"{request.case_id}.request.json"
     result_path = worker_dir / f"{request.case_id}.result.json"
+    cases_view = _materialize_worker_cases_view(request, worker_dir)
 
     worker_environment = _isolated_worker_environment(
         request.environment,
@@ -1245,6 +1246,7 @@ def _execute_isolated_case_workflow(
         result_path=result_path,
         worker_home=worker_home,
         worker_image=worker_image,
+        cases_mount_source=cases_view,
     )
     _write_worker_container_artifacts(
         worker_dir,
@@ -1335,6 +1337,7 @@ def _filesystem_isolation_command(
     result_path: Path,
     worker_home: Path,
     worker_image: str,
+    cases_mount_source: Path | None = None,
 ) -> list[str]:
     tool = _container_tool(request.environment)
     if shutil.which(tool) is None:
@@ -1355,7 +1358,7 @@ def _filesystem_isolation_command(
         "--workdir",
         "/opt/ymir-harness",
         "--volume",
-        _container_volume(request.cases_dir, request.cases_dir, "ro"),
+        _container_volume(cases_mount_source or request.cases_dir, request.cases_dir, "ro"),
         "--volume",
         _container_volume(request.results_dir, request.results_dir, "rw"),
         "--env",
@@ -1386,6 +1389,87 @@ def _filesystem_isolation_command(
         ]
     )
     return command
+
+
+def _materialize_worker_cases_view(request: RunCaseRequest, worker_dir: Path) -> Path:
+    destination = worker_dir / "cases-view"
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+
+    case_id = request.case_id
+    _copy_case_view_file(request.cases_dir / "cases.yaml", destination / "cases.yaml")
+    _copy_case_view_file(
+        request.cases_dir / "expected" / f"{case_id}.expected.json",
+        destination / "expected" / f"{case_id}.expected.json",
+    )
+    _copy_case_view_file(
+        request.cases_dir / "triage_results" / f"{case_id}.actual.json",
+        destination / "triage_results" / f"{case_id}.actual.json",
+    )
+    _copy_case_view_tree(request.cases_dir / "jiras" / case_id, destination / "jiras" / case_id)
+    _copy_case_view_tree(
+        request.cases_dir / "web_cache" / case_id,
+        destination / "web_cache" / case_id,
+    )
+    _copy_worker_source_cache_view(request.cases_dir, destination, case_id)
+    _copy_worker_mock_data_view(request.cases_dir, destination, case_id)
+    return destination
+
+
+def _copy_worker_source_cache_view(cases_dir: Path, destination: Path, case_id: str) -> None:
+    source_cache = cases_dir / "source_cache" / case_id
+    _copy_case_view_tree(
+        source_cache / "lookaside", destination / "source_cache" / case_id / "lookaside"
+    )
+
+    upstream = source_cache / "upstream"
+    if not upstream.is_dir():
+        return
+    for manifest_path in sorted(upstream.glob("*.json")):
+        _copy_case_view_file(
+            manifest_path,
+            destination / "source_cache" / case_id / "upstream" / manifest_path.name,
+        )
+
+
+def _copy_worker_mock_data_view(cases_dir: Path, destination: Path, case_id: str) -> None:
+    mock_data = cases_dir / "mock_data"
+    if not mock_data.is_dir():
+        return
+    for agent_dir in sorted(mock_data.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        _copy_case_view_file(
+            agent_dir / f"{case_id}.json",
+            destination / "mock_data" / agent_dir.name / f"{case_id}.json",
+        )
+        _copy_case_view_file(
+            agent_dir / "reference_patches" / f"{case_id}.patch",
+            destination / "mock_data" / agent_dir.name / "reference_patches" / f"{case_id}.patch",
+        )
+
+
+def _copy_case_view_tree(source: Path, destination: Path) -> None:
+    if not source.is_dir():
+        return
+    for path in sorted(source.rglob("*")):
+        relative_path = path.relative_to(source)
+        target = destination / relative_path
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif path.is_file():
+            _copy_case_view_file(path, target)
+
+
+def _copy_case_view_file(source: Path, destination: Path) -> None:
+    if not source.is_file():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, destination, follow_symlinks=True)
+    except OSError:
+        shutil.copy2(source, destination, follow_symlinks=True)
 
 
 def _write_worker_container_artifacts(
