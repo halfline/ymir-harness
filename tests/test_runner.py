@@ -14,7 +14,14 @@ from ymir_harness.runner import (
     load_case_manifest,
     select_validation_cases,
 )
-from ymir_harness.source_fixtures import source_cache_git_aliases, write_source_fixture_from_repository
+from ymir_harness.source_fixtures import (
+    find_source_cache_repository,
+    find_source_fixture_repository,
+    materialize_case_source_cache,
+    source_cache_git_aliases,
+    source_cache_git_rewrites,
+    write_source_fixture_from_repository,
+)
 
 
 def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
@@ -1393,6 +1400,76 @@ def test_source_cache_git_aliases_include_related_forges() -> None:
     code_qt_aliases = source_cache_git_aliases("https://code.qt.io/qt/qtdeclarative.git")
     assert "https://github.com/qt/qtdeclarative.git" in code_qt_aliases
     assert "https://github.com/qt/qtdeclarative" in code_qt_aliases
+
+
+def test_source_cache_git_rewrites_prefer_exact_distgit_fixture(tmp_path: Path) -> None:
+    source_cache = tmp_path / "source-cache"
+    upstream = source_cache / "upstream"
+    upstream.mkdir(parents=True)
+    centos_repo = upstream / "00-perl-HTTP-Daemon.git"
+    rhel_repo = upstream / "01-perl-HTTP-Daemon.git"
+    centos_url = "https://gitlab.com/redhat/centos-stream/rpms/perl-HTTP-Daemon.git"
+    rhel_url = "https://gitlab.com/redhat/rhel/rpms/perl-HTTP-Daemon.git"
+
+    for repo, remote_url in ((centos_repo, centos_url), (rhel_repo, rhel_url)):
+        subprocess.run(["git", "init", "--bare", str(repo)], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "--git-dir", str(repo), "config", "remote.origin.url", remote_url],
+            check=True,
+        )
+
+    rewrites = source_cache_git_rewrites(source_cache)
+    rewrite_map = dict(rewrites)
+
+    assert len([alias for alias, _local in rewrites if alias == rhel_url]) == 1
+    assert len([alias for alias, _local in rewrites if alias == centos_url]) == 1
+    assert rewrite_map[rhel_url] == rhel_repo.resolve().as_uri()
+    assert rewrite_map[centos_url] == centos_repo.resolve().as_uri()
+
+
+def test_source_fixture_lookup_prefers_exact_remote_match(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    rhel_url = "https://gitlab.com/redhat/rhel/rpms/dnsmasq.git"
+    centos_url = "https://gitlab.com/redhat/centos-stream/rpms/dnsmasq.git"
+    for name, remote_url in (("centos", centos_url), ("rhel", rhel_url)):
+        mirror = tmp_path / f"{name}-dnsmasq.git"
+        subprocess.run(
+            ["git", "clone", "--mirror", "--quiet", str(source_repo), str(mirror)],
+            check=True,
+        )
+        write_source_fixture_from_repository(
+            cases_dir,
+            "RHEL-12345",
+            mirror,
+            remote_url=remote_url,
+            overwrite=True,
+        )
+
+    fixture = find_source_fixture_repository(
+        cases_dir,
+        "RHEL-12345",
+        rhel_url,
+        obj=pre_fix_ref,
+    )
+    source_cache_dir = materialize_case_source_cache(
+        cases_dir,
+        "RHEL-12345",
+        tmp_path / "materialized-source-cache",
+    )
+    repository = find_source_cache_repository(source_cache_dir, rhel_url, obj=pre_fix_ref)
+
+    assert fixture is not None
+    assert fixture.remote_url == rhel_url
+    assert repository is not None
+    remote = subprocess.run(
+        ["git", "--git-dir", str(repository), "config", "--get", "remote.origin.url"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    assert remote == rhel_url
 
 
 def test_build_run_report_marks_cost_cap_overages_timeout(tmp_path: Path) -> None:
