@@ -626,6 +626,75 @@ def test_ensure_worker_container_image_allows_debug_override(monkeypatch) -> Non
     assert commands == []
 
 
+def test_write_worker_container_artifacts_keeps_debug_state_host_visible(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    worker_dir = results_dir / "repeat-1" / "workflow-worker"
+    worker_dir.mkdir(parents=True)
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        repetition=1,
+        cases_dir=cases_dir,
+        results_dir=results_dir,
+        expected_path=cases_dir / "expected" / "RHEL-12345.expected.json",
+        actual_path=results_dir / "repeat-1" / "actual-results" / "RHEL-12345.actual.json",
+        environment={"PATH": "/usr/bin"},
+        variant="baseline",
+        features=(),
+    )
+    command = [
+        "podman",
+        "run",
+        "--rm",
+        "localhost/ymir-harness-worker:c10s",
+        "python",
+        "-m",
+        "ymir_harness.workflow_worker",
+    ]
+
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
+    monkeypatch.setattr(
+        runner_module,
+        "_container_image_metadata",
+        lambda _tool, image: {"id": f"id-for-{image}"},
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_git_source_metadata",
+        lambda path: {"path": str(path), "head": "abc123", "dirty": False},
+    )
+
+    runner_module._write_worker_container_artifacts(
+        worker_dir,
+        request=request,
+        workflow="ymir-triage",
+        container_version="c10s",
+        worker_image="localhost/ymir-harness-worker:c10s",
+        command=command,
+    )
+
+    command_payload = json.loads(
+        (worker_dir / "RHEL-12345.container-command.json").read_text(encoding="utf-8")
+    )
+    metadata = json.loads((worker_dir / "RHEL-12345.container.json").read_text(encoding="utf-8"))
+    run_script = (worker_dir / "RHEL-12345.container-run.sh").read_text(encoding="utf-8")
+    debug_script = (worker_dir / "RHEL-12345.container-debug-shell.sh").read_text(encoding="utf-8")
+
+    assert command_payload["run_command"] == command
+    assert command_payload["debug_shell_command"][-2:] == ["bash", "-l"]
+    assert metadata["workflow"] == "ymir-triage"
+    assert metadata["worker_image"] == "localhost/ymir-harness-worker:c10s"
+    assert metadata["worker_image_inspect"] == {"id": "id-for-localhost/ymir-harness-worker:c10s"}
+    assert metadata["ymir_source"]["head"] == "abc123"
+    assert metadata["run_as_uid"] == os.getuid()
+    assert "ymir_harness.workflow_worker" in run_script
+    assert "bash \\\n  -l" in debug_script
+
+
 def _option_values(command: list[str], option: str) -> list[str]:
     return [command[index + 1] for index, item in enumerate(command[:-1]) if item == option]
 
