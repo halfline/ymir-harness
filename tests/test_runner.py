@@ -122,6 +122,7 @@ def test_isolated_worker_environment_omits_build_only_and_sensitive_values(
             "YMIR_HARNESS_WORKER_IMAGE": "localhost/custom-worker:test",
             "ANTHROPIC_API_KEY": "prod-anthropic-key",
             "OPENAI_API_TOKEN": "prod-openai-token",
+            "JIRA_TOKEN": "prod-jira-token",
         },
         tmp_path / "worker-home",
         container_version="c9s",
@@ -136,6 +137,44 @@ def test_isolated_worker_environment_omits_build_only_and_sensitive_values(
     assert "YMIR_HARNESS_WORKER_IMAGE" not in env
     assert "ANTHROPIC_API_KEY" not in env
     assert "OPENAI_API_TOKEN" not in env
+    assert "JIRA_TOKEN" not in env
+
+
+def test_isolated_worker_environment_keeps_no_write_jira_token(tmp_path: Path) -> None:
+    env = runner_module._isolated_worker_environment(
+        {
+            "JIRA_DRY_RUN": "true",
+            "JIRA_EMAIL": "ymir-harness@example.invalid",
+            "JIRA_TOKEN": "ymir-harness-token",
+            "MOCK_JIRA": "true",
+        },
+        tmp_path / "worker-home",
+        container_version="c10s",
+    )
+
+    assert env["JIRA_DRY_RUN"] == "true"
+    assert env["JIRA_EMAIL"] == "ymir-harness@example.invalid"
+    assert env["JIRA_TOKEN"] == "ymir-harness-token"
+    assert env["MOCK_JIRA"] == "true"
+
+
+def test_isolated_worker_environment_keeps_command_shims_on_container_path(
+    tmp_path: Path,
+) -> None:
+    shim_dir = tmp_path / "shims"
+
+    env = runner_module._isolated_worker_environment(
+        {
+            "PATH": "/host/bin",
+            "YMIR_BENCHMARK_COMMAND_SHIMS": str(shim_dir),
+        },
+        tmp_path / "worker-home",
+        container_version="c10s",
+    )
+
+    assert env["PATH"].split(":")[0] == str(shim_dir)
+    assert "/opt/beeai-venv/bin" in env["PATH"].split(":")
+    assert "/host/bin" not in env["PATH"].split(":")
 
 
 def test_build_no_write_environment_records_case_id(tmp_path: Path) -> None:
@@ -226,6 +265,33 @@ def test_dry_run_package_shim_writes_non_empty_srpm(tmp_path: Path) -> None:
     srpm_path = workdir / "redis-dry-run.src.rpm"
     assert completed.stdout == f"Wrote: {srpm_path}\n"
     assert srpm_path.read_text(encoding="utf-8") == "ymir-harness dry-run SRPM for redis\n"
+
+
+def test_dry_run_package_shim_copies_lookaside_sources(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "cases"
+    lookaside_dir = cases_dir / "source_cache" / "RHEL-12345" / "lookaside"
+    lookaside_dir.mkdir(parents=True)
+    (lookaside_dir / "redis.tar.gz").write_text("cached source\n", encoding="utf-8")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    env = build_no_write_environment(
+        cases_dir,
+        tmp_path / "results",
+        base_env={"PATH": "/usr/bin:/bin"},
+        case_id="RHEL-12345",
+    )
+    rhpkg = Path(env["YMIR_BENCHMARK_COMMAND_SHIMS"]) / "rhpkg"
+
+    subprocess.run(
+        [str(rhpkg), "sources"],
+        cwd=workdir,
+        env={**os.environ, **env},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert (workdir / "redis.tar.gz").read_text(encoding="utf-8") == "cached source\n"
 
 
 def test_load_case_manifest_reads_case_ids(tmp_path: Path) -> None:
