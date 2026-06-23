@@ -15,6 +15,7 @@ import pytest
 import ymir_harness.llm_judge as judge_module
 import ymir_harness.ymir_workflows as workflow_module
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseRequest
+from ymir_harness.scoring import load_json_file, score_case
 from ymir_harness.ymir_source import ensure_ymir_source_path
 from ymir_harness.ymir_workflows import (
     _backport_inputs,
@@ -1594,8 +1595,91 @@ def test_ymir_backport_executor_captures_dirty_spec_referenced_patch(
     assert "new file mode" in (artifact_dir / "commit.diff").read_text(encoding="utf-8")
     manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["touched_files"] == ["dnsmasq.spec", "fix.patch"]
+    assert manifest["uncommitted_files"] == ["dnsmasq.spec"]
     assert manifest["patch_touched_files"] == ["source.c"]
     assert manifest["spec_patches"] == ["Patch0002: fix.patch"]
+    assert execution.actual_result["uncommitted_files"] == ["dnsmasq.spec"]
+    score = score_case(load_json_file(request.expected_path), execution.actual_result)
+    failed = {metric.name: metric for metric in score.metrics if metric.status == "fail"}
+    assert failed["uncommitted_files"].actual == ["dnsmasq.spec"]
+
+
+def test_ymir_backport_executor_captures_committed_and_uncommitted_git_artifacts(
+    tmp_path: Path,
+) -> None:
+    repo_path = tmp_path / "dist-git"
+    repo_path.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ymir-harness@example.invalid"],
+        cwd=repo_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Ymir Harness"],
+        cwd=repo_path,
+        check=True,
+    )
+    spec_path = repo_path / "dnsmasq.spec"
+    sources_path = repo_path / "sources"
+    spec_path.write_text("Name: dnsmasq\nVersion: 1\n", encoding="utf-8")
+    sources_path.write_text("SHA512 (dnsmasq-1.tar.gz) = old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "dnsmasq.spec", "sources"], cwd=repo_path, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_path, check=True)
+
+    spec_path.write_text("Name: dnsmasq\nVersion: 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "dnsmasq.spec"], cwd=repo_path, check=True)
+    subprocess.run(["git", "commit", "-m", "version bump"], cwd=repo_path, check=True)
+    sources_path.write_text("SHA512 (dnsmasq-2.tar.gz) = new\n", encoding="utf-8")
+
+    artifact_dir = tmp_path / "artifacts" / "RHEL-12345"
+    request = _request(
+        tmp_path,
+        environment={
+            "DRY_RUN": "true",
+            "YMIR_BENCHMARK_ARTIFACT_DIR": str(artifact_dir),
+        },
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+        },
+    )
+
+    async def workflow(**_kwargs):
+        return _State(
+            package="dnsmasq",
+            local_clone=repo_path,
+            backport_result=_BackportResult({"success": True, "status": "built"}),
+        )
+
+    executor = make_ymir_backport_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    execution = executor(request)
+
+    assert execution.status == "passed"
+    assert execution.actual_result is not None
+    commit_diff = (artifact_dir / "commit.diff").read_text(encoding="utf-8")
+    assert "diff --git a/dnsmasq.spec b/dnsmasq.spec" in commit_diff
+    assert "diff --git a/sources b/sources" in commit_diff
+    manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["touched_files"] == ["dnsmasq.spec", "sources"]
+    assert manifest["uncommitted_files"] == ["sources"]
+    assert execution.actual_result["touched_files"] == ["dnsmasq.spec", "sources"]
+    assert execution.actual_result["uncommitted_files"] == ["sources"]
+    score = score_case(load_json_file(request.expected_path), execution.actual_result)
+    failed = {metric.name: metric for metric in score.metrics if metric.status == "fail"}
+    assert failed["uncommitted_files"].actual == ["sources"]
 
 
 def test_ymir_backport_executor_records_llm_judge_advisory(
