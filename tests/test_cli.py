@@ -30,6 +30,29 @@ def test_cli_prints_version(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().out == f"ymir-harness {__version__}\n"
 
 
+def test_prepare_run_environment_defaults_agent_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(cli_module.AGENT_TIMEOUT_ENV, raising=False)
+
+    environment = cli_module._prepare_run_environment()
+
+    assert (
+        environment[cli_module.AGENT_TIMEOUT_ENV]
+        == cli_module.DEFAULT_PREPARE_AGENT_TIMEOUT_SECONDS
+    )
+
+
+def test_prepare_run_environment_preserves_configured_agent_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(cli_module.AGENT_TIMEOUT_ENV, "45")
+
+    environment = cli_module._prepare_run_environment()
+
+    assert environment[cli_module.AGENT_TIMEOUT_ENV] == "45"
+
+
 def test_cli_scores_result_to_stdout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     expected_path = tmp_path / "expected.json"
     actual_path = tmp_path / "actual.json"
@@ -945,6 +968,10 @@ def test_cli_prepare_case_collects_until_run_succeeds(
     def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
         status = run_statuses.pop(0)
         run_ids.append(kwargs["run_id"])
+        assert (
+            kwargs["base_env"][cli_module.AGENT_TIMEOUT_ENV]
+            == cli_module.DEFAULT_PREPARE_AGENT_TIMEOUT_SECONDS
+        )
         return RunReport(
             cases_dir=cases_dir_arg,
             results_dir=results_dir,
