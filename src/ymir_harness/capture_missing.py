@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import configparser
 import hashlib
 import json
 import os
@@ -44,7 +45,10 @@ DEFAULT_ALLOWED_HOSTS = (
     "gitlab.gnome.org",
     "github.com",
     "issues.redhat.com",
+    "metacpan.org",
+    "pkgs.devel.redhat.com",
     "redhat.atlassian.net",
+    "sources.stream.centos.org",
     "src.fedoraproject.org",
 )
 MISSING_URL_PATTERNS = (
@@ -80,6 +84,11 @@ MISSING_URL_PATTERNS = (
         ),
     ),
     ("unrecorded URL", re.compile(r"unrecorded URL:\s*(https?://[^\s\"'<>]+)")),
+)
+MISSING_LOOKASIDE_PATTERN = re.compile(
+    r"([A-Za-z0-9][A-Za-z0-9._+-]*"
+    r"(?:\.tar(?:\.[A-Za-z0-9]+)?|\.tgz|\.tbz2|\.txz|\.zip)) "
+    r"not found in lookaside cache"
 )
 TEXT_SUFFIXES = {".json", ".log", ".md", ".out", ".txt"}
 
@@ -184,6 +193,22 @@ class CapturedSubprocess:
 
 
 @dataclass(frozen=True)
+class _LookasideSource:
+    filename: str
+    algorithm: str
+    checksum: str
+
+
+@dataclass(frozen=True)
+class _MissingLookasideSource:
+    filename: str
+    package: str
+    branch: str
+    url: str
+    source: _LookasideSource
+
+
+@dataclass(frozen=True)
 class CaptureFailure:
     url: str
     reason: str
@@ -218,9 +243,7 @@ class CaptureMissingResult:
             "captured_jira": [capture.to_json() for capture in self.captured_jira],
             "captured_source": [capture.to_json() for capture in self.captured_source],
             "captured_git_failures": [capture.to_json() for capture in self.captured_git_failures],
-            "captured_subprocesses": [
-                capture.to_json() for capture in self.captured_subprocesses
-            ],
+            "captured_subprocesses": [capture.to_json() for capture in self.captured_subprocesses],
             "skipped": [skip.to_json() for skip in self.skipped],
             "failed": [failure.to_json() for failure in self.failed],
         }
@@ -312,9 +335,7 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             and url in git_command_urls
             and url not in non_discovery_git_command_urls
         ):
-            result.skipped.append(
-                CaptureFailure(url=url, reason="subprocess command is recorded")
-            )
+            result.skipped.append(CaptureFailure(url=url, reason="subprocess command is recorded"))
             continue
         if should_capture_source and project_url is not None:
             if not _allowed_url(project_url, request.allowed_hosts):
@@ -496,6 +517,8 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             )
         )
 
+    _capture_missing_lookaside_sources(cases_dir, request, result)
+
     manifest_changed = bool(
         result.captured
         or result.captured_source
@@ -634,8 +657,7 @@ def _capture_git_discovery_command(
     if not invocations:
         raise CaptureMissingError("unsupported git discovery command")
     completions = (
-        _run_git_ls_remote(url, line_limit, request, as_of=as_of)
-        for url, line_limit in invocations
+        _run_git_ls_remote(url, line_limit, request, as_of=as_of) for url, line_limit in invocations
     )
     completed = tuple(completions)
     if not completed:
@@ -1387,6 +1409,222 @@ def _relative_capture_path(url: str) -> str:
     suffix = _path_suffix(parsed.path)
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
     return f"captured/{host}/{digest}{suffix}"
+
+
+def _capture_missing_lookaside_sources(
+    cases_dir: Path,
+    request: CaptureMissingRequest,
+    result: CaptureMissingResult,
+) -> None:
+    if request.dry_run:
+        return
+    for missing in _missing_lookaside_sources_from_run_path(request.run_path, request.case_id):
+        if not _allowed_url(missing.url, request.allowed_hosts):
+            result.skipped.append(CaptureFailure(url=missing.url, reason="host is not allowed"))
+            continue
+        destination = cases_dir / "source_cache" / request.case_id / "lookaside" / missing.filename
+        if destination.is_file() and not request.overwrite:
+            result.skipped.append(
+                CaptureFailure(url=missing.url, reason="lookaside source is already recorded")
+            )
+            continue
+        try:
+            body = _fetch_lookaside_source(missing, timeout=request.http_timeout)
+        except CaptureMissingError as exc:
+            result.failed.append(CaptureFailure(url=missing.url, reason=str(exc)))
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(body)
+        result.captured_source.append(
+            CapturedSource(
+                kind="lookaside",
+                url=missing.url,
+                relative_path=str(destination.relative_to(cases_dir)),
+            )
+        )
+
+
+def _missing_lookaside_sources_from_run_path(
+    run_path: Path,
+    case_id: str,
+) -> tuple[_MissingLookasideSource, ...]:
+    candidates: list[_MissingLookasideSource] = []
+    seen: set[tuple[str, str]] = set()
+    for actual_path in sorted(run_path.glob("repeat-*/actual-results/*.actual.json")):
+        try:
+            actual = load_json_file(actual_path)
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        filenames = _missing_lookaside_filenames(actual)
+        if not filenames:
+            continue
+        package = _string_value(actual.get("package"))
+        branch = _string_value(actual.get("target_branch"))
+        if package is None or branch is None:
+            continue
+        base_url = _lookaside_base_url(branch)
+        if base_url is None:
+            continue
+        for local_clone in _actual_local_clones(actual, run_path, case_id):
+            entries = {
+                entry.filename: entry for entry in _sources_file_entries(local_clone / "sources")
+            }
+            for filename in filenames:
+                source = entries.get(filename)
+                if source is None:
+                    continue
+                url = _lookaside_source_url(base_url, package, source)
+                key = (filename, url)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    _MissingLookasideSource(
+                        filename=filename,
+                        package=package,
+                        branch=branch,
+                        url=url,
+                        source=source,
+                    )
+                )
+    return tuple(candidates)
+
+
+def _missing_lookaside_filenames(actual: Mapping[str, Any]) -> tuple[str, ...]:
+    texts = []
+    for name in ("backport_error", "backport_status", "error", "status"):
+        value = actual.get(name)
+        if isinstance(value, str):
+            texts.append(value)
+    data = actual.get("data")
+    if isinstance(data, Mapping):
+        for name in ("error", "status"):
+            value = data.get(name)
+            if isinstance(value, str):
+                texts.append(value)
+    filenames: list[str] = []
+    for text in texts:
+        filenames.extend(MISSING_LOOKASIDE_PATTERN.findall(text))
+    return tuple(dict.fromkeys(filenames))
+
+
+def _actual_local_clones(
+    actual: Mapping[str, Any], run_path: Path, case_id: str
+) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    manifest_path = _string_value(actual.get("artifact_manifest"))
+    if manifest_path is not None:
+        try:
+            manifest = load_json_file(Path(manifest_path))
+        except (OSError, json.JSONDecodeError, ValueError):
+            manifest = {}
+        source_paths = manifest.get("source_paths")
+        if isinstance(source_paths, Mapping):
+            local_clone = _string_value(source_paths.get("local_clone"))
+            if local_clone is not None:
+                paths.append(Path(local_clone))
+    if not paths:
+        paths.extend(path.parent for path in sorted((run_path / case_id).glob("*/sources")))
+    return tuple(dict.fromkeys(path for path in paths if path.is_dir()))
+
+
+def _fetch_lookaside_source(missing: _MissingLookasideSource, *, timeout: float) -> bytes:
+    request = Request(missing.url, headers={"User-Agent": "ymir-harness"})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = response.read()
+    except OSError as exc:
+        raise CaptureMissingError(str(exc)) from exc
+    if not _lookaside_checksum_matches(body, missing.source):
+        raise CaptureMissingError(f"lookaside checksum mismatch for {missing.filename}")
+    return body
+
+
+def _sources_file_entries(path: Path) -> tuple[_LookasideSource, ...]:
+    if not path.is_file():
+        return ()
+    entries = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        entry = _parse_sources_file_line(line)
+        if entry is not None:
+            entries.append(entry)
+    return tuple({entry.filename: entry for entry in entries}.values())
+
+
+def _parse_sources_file_line(line: str) -> _LookasideSource | None:
+    line = line.strip()
+    if not line:
+        return None
+    modern = re.fullmatch(r"([A-Za-z0-9_+.-]+)\s+\(([^)]+)\)\s+=\s*([0-9A-Fa-f]+)", line)
+    if modern is not None:
+        return _LookasideSource(
+            filename=modern.group(2).strip(),
+            algorithm=modern.group(1).strip(),
+            checksum=modern.group(3).strip(),
+        )
+    tagged = re.fullmatch(
+        r"([A-Za-z0-9_+.-]+)\s*\(([^)]+)\)\s*=\s*([0-9A-Fa-f]+)",
+        line,
+    )
+    if tagged is not None:
+        return _LookasideSource(
+            filename=tagged.group(2).strip(),
+            algorithm=tagged.group(1).strip(),
+            checksum=tagged.group(3).strip(),
+        )
+    legacy = line.split()
+    if len(legacy) >= 2 and re.fullmatch(r"[0-9A-Fa-f]+", legacy[0]):
+        algorithm = "sha512" if len(legacy[0]) == 128 else "md5"
+        return _LookasideSource(
+            filename=legacy[-1].strip(),
+            algorithm=algorithm,
+            checksum=legacy[0].strip(),
+        )
+    return None
+
+
+def _lookaside_base_url(branch: str) -> str | None:
+    tool = "centpkg" if _is_cs_branch(branch) else "rhpkg"
+    config_path = Path("/etc/rpkg") / f"{tool}.conf"
+    if not config_path.is_file():
+        return None
+    parser = configparser.ConfigParser()
+    parser.read(config_path)
+    try:
+        return parser[tool]["lookaside"].rstrip("/")
+    except KeyError:
+        return None
+
+
+def _lookaside_source_url(
+    base_url: str,
+    package: str,
+    source: _LookasideSource,
+) -> str:
+    filename = quote(source.filename, safe="")
+    package_path = quote(package, safe="")
+    checksum = quote(source.checksum, safe="")
+    algorithm = quote(source.algorithm.lower(), safe="")
+    return f"{base_url}/rpms/{package_path}/{filename}/{algorithm}/{checksum}/{filename}"
+
+
+def _lookaside_checksum_matches(body: bytes, source: _LookasideSource) -> bool:
+    try:
+        digest = hashlib.new(source.algorithm.lower())
+    except ValueError:
+        return False
+    digest.update(body)
+    return digest.hexdigest().lower() == source.checksum.lower()
+
+
+def _is_cs_branch(branch: str) -> bool:
+    return re.fullmatch(r"c\d+s", branch) is not None
+
+
+def _string_value(value: Any) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def _capture_git_source_repo(
