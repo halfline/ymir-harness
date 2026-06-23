@@ -552,8 +552,10 @@ def test_filesystem_isolation_command_runs_container_without_harness_bind(
     worker_home = results_dir / "repeat-1" / "workflow-worker" / "home"
     request_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.request.json"
     result_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.result.json"
+    cases_mount_source = results_dir / "repeat-1" / "workflow-worker" / "cases-view"
     results_dir.mkdir(parents=True)
     worker_home.mkdir(parents=True)
+    cases_mount_source.mkdir(parents=True)
     monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
 
     request = runner_module.RunCaseRequest(
@@ -575,6 +577,7 @@ def test_filesystem_isolation_command_runs_container_without_harness_bind(
         result_path=result_path,
         worker_home=worker_home,
         worker_image="localhost/ymir-harness-worker:c10s",
+        cases_mount_source=cases_mount_source,
     )
 
     volumes = _option_values(command, "--volume")
@@ -582,11 +585,82 @@ def test_filesystem_isolation_command_runs_container_without_harness_bind(
     assert command[:4] == ["podman", "run", "--rm", "--pull=never"]
     assert command[command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert "localhost/ymir-harness-worker:c10s" in command
-    assert f"{cases_dir}:{cases_dir}:ro" in volumes
+    assert f"{cases_mount_source}:{cases_dir}:ro" in volumes
+    assert f"{cases_dir}:{cases_dir}:ro" not in volumes
     assert f"{results_dir}:{results_dir}:rw" in volumes
     assert not any(str(harness_root) in volume for volume in volumes)
     assert not any(str(harness_root.parent) in volume for volume in volumes)
     assert "--unshare-pid" not in command
+
+
+def test_materialize_worker_cases_view_excludes_reports_and_other_cases(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    worker_dir = results_dir / "repeat-1" / "workflow-worker"
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="cve_backport",
+        repetition=1,
+        cases_dir=cases_dir,
+        results_dir=results_dir,
+        expected_path=cases_dir / "expected" / "RHEL-12345.expected.json",
+        actual_path=results_dir / "repeat-1" / "actual-results" / "RHEL-12345.actual.json",
+        environment={},
+        variant="baseline",
+        features=(),
+    )
+
+    cases_dir.mkdir()
+    (cases_dir / "cases.yaml").write_text("cases: []\n", encoding="utf-8")
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_expected(cases_dir, "RHEL-99999")
+    (cases_dir / "jiras" / "RHEL-12345" / "issue.json").parent.mkdir(parents=True)
+    (cases_dir / "jiras" / "RHEL-12345" / "issue.json").write_text("{}", encoding="utf-8")
+    (cases_dir / "jiras" / "RHEL-99999" / "issue.json").parent.mkdir(parents=True)
+    (cases_dir / "jiras" / "RHEL-99999" / "issue.json").write_text("{}", encoding="utf-8")
+    (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").parent.mkdir(parents=True)
+    (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    source_cache = cases_dir / "source_cache" / "RHEL-12345"
+    (source_cache / "lookaside").mkdir(parents=True)
+    (source_cache / "lookaside" / "redis.tar.gz").write_text("archive\n", encoding="utf-8")
+    (source_cache / "upstream" / "redis-fixture.json").parent.mkdir(parents=True)
+    (source_cache / "upstream" / "redis-fixture.json").write_text("{}", encoding="utf-8")
+    (source_cache / "upstream" / "redis-worktree").mkdir()
+    (source_cache / "upstream" / "redis-worktree" / "leaked.txt").write_text(
+        "repo worktree\n",
+        encoding="utf-8",
+    )
+    (cases_dir / "mock_data" / "backport").mkdir(parents=True)
+    (cases_dir / "mock_data" / "backport" / "RHEL-12345.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    (cases_dir / "mock_data" / "backport" / "RHEL-99999.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    report_tarball = (
+        cases_dir / "reports" / "runs" / "old-run" / "RHEL-12345" / "redis-6.2.22.tar.gz"
+    )
+    report_tarball.parent.mkdir(parents=True)
+    report_tarball.write_text("old report tarball\n", encoding="utf-8")
+
+    view = runner_module._materialize_worker_cases_view(request, worker_dir)
+
+    assert (view / "cases.yaml").is_file()
+    assert (view / "expected" / "RHEL-12345.expected.json").is_file()
+    assert not (view / "expected" / "RHEL-99999.expected.json").exists()
+    assert (view / "jiras" / "RHEL-12345" / "issue.json").is_file()
+    assert not (view / "jiras" / "RHEL-99999").exists()
+    assert (view / "source_cache" / "RHEL-12345" / "lookaside" / "redis.tar.gz").is_file()
+    assert (view / "source_cache" / "RHEL-12345" / "upstream" / "redis-fixture.json").is_file()
+    assert not (view / "source_cache" / "RHEL-12345" / "upstream" / "redis-worktree").exists()
+    assert (view / "mock_data" / "backport" / "RHEL-12345.json").is_file()
+    assert not (view / "mock_data" / "backport" / "RHEL-99999.json").exists()
+    assert not (view / "reports").exists()
 
 
 def test_workflow_container_version_follows_target_branch(tmp_path: Path) -> None:
@@ -1178,6 +1252,80 @@ def test_build_run_report_records_workflow_output_replay_misses_without_failing(
     actual = json.loads(entry.actual_path.read_text(encoding="utf-8"))
     assert actual["replay_misses"] == ["replay miss: https://example.invalid/missing.patch"]
     assert "replay_violations" not in actual
+
+
+def test_build_run_report_ignores_replay_misses_in_worker_case_view(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "network_mode": "replay_only",
+        },
+    )
+    _write_web_manifest(cases_dir, "RHEL-12345", ["https://example.invalid/recorded.spec"])
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(request):
+        stale_fixture = (
+            request.results_dir
+            / f"repeat-{request.repetition}"
+            / "workflow-worker"
+            / "cases-view"
+            / "triage_results"
+            / "RHEL-12345.actual.json"
+        )
+        stale_fixture.parent.mkdir(parents=True)
+        stale_fixture.write_text(
+            json.dumps(
+                {
+                    "replay_misses": [
+                        "replay miss: URL is not recorded in replay cache: "
+                        "https://example.invalid/recorded.spec"
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    entry = report.entries[0]
+    assert entry.status == "passed"
+    actual = json.loads(entry.actual_path.read_text(encoding="utf-8"))
+    assert "replay_misses" not in actual
 
 
 def test_build_run_report_summarizes_artifact_replay_violations_on_executor_failure(
