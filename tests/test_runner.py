@@ -538,6 +538,70 @@ def test_workflow_container_version_follows_target_branch(tmp_path: Path) -> Non
     assert runner_module._workflow_container_version("ymir-triage", request) == "c10s"
 
 
+def test_ensure_worker_container_image_builds_from_local_ymir_submodule(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "harness"
+    ymir_context = root / "ui-workflows"
+    ymir_context.mkdir(parents=True)
+    (ymir_context / "Containerfile.c9s").write_text("FROM scratch\n", encoding="utf-8")
+    (root / "Containerfile.ymir-harness-worker").write_text("FROM scratch\n", encoding="utf-8")
+    commands = []
+
+    monkeypatch.setattr(runner_module, "_harness_root", lambda: root)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
+    monkeypatch.setattr(
+        runner_module, "_run_container_tool", lambda command, _action: commands.append(command)
+    )
+    monkeypatch.setattr(runner_module, "_BUILT_WORKER_IMAGES", set())
+
+    image = runner_module._ensure_worker_container_image("c9s", {})
+
+    assert image == "localhost/ymir-harness-worker:c9s"
+    assert commands == [
+        [
+            "podman",
+            "build",
+            "--pull=missing",
+            "-t",
+            "localhost/ymir-harness-ymir-base:c9s",
+            "-f",
+            str(ymir_context / "Containerfile.c9s"),
+            str(ymir_context),
+        ],
+        [
+            "podman",
+            "build",
+            "--pull=never",
+            "-t",
+            "localhost/ymir-harness-worker:c9s",
+            "--build-arg",
+            "BASE_IMAGE=localhost/ymir-harness-ymir-base:c9s",
+            "-f",
+            str(root / "Containerfile.ymir-harness-worker"),
+            str(root),
+        ],
+    ]
+
+
+def test_ensure_worker_container_image_allows_debug_override(monkeypatch) -> None:
+    commands = []
+
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
+    monkeypatch.setattr(
+        runner_module, "_run_container_tool", lambda command, _action: commands.append(command)
+    )
+
+    image = runner_module._ensure_worker_container_image(
+        "c10s",
+        {"YMIR_HARNESS_WORKER_IMAGE": "localhost/custom-worker:debug"},
+    )
+
+    assert image == "localhost/custom-worker:debug"
+    assert commands == []
+
+
 def test_build_run_report_fails_invalid_structured_jira(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
