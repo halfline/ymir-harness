@@ -1376,6 +1376,90 @@ def test_historical_expected_patch_urls_use_first_completed_agent_result(
     ) == (first_patch_url,)
 
 
+def test_backport_expected_patch_urls_prefer_triage_result(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    triage_patch_url = "https://gitlab.example/redhat/rpms/pkg/-/commit/abc123.patch"
+    jira_patch_url = "https://gitlab.example/redhat/rpms/pkg/-/merge_requests/64.patch"
+    triage_result_path = cases_dir / "triage_results" / "RHEL-12345.actual.json"
+    triage_result_path.parent.mkdir(parents=True)
+    triage_result_path.write_text(
+        json.dumps(
+            {
+                "case_id": "RHEL-12345",
+                "resolution": "backport",
+                "patch_urls": [triage_patch_url],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    request = CollectCaseRequest(
+        cases_dir=cases_dir,
+        case_id="RHEL-12345",
+        expected_basis="historical_jira_state",
+        mock_agent="backport",
+    )
+    fetched = collect_case_module.FetchedEvidence(
+        jira_patch_urls=(jira_patch_url,),
+    )
+
+    assert collect_case_module._expected_patch_urls(request, fetched) == (triage_patch_url,)
+
+
+def test_backport_reference_patch_prefers_triage_result_patch_body(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    triage_patch_url = "https://github.example/upstream/pkg/commit/first.patch"
+    later_patch_url = "https://github.example/upstream/pkg/commit/later.patch"
+    mr_patch_url = "https://gitlab.example/redhat/rpms/pkg/-/merge_requests/64.patch"
+    triage_result_path = cases_dir / "triage_results" / "RHEL-12345.actual.json"
+    triage_result_path.parent.mkdir(parents=True)
+    triage_result_path.write_text(
+        json.dumps({"data": {"patch_urls": [triage_patch_url]}}) + "\n",
+        encoding="utf-8",
+    )
+    request = CollectCaseRequest(
+        cases_dir=cases_dir,
+        case_id="RHEL-12345",
+        mock_agent="backport",
+        mock_repo=MockRepoInput(
+            remote_url="https://gitlab.example/redhat/rpms/pkg.git",
+            pre_fix_ref="abc123",
+            branch="rhel-9.6.0",
+            agent="backport",
+        ),
+    )
+    fetched = collect_case_module.FetchedEvidence(
+        jira_patch_urls=(triage_patch_url, later_patch_url),
+        gitlab_patch_url=mr_patch_url,
+        gitlab_patch_body=(b"diff --git a/source.c b/source.c\ndiff --git a/test.c b/test.c\n"),
+        web_records=(
+            collect_case_module.FetchedRecord(
+                url=triage_patch_url,
+                relative_path="jira/patches/001.patch",
+                body=b"diff --git a/source.c b/source.c\n",
+            ),
+            collect_case_module.FetchedRecord(
+                url=later_patch_url,
+                relative_path="jira/patches/002.patch",
+                body=b"diff --git a/test.c b/test.c\n",
+            ),
+        ),
+    )
+
+    collect_case_module._write_mock_data(
+        cases_dir,
+        request,
+        fetched,
+        collect_case_module.CollectCaseResult(case_id="RHEL-12345", cases_dir=cases_dir),
+    )
+
+    reference_patch = (
+        cases_dir / "mock_data" / "backport" / "reference_patches" / "RHEL-12345.patch"
+    )
+    assert reference_patch.read_bytes() == b"diff --git a/source.c b/source.c\n"
+
+
 def test_collect_case_scrubs_comments_after_historical_as_of(tmp_path: Path) -> None:
     issue_json = _write_json(
         tmp_path / "issue.json",
