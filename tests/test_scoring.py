@@ -539,6 +539,29 @@ def test_score_case_fails_unrelated_source_changes() -> None:
     assert failed["unrelated_source_changes"].actual == ["README.md"]
 
 
+def test_score_case_fails_uncommitted_files() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "dnsmasq",
+        "uncommitted_files": ["sources"],
+    }
+
+    report = score_case(expected, actual)
+
+    assert not report.passed
+    failed = {metric.name: metric for metric in report.metrics if metric.status == "fail"}
+    assert failed["uncommitted_files"].expected == []
+    assert failed["uncommitted_files"].actual == ["sources"]
+
+
 def test_score_case_reports_touched_file_scope_failures() -> None:
     expected = {
         "case_id": "RHEL-12345",
