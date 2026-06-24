@@ -1003,6 +1003,24 @@ def _prepare_case(
     args: argparse.Namespace,
     provenance: dict[str, str],
 ) -> tuple[dict[str, object], int]:
+    triage_result = _prepare_backport_triage_result(args, provenance)
+    if triage_result is not None and triage_result.get("status") not in {
+        "cached",
+        "generated",
+    }:
+        payload: dict[str, object] = {
+            "case_id": args.case_id,
+            "cases_dir": str(args.cases),
+            "workflow": args.workflow,
+            "variant": args.variant,
+            "status": "triage_failed",
+            "collected": None,
+            "auto_allowed_hosts": [],
+            "triage_result": triage_result,
+            "iterations": [],
+        }
+        return payload, 1
+
     collected = None
     if _prepare_should_collect(args):
         collected = collect_case(_prepare_collect_request(args)).to_json()
@@ -1020,6 +1038,8 @@ def _prepare_case(
         "auto_allowed_hosts": auto_allowed_hosts,
         "iterations": [],
     }
+    if triage_result is not None:
+        payload["triage_result"] = triage_result
     iterations: list[dict[str, object]] = []
     payload["iterations"] = iterations
     exit_code = 1
@@ -1097,6 +1117,103 @@ def _prepare_case(
 
     payload["collected"] = collected
     return payload, exit_code
+
+
+def _prepare_backport_triage_result(
+    args: argparse.Namespace,
+    provenance: dict[str, str],
+) -> dict[str, object] | None:
+    if args.workflow != "ymir-backport":
+        return None
+
+    destination = args.cases / "triage_results" / f"{args.case_id}.actual.json"
+    if destination.is_file():
+        return {
+            "case_id": args.case_id,
+            "path": str(destination),
+            "status": "cached",
+        }
+
+    triage_cases_dir = _prepare_sibling_triage_cases_dir(args.cases)
+    if triage_cases_dir is None:
+        return {
+            "case_id": args.case_id,
+            "status": "missing_triage_cases",
+            "message": "sibling ymir-triage cases directory was not found",
+        }
+
+    triage_args = _prepare_backport_triage_args(args, triage_cases_dir)
+    triage_payload, triage_exit_code = _prepare_case(triage_args, provenance)
+    if triage_exit_code != 0 or triage_payload.get("status") != "succeeded":
+        return {
+            "case_id": args.case_id,
+            "exit_code": triage_exit_code,
+            "status": "triage_prepare_failed",
+            "prepare": triage_payload,
+        }
+
+    run_report_path = _prepare_success_run_report(triage_payload)
+    source = _prepare_passing_triage_actual_path(run_report_path, args.case_id)
+    if source is None:
+        return {
+            "case_id": args.case_id,
+            "run_report": str(run_report_path),
+            "status": "missing_triage_actual",
+        }
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    return {
+        "case_id": args.case_id,
+        "run_report": str(run_report_path),
+        "source_path": str(source),
+        "status": "generated",
+        "written_path": str(destination),
+    }
+
+
+def _prepare_backport_triage_args(
+    args: argparse.Namespace,
+    triage_cases_dir: Path,
+) -> argparse.Namespace:
+    triage_args = argparse.Namespace(**vars(args))
+    triage_args.cases = triage_cases_dir
+    triage_args.workflow = "ymir-triage"
+    if args.run_id:
+        triage_args.run_id = f"{args.run_id}-triage"
+    return triage_args
+
+
+def _prepare_sibling_triage_cases_dir(cases_dir: Path) -> Path | None:
+    if cases_dir.name != "ymir-backport":
+        return None
+    triage_cases_dir = cases_dir.parent / "ymir-triage"
+    return triage_cases_dir if triage_cases_dir.is_dir() else None
+
+
+def _prepare_passing_triage_actual_path(run_report_path: Path, case_id: str) -> Path | None:
+    try:
+        run_report = load_json_file(run_report_path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+    entries = run_report.get("cases")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("case_id") != case_id or entry.get("status") != "passed":
+            continue
+        actual_path = _string_or_none(entry.get("actual_path"))
+        if actual_path is None:
+            continue
+        path = Path(actual_path)
+        if not path.is_absolute():
+            path = run_report_path.parent / path
+        if path.is_file():
+            return path
+    return None
 
 
 def _prepare_success_run_report(payload: Mapping[str, object]) -> Path:
