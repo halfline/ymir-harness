@@ -56,6 +56,7 @@ from ymir_harness.scoring import load_json_file, score_case, score_result_direct
 from ymir_harness.source_fixtures import (
     SourceFixtureError,
     resolve_source_cache_ref,
+    source_cache_contains_object,
     source_cache_repo_for_object,
 )
 from ymir_harness.validation import validate_case_directory
@@ -944,6 +945,7 @@ def _prepare_write_inferred_expected_data(
     written_paths.append(expected_path)
     return updated
 
+
 def _prepare_write_inferred_mock_data(
     args: argparse.Namespace,
     expected: Mapping[str, Any],
@@ -958,32 +960,32 @@ def _prepare_write_inferred_mock_data(
     if mock_path.exists() and not args.overwrite:
         return
 
-    package = _string_or_none(expected.get("package"))
-    expected_branch = _string_or_none(expected.get("target_branch")) or _string_or_none(
-        expected.get("fix_version")
-    )
-    if package is None or expected_branch is None:
+    package = _prepare_mock_package(args, expected)
+    requested_branch = _prepare_mock_requested_branch(args, expected)
+    if package is None or requested_branch is None:
         return
 
-    branch = _prepare_centos_stream_branch(expected_branch)
-    if branch is None:
+    source_branch = _prepare_centos_stream_branch(requested_branch)
+    if source_branch is None:
         warnings.append(
             "mock_data fixture was not written; cannot infer CentOS Stream branch "
-            f"from {expected_branch!r}"
+            f"from {requested_branch!r}"
         )
         return
 
-    remote_url = _prepare_centos_stream_distgit_url(package)
-    pre_fix_ref = resolve_source_cache_ref(
-        args.cases,
-        args.case_id,
-        remote_url,
-        f"refs/heads/{branch}",
+    remote_url = _prepare_mock_distgit_url(args, package, requested_branch)
+    pre_fix_ref = _prepare_mock_pre_fix_ref(
+        args,
+        expected=expected,
+        package=package,
+        requested_branch=requested_branch,
+        source_branch=source_branch,
+        remote_url=remote_url,
     )
     if pre_fix_ref is None:
         warnings.append(
             "mock_data fixture was not written; source_cache does not "
-            f"contain branch {branch!r} for {package}"
+            f"contain branch {source_branch!r} for {package}"
         )
         return
 
@@ -992,7 +994,7 @@ def _prepare_write_inferred_mock_data(
         "case_type": expected.get("case_type"),
         "repos": [
             {
-                "branch": branch,
+                "branch": _prepare_mock_materialized_branch(args, source_branch, requested_branch),
                 "package": package,
                 "pre_fix_ref": pre_fix_ref,
                 "remote_url": remote_url,
@@ -1000,13 +1002,23 @@ def _prepare_write_inferred_mock_data(
         ],
         "schema_version": 1,
     }
-    zstream_override = _prepare_zstream_override(branch, expected_branch)
+    zstream_override = _prepare_zstream_override(source_branch, requested_branch)
     if zstream_override:
         payload["zstream_override"] = zstream_override
 
     mock_path.parent.mkdir(parents=True, exist_ok=True)
     mock_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     written_paths.append(mock_path)
+
+
+def _prepare_mock_package(args: argparse.Namespace, expected: Mapping[str, Any]) -> str | None:
+    triage_result = _prepare_load_backport_triage_result(args)
+    triage_data = _mapping_or_empty(triage_result.get("data")) if triage_result else {}
+    return _string_or_none(
+        triage_data.get("package")
+        or (triage_result or {}).get("package")
+        or expected.get("package")
+    )
 
 
 def _prepare_mock_requested_branch(
@@ -1023,6 +1035,16 @@ def _prepare_mock_requested_branch(
         or expected.get("target_branch")
         or expected.get("fix_version")
     )
+
+
+def _prepare_mock_materialized_branch(
+    args: argparse.Namespace,
+    source_branch: str,
+    requested_branch: str,
+) -> str:
+    if args.workflow == "ymir-backport" and _prepare_load_backport_triage_result(args) is not None:
+        return requested_branch
+    return source_branch
 
 
 def _prepare_load_backport_triage_result(args: argparse.Namespace) -> Mapping[str, Any] | None:
@@ -1050,6 +1072,86 @@ def _prepare_centos_stream_branch(expected_branch: str) -> str | None:
 
 def _prepare_centos_stream_distgit_url(package: str) -> str:
     return f"https://gitlab.com/redhat/centos-stream/rpms/{quote(package, safe='._+-')}.git"
+
+
+def _prepare_rhel_distgit_url(package: str) -> str:
+    return f"https://gitlab.com/redhat/rhel/rpms/{quote(package, safe='._+-')}.git"
+
+
+def _prepare_mock_distgit_url(
+    args: argparse.Namespace,
+    package: str,
+    requested_branch: str,
+) -> str:
+    if args.workflow == "ymir-backport" and not re.fullmatch(r"c\d+s", requested_branch):
+        return _prepare_rhel_distgit_url(package)
+    return _prepare_centos_stream_distgit_url(package)
+
+
+def _prepare_mock_pre_fix_ref(
+    args: argparse.Namespace,
+    *,
+    expected: Mapping[str, Any],
+    package: str,
+    requested_branch: str,
+    source_branch: str,
+    remote_url: str,
+) -> str | None:
+    return (
+        _prepare_internal_rhel_branch_parent_ref(
+            args,
+            package=package,
+            requested_branch=requested_branch,
+            remote_url=remote_url,
+        )
+        or resolve_source_cache_ref(
+            args.cases,
+            args.case_id,
+            remote_url,
+            f"refs/heads/{source_branch}",
+        )
+    )
+
+
+def _prepare_internal_rhel_branch_parent_ref(
+    args: argparse.Namespace,
+    *,
+    package: str,
+    requested_branch: str,
+    remote_url: str,
+) -> str | None:
+    if args.workflow != "ymir-backport" or re.fullmatch(r"c\d+s", requested_branch):
+        return None
+    branches_path = (
+        args.cases
+        / "web_cache"
+        / args.case_id
+        / "gitlab"
+        / "internal_rhel"
+        / package
+        / "branches.json"
+    )
+    try:
+        branches = json.loads(branches_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(branches, list):
+        return None
+    for branch in branches:
+        if not isinstance(branch, Mapping) or branch.get("name") != requested_branch:
+            continue
+        commit = branch.get("commit")
+        if not isinstance(commit, Mapping):
+            continue
+        parent_ids = commit.get("parent_ids")
+        if not isinstance(parent_ids, list):
+            continue
+        for parent_id in parent_ids:
+            if not isinstance(parent_id, str) or not parent_id:
+                continue
+            if source_cache_contains_object(args.cases, args.case_id, remote_url, parent_id):
+                return parent_id
+    return None
 
 
 def _prepare_zstream_override(branch: str, expected_branch: str) -> dict[str, str]:
