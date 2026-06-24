@@ -23,7 +23,13 @@ from ymir_harness.validation import validate_case_directory
 
 @pytest.fixture(autouse=True)
 def _stub_koji_candidate_builds(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_fetch_candidate_build(package: str, branch: str, *, as_of: str | None = None):
+    def fake_fetch_candidate_build(
+        package: str,
+        branch: str,
+        *,
+        as_of: str | None = None,
+        timeout: float | None = None,
+    ):
         return {
             "package": package,
             "dist_git_branch": branch,
@@ -517,8 +523,14 @@ def test_collect_case_records_koji_candidate_builds(
             body=b"",
         )
 
-    def fake_fetch_candidate_build(package: str, branch: str, *, as_of: str | None = None):
-        calls.append((package, branch, as_of))
+    def fake_fetch_candidate_build(
+        package: str,
+        branch: str,
+        *,
+        as_of: str | None = None,
+        timeout: float | None = None,
+    ):
+        calls.append((package, branch, as_of, timeout))
         return {
             "package": package,
             "dist_git_branch": branch,
@@ -564,7 +576,10 @@ def test_collect_case_records_koji_candidate_builds(
         (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
     )
 
-    assert calls == [("redis", "rhel-9.6.0", as_of), ("redis", "rhel-9.7.0", as_of)]
+    assert calls == [
+        ("redis", "rhel-9.6.0", as_of, 30.0),
+        ("redis", "rhel-9.7.0", as_of, 30.0),
+    ]
     assert manifest["koji_candidate_builds"]["redis|rhel-9.6.0"]["evr"] == {
         "epoch": 0,
         "version": "6.2.20",

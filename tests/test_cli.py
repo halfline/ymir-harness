@@ -2047,10 +2047,16 @@ def test_cli_prepare_case_infers_backport_koji_candidate_builds_from_triage_resu
     cases_dir = tmp_path / "benchmark_cases"
     case_id = "RHEL-12345"
     as_of = "2026-05-20T12:00:00.000000Z"
-    calls: list[tuple[str, str, str | None]] = []
+    calls: list[tuple[str, str, str | None, float | None]] = []
 
-    def fake_fetch_candidate_build(package: str, branch: str, *, as_of: str | None = None):
-        calls.append((package, branch, as_of))
+    def fake_fetch_candidate_build(
+        package: str,
+        branch: str,
+        *,
+        as_of: str | None = None,
+        timeout: float | None = None,
+    ):
+        calls.append((package, branch, as_of, timeout))
         return {
             "dist_git_branch": branch,
             "evr": {
@@ -2106,6 +2112,7 @@ def test_cli_prepare_case_infers_backport_koji_candidate_builds_from_triage_resu
             as_of=None,
             cases=cases_dir,
             case_id=case_id,
+            http_timeout=12.5,
             workflow="ymir-backport",
             overwrite=False,
         ),
@@ -2119,8 +2126,8 @@ def test_cli_prepare_case_infers_backport_koji_candidate_builds_from_triage_resu
     assert warnings == []
     assert written_paths == [manifest_path]
     assert calls == [
-        ("qt6-qtdeclarative", "rhel-10.2", as_of),
-        ("qt6-qtdeclarative", "rhel-10.3", as_of),
+        ("qt6-qtdeclarative", "rhel-10.2", as_of, 12.5),
+        ("qt6-qtdeclarative", "rhel-10.3", as_of, 12.5),
     ]
     assert (
         manifest["koji_candidate_builds"]["qt6-qtdeclarative|rhel-10.2"]["source_ref"]
