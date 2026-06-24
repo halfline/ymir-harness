@@ -178,8 +178,7 @@ def test_validate_case_directory_rejects_active_explicit_answer_leakage(
 
     assert report.has_blocking_errors
     assert any(
-        issue.category == "ground_truth_ambiguous"
-        and "explicit answer leakage" in issue.message
+        issue.category == "ground_truth_ambiguous" and "explicit answer leakage" in issue.message
         for issue in report.cases[0].issues
     )
 
