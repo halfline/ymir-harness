@@ -1422,6 +1422,30 @@ def test_backport_expected_patch_urls_prefer_triage_result(tmp_path: Path) -> No
     assert collect_case_module._expected_patch_urls(request, fetched) == (triage_patch_url,)
 
 
+def test_backport_patch_fetch_candidates_include_triage_result(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    request_patch_url = "https://example.invalid/request.patch"
+    jira_patch_url = "https://gitlab.example/redhat/rpms/pkg/-/merge_requests/64.patch"
+    triage_patch_url = "https://pkgs.example/rpms/pkg/patch/?h=rhel-9.8&id=abc123"
+    triage_result_path = cases_dir / "triage_results" / "RHEL-12345.actual.json"
+    triage_result_path.parent.mkdir(parents=True)
+    triage_result_path.write_text(
+        json.dumps({"data": {"patch_urls": [triage_patch_url]}}) + "\n",
+        encoding="utf-8",
+    )
+    request = CollectCaseRequest(
+        cases_dir=cases_dir,
+        case_id="RHEL-12345",
+        mock_agent="backport",
+        patch_urls=(request_patch_url,),
+    )
+
+    assert collect_case_module._candidate_patch_urls_to_fetch(
+        request,
+        (jira_patch_url,),
+    ) == (request_patch_url, jira_patch_url, triage_patch_url)
+
+
 def test_backport_reference_patch_prefers_triage_result_patch_body(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     triage_patch_url = "https://github.example/upstream/pkg/commit/first.patch"
