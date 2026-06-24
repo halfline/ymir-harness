@@ -181,6 +181,35 @@ def test_collect_case_infers_distgit_backport_source(tmp_path: Path) -> None:
     assert expected["backport_source"] == "distgit"
 
 
+def test_collect_case_infers_pkgs_devel_backport_source(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    patch_url = (
+        "https://pkgs.devel.redhat.com/cgit/rpms/redis/patch/"
+        "?h=rhel-9.8.0&id=0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
+    )
+
+    collect_case(
+        CollectCaseRequest(
+            cases_dir=cases_dir,
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="redis",
+            target_branch="rhel-9.2.0",
+            expected_basis="historical_jira_state",
+            network_mode="replay_only",
+            patch_urls=(patch_url,),
+        )
+    )
+
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["backport_source"] == "distgit"
+
+
 def test_collect_case_infers_mixed_backport_source(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
 
