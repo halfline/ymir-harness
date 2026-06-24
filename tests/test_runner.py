@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import ymir_harness.runner as runner_module
@@ -292,6 +293,33 @@ def test_dry_run_package_shim_copies_lookaside_sources(tmp_path: Path) -> None:
     )
 
     assert (workdir / "redis.tar.gz").read_text(encoding="utf-8") == "cached source\n"
+
+
+def test_dry_run_package_shim_warns_on_noop_commands(tmp_path: Path) -> None:
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    env = build_no_write_environment(
+        tmp_path / "cases",
+        tmp_path / "results",
+        base_env={"PATH": "/usr/bin:/bin"},
+        case_id="RHEL-12345",
+    )
+    rhpkg = Path(env["YMIR_BENCHMARK_COMMAND_SHIMS"]) / "rhpkg"
+
+    completed = subprocess.run(
+        [str(rhpkg), "new-sources", "redis-6.2.22.tar.gz"],
+        cwd=workdir,
+        env={**os.environ, **env},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout == ""
+    assert completed.stderr == (
+        "ymir-harness warning: dry-run rhpkg no-op for unsupported command: "
+        "new-sources redis-6.2.22.tar.gz\n"
+    )
 
 
 def test_load_case_manifest_reads_case_ids(tmp_path: Path) -> None:
@@ -1252,6 +1280,61 @@ def test_build_run_report_records_workflow_output_replay_misses_without_failing(
     actual = json.loads(entry.actual_path.read_text(encoding="utf-8"))
     assert actual["replay_misses"] == ["replay miss: https://example.invalid/missing.patch"]
     assert "replay_violations" not in actual
+
+
+def test_build_run_report_records_workflow_output_warnings(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+        },
+    )
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(_request):
+        print(
+            "ymir-harness warning: dry-run rhpkg no-op for unsupported command: "
+            "new-sources source.tar.gz",
+            file=sys.stderr,
+        )
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    assert report.entries[0].warnings == [
+        "dry-run rhpkg no-op for unsupported command: new-sources source.tar.gz"
+    ]
+    assert report.to_json()["cases"][0]["warnings"] == report.entries[0].warnings
 
 
 def test_build_run_report_ignores_replay_misses_in_worker_case_view(
