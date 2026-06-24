@@ -1019,6 +1019,49 @@ def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
     ]
 
 
+def test_workflow_environment_overrides_git_identity_from_recorded_commit(
+    tmp_path: Path,
+) -> None:
+    request = _request(
+        tmp_path,
+        environment={
+            "MCP_GATEWAY_URL": "http://127.0.0.1:9/sse",
+            "GIT_AUTHOR_NAME": "Ymir Harness",
+            "GIT_AUTHOR_EMAIL": "ymir-harness@example.invalid",
+            "GIT_COMMITTER_NAME": "Ymir Harness",
+            "GIT_COMMITTER_EMAIL": "ymir-harness@example.invalid",
+        },
+    )
+    commit_path = (
+        request.cases_dir
+        / "web_cache"
+        / request.case_id
+        / "gitlab"
+        / "commits.json"
+    )
+    commit_path.parent.mkdir(parents=True)
+    commit_path.write_text(
+        json.dumps(
+            [
+                {
+                    "author_name": "RHEL Packaging Agent",
+                    "author_email": "rhel-se-jotnar@redhat.com",
+                    "committed_date": "2026-05-31T07:22:10.000+00:00",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with workflow_module._workflow_environment(request, workflow=lambda: None):
+        assert os.environ["GIT_AUTHOR_NAME"] == "RHEL Packaging Agent"
+        assert os.environ["GIT_AUTHOR_EMAIL"] == "rhel-se-jotnar@redhat.com"
+        assert os.environ["GIT_AUTHOR_DATE"] == "2026-05-31T07:22:10.000+00:00"
+        assert os.environ["GIT_COMMITTER_NAME"] == "RHEL Packaging Agent"
+        assert os.environ["GIT_COMMITTER_EMAIL"] == "rhel-se-jotnar@redhat.com"
+        assert os.environ["GIT_COMMITTER_DATE"] == "2026-05-31T07:22:10.000+00:00"
+
+
 def test_ymir_backport_executor_reports_missing_expected_inputs(tmp_path: Path) -> None:
     request = _request(tmp_path)
     _write_expected(
