@@ -291,6 +291,7 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
     git_command_urls = _git_command_urls(git_discovery_commands)
     non_discovery_git_command_urls = _non_discovery_git_command_urls_from_run_path(run_path, urls)
     as_of = request.as_of or derive_as_of(cases_dir, request.case_id)
+    captured_source_remotes: set[str] = set()
 
     for command in git_discovery_commands:
         command_key = subprocess_command_key(command)
@@ -342,6 +343,16 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             if not _allowed_url(project_url, request.allowed_hosts):
                 result.skipped.append(CaptureFailure(url=url, reason="host is not allowed"))
                 continue
+            remote_url = _git_clone_url(project_url)
+            if remote_url in captured_source_remotes:
+                result.skipped.append(
+                    CaptureFailure(url=url, reason="source repo is already captured")
+                )
+                if "external subprocess URL blocked" in reasons:
+                    continue
+                should_capture_source = False
+            if not should_capture_source:
+                continue
             if _git_failure_is_recorded(git_failures, url) and not request.overwrite:
                 result.skipped.append(
                     CaptureFailure(url=url, reason="git failure is already recorded")
@@ -362,6 +373,7 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             else:
                 _clear_git_failure(git_failures, url, project_url)
                 result.captured_source.append(captured)
+                captured_source_remotes.add(remote_url)
             if "external subprocess URL blocked" in reasons:
                 continue
 
