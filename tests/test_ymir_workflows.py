@@ -1019,6 +1019,81 @@ def test_ymir_backport_executor_runs_workflow_with_expected_inputs(
     ]
 
 
+def test_ymir_backport_executor_binds_fix_version_to_default_agent_factory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(
+        tmp_path,
+        environment={
+            "CHAT_MODEL": "fake-model",
+            "MCP_GATEWAY_URL": "http://127.0.0.1:9/sse",
+            "DRY_RUN": "true",
+        },
+    )
+    _write_expected(
+        request,
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-8.10.z",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+        },
+    )
+    triage_path = request.cases_dir / "triage_results" / "RHEL-12345.actual.json"
+    triage_path.parent.mkdir(parents=True)
+    triage_path.write_text(
+        json.dumps(
+            {
+                "resolution": "backport",
+                "data": {
+                    "package": "dnsmasq",
+                    "target_branch": "rhel-8.10.z",
+                    "patch_urls": ["https://example.invalid/fix.patch"],
+                    "fix_version": "rhel-8.10.z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    factory_calls = []
+
+    def default_agent_factory(_gateway_tools, _local_tool_options, **kwargs):
+        factory_calls.append(kwargs)
+        return object()
+
+    async def workflow(**kwargs):
+        maybe_agent = kwargs["backport_agent_factory"]([], {})
+        if workflow_module.inspect.isawaitable(maybe_agent):
+            await maybe_agent
+        return _State(
+            backport_result=_BackportResult(
+                {
+                    "success": True,
+                    "status": "built",
+                    "error": None,
+                    "srpm_path": "/tmp/build/dnsmasq.src.rpm",
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        workflow_module,
+        "_backport_dependencies",
+        lambda _workflow, _agent_factory: (workflow, default_agent_factory),
+    )
+
+    executor = make_ymir_backport_executor()
+
+    execution = executor(request)
+
+    assert execution.status == "passed"
+    assert factory_calls == [{"fix_version": "rhel-8.10.z"}]
+
+
 def test_workflow_environment_overrides_git_identity_from_recorded_commit(
     tmp_path: Path,
 ) -> None:
