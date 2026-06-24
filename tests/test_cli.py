@@ -446,6 +446,61 @@ def test_cli_activate_case_refuses_non_replay_only_case(
     assert "network_mode must be 'replay_only'" in capsys.readouterr().err
 
 
+def test_cli_prepare_case_can_activate_on_pass(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_activatable_case(cases_dir)
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id="RHEL-12345",
+                    case_type="not_affected",
+                    status="passed",
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--workflow",
+                "ymir-triage",
+                "--variant",
+                "baseline",
+                "--activate-on-pass",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "succeeded"
+    assert output["activation"]["status"] == "activated"
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["case_status"] == "active"
+    assert "case_status_reason" not in expected
+
+
 def test_cli_run_writes_placeholder_report(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
