@@ -52,6 +52,7 @@ MAX_COST_PER_RUN_ENV = "BENCHMARK_MAX_COST_PER_RUN"
 COST_ALERT_THRESHOLD_ENV = "BENCHMARK_COST_ALERT_THRESHOLD"
 FILESYSTEM_ISOLATION_ENV = "YMIR_HARNESS_FS_ISOLATION"
 FILESYSTEM_ISOLATION_WORKER_ENV = "YMIR_HARNESS_WORKFLOW_WORKER"
+HARNESS_WARNING_PREFIX = "ymir-harness warning: "
 WORKER_CONTAINER_TOOL_ENV = "YMIR_HARNESS_CONTAINER_TOOL"
 WORKER_CONTAINER_VERSION_ENV = "YMIR_HARNESS_CONTAINER_VERSION"
 WORKER_IMAGE_ENV = "YMIR_HARNESS_WORKER_IMAGE"
@@ -381,7 +382,7 @@ case "$command" in
         ;;
 esac
 
-printf 'ymir-harness dry-run %s' "$(basename "$0")" >&2
+printf 'ymir-harness warning: dry-run %s no-op for unsupported command:' "$(basename "$0")" >&2
 for arg in "$@"; do
     printf ' %s' "$arg" >&2
 done
@@ -759,6 +760,7 @@ def _run_case_result(
                 expected_path=expected_path if expected_path.is_file() else None,
                 actual_path=actual_path,
                 reason=f"benchmark boundary blocked: {exc}",
+                warnings=_artifact_warnings(results_dir, case_id, repetition),
             )
         except Exception as exc:
             if timeout_failure(exc, request.environment):
@@ -774,6 +776,7 @@ def _run_case_result(
                         request.environment,
                         exc,
                     ),
+                    warnings=_artifact_warnings(results_dir, case_id, repetition),
                 )
             replay_violations = _artifact_replay_violations(results_dir, case_id, repetition)
             return RunCaseResult(
@@ -784,6 +787,7 @@ def _run_case_result(
                 expected_path=expected_path if expected_path.is_file() else None,
                 actual_path=actual_path,
                 reason=_with_replay_violations(_executor_failure_reason(exc), replay_violations),
+                warnings=_artifact_warnings(results_dir, case_id, repetition),
             )
         except BaseException as exc:
             if not timeout_failure(exc, request.environment):
@@ -800,6 +804,7 @@ def _run_case_result(
                     request.environment,
                     exc,
                 ),
+                warnings=_artifact_warnings(results_dir, case_id, repetition),
             )
         execution_actual_path = execution.actual_path or actual_path
         score = None
@@ -839,6 +844,10 @@ def _run_case_result(
                     reason=_actual_result_score_failure_reason(exc),
                 )
         budget_reason = _budget_guardrail_reason(request.environment, actual_result)
+        warnings = [
+            *_artifact_warnings(results_dir, case_id, repetition),
+            *_budget_guardrail_warnings(request.environment, actual_result),
+        ]
         return RunCaseResult(
             case_id=case_id,
             case_type=case_type,
@@ -849,7 +858,7 @@ def _run_case_result(
             score=score,
             runtime_seconds=runtime_seconds,
             reason=budget_reason or execution.reason or _execution_reason(execution, score),
-            warnings=_budget_guardrail_warnings(request.environment, actual_result),
+            warnings=warnings,
         )
 
     return RunCaseResult(
@@ -2031,6 +2040,27 @@ def _artifact_replay_misses(
         for blocked in _artifact_blocked_urls(results_dir, case_id, repetition)
         if blocked.reason == "replay miss"
     ]
+
+
+def _artifact_warnings(
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+) -> list[str]:
+    warnings: list[str] = []
+    for path in (
+        workflow_stdout_path(results_dir, case_id, repetition),
+        workflow_stderr_path(results_dir, case_id, repetition),
+    ):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(HARNESS_WARNING_PREFIX):
+                warnings.append(stripped.removeprefix(HARNESS_WARNING_PREFIX))
+    return list(dict.fromkeys(warnings))
 
 
 def _artifact_blocked_urls(
