@@ -987,6 +987,8 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
                     f"{len(capture.get('captured_source', []))} source fixture(s), "
                     f"{len(capture['captured_git_failures'])} git failure(s), "
                     f"{len(capture.get('captured_subprocesses', []))} subprocess replay(s), "
+                    f"{len(capture.get('captured_koji_candidate_builds', []))} "
+                    "Koji candidate build(s), "
                     f"{len(capture['failed'])} failure(s)\n"
                 )
             if auto_allowed_hosts := iteration.get("auto_allowed_hosts"):
@@ -1094,6 +1096,7 @@ def _prepare_case(
             + len(capture_result.captured_source)
             + len(capture_result.captured_git_failures)
             + len(capture_result.captured_subprocesses)
+            + len(capture_result.captured_koji_candidate_builds)
         )
         if captured_count == 0:
             if _prepare_has_only_recorded_replay_candidates(capture_result):
@@ -1819,6 +1822,7 @@ def _merge_capture_results(
     base.captured_source.extend(update.captured_source)
     base.captured_git_failures.extend(update.captured_git_failures)
     base.captured_subprocesses.extend(update.captured_subprocesses)
+    base.captured_koji_candidate_builds.extend(update.captured_koji_candidate_builds)
     base.skipped.extend(update.skipped)
     base.failed.extend(update.failed)
 
@@ -1826,6 +1830,10 @@ def _merge_capture_results(
     captured_urls.update(capture.url for capture in base.captured_jira)
     captured_urls.update(capture.url for capture in base.captured_source)
     captured_urls.update(capture.url for capture in base.captured_git_failures)
+    captured_urls.update(
+        f"koji-candidate-build:{capture.key}"
+        for capture in base.captured_koji_candidate_builds
+    )
     base.skipped = [skip for skip in base.skipped if skip.url not in captured_urls]
     return base
 
