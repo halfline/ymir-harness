@@ -655,10 +655,171 @@ def test_filesystem_isolation_command_runs_container_without_harness_bind(
     assert "localhost/ymir-harness-worker:c10s" in command
     assert f"{cases_mount_source}:{cases_dir}:ro" in volumes
     assert f"{cases_dir}:{cases_dir}:ro" not in volumes
-    assert f"{results_dir}:{results_dir}:rw" in volumes
+    assert f"{results_dir}:{runner_module.WORKER_CONTAINER_RESULTS_DIR}:rw" in volumes
+    assert f"{results_dir}:{results_dir}:rw" not in volumes
+    assert command[-2:] == [
+        str(
+            runner_module.WORKER_CONTAINER_RESULTS_DIR
+            / "repeat-1"
+            / "workflow-worker"
+            / "RHEL-12345.request.json"
+        ),
+        str(
+            runner_module.WORKER_CONTAINER_RESULTS_DIR
+            / "repeat-1"
+            / "workflow-worker"
+            / "RHEL-12345.result.json"
+        ),
+    ]
     assert not any(str(harness_root) in volume for volume in volumes)
     assert not any(str(harness_root.parent) in volume for volume in volumes)
     assert "--unshare-pid" not in command
+
+
+def test_container_worker_request_translates_result_paths(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    container_results_dir = runner_module.WORKER_CONTAINER_RESULTS_DIR
+    mock_repo_path = results_dir / "repeat-1" / "mock-repos" / "RHEL-12345" / "pkg"
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        repetition=1,
+        cases_dir=cases_dir,
+        results_dir=results_dir,
+        expected_path=cases_dir / "expected" / "RHEL-12345.expected.json",
+        actual_path=results_dir / "repeat-1" / "actual-results" / "RHEL-12345.actual.json",
+        environment={},
+        variant="baseline",
+        features=(),
+    )
+    environment = {
+        "GIT_CONFIG_GLOBAL": str(results_dir / "repeat-1" / "source-cache-gitconfig"),
+        "HOME": str(results_dir / "repeat-1" / "workflow-worker" / "home"),
+        "JIRA_MOCK_FILES": str(cases_dir / "jiras"),
+        "MOCK_BLOCKED_URLS": "https://example.invalid/repo.git",
+        "PATH": f"{results_dir / '.ymir-harness-shims-RHEL-12345'}{os.pathsep}/usr/bin",
+        "YMIR_BENCHMARK_ARTIFACT_DIR": str(
+            results_dir / "repeat-1" / "artifacts" / "RHEL-12345"
+        ),
+        "YMIR_BENCHMARK_MOCK_REPOS": json.dumps(
+            [
+                {
+                    "local_path": str(mock_repo_path),
+                    "original_url": "https://example.invalid/repo.git",
+                }
+            ]
+        ),
+        "YMIR_BENCHMARK_RESULTS_DIR": str(results_dir),
+    }
+
+    container_request = runner_module._container_worker_request(
+        request,
+        environment,
+        container_results_dir=container_results_dir,
+    )
+
+    assert container_request.cases_dir == cases_dir
+    assert container_request.expected_path == request.expected_path
+    assert container_request.results_dir == container_results_dir
+    assert container_request.actual_path == (
+        container_results_dir
+        / "repeat-1"
+        / "actual-results"
+        / "RHEL-12345.actual.json"
+    )
+    assert container_request.environment["HOME"] == str(
+        container_results_dir / "repeat-1" / "workflow-worker" / "home"
+    )
+    assert container_request.environment["GIT_CONFIG_GLOBAL"] == str(
+        container_results_dir / "repeat-1" / "source-cache-gitconfig"
+    )
+    assert container_request.environment["JIRA_MOCK_FILES"] == str(cases_dir / "jiras")
+    assert container_request.environment["MOCK_BLOCKED_URLS"] == (
+        "https://example.invalid/repo.git"
+    )
+    assert container_request.environment["PATH"] == (
+        f"{container_results_dir / '.ymir-harness-shims-RHEL-12345'}{os.pathsep}/usr/bin"
+    )
+    assert container_request.environment["YMIR_BENCHMARK_ARTIFACT_DIR"] == str(
+        container_results_dir / "repeat-1" / "artifacts" / "RHEL-12345"
+    )
+    mock_repos = json.loads(container_request.environment["YMIR_BENCHMARK_MOCK_REPOS"])
+    assert mock_repos[0]["local_path"] == str(
+        container_results_dir / "repeat-1" / "mock-repos" / "RHEL-12345" / "pkg"
+    )
+    assert mock_repos[0]["original_url"] == "https://example.invalid/repo.git"
+    assert container_request.environment["YMIR_BENCHMARK_RESULTS_DIR"] == str(
+        container_results_dir
+    )
+
+
+def test_host_execution_from_container_translates_result_paths(tmp_path: Path) -> None:
+    results_dir = tmp_path / "results"
+    container_results_dir = runner_module.WORKER_CONTAINER_RESULTS_DIR
+    execution = RunCaseExecution(
+        status="passed",
+        actual_path=container_results_dir
+        / "repeat-1"
+        / "actual-results"
+        / "RHEL-12345.actual.json",
+        actual_result={
+            "case_id": "RHEL-12345",
+            "generated_artifacts": [
+                str(container_results_dir / "repeat-1" / "artifacts" / "RHEL-12345")
+            ],
+            "external_url": "https://example.invalid/artifact",
+        },
+    )
+
+    translated = runner_module._host_execution_from_container(
+        execution,
+        host_results_dir=results_dir,
+        container_results_dir=container_results_dir,
+    )
+
+    assert translated.actual_path == (
+        results_dir / "repeat-1" / "actual-results" / "RHEL-12345.actual.json"
+    )
+    assert translated.actual_result == {
+        "case_id": "RHEL-12345",
+        "generated_artifacts": [
+            str(results_dir / "repeat-1" / "artifacts" / "RHEL-12345")
+        ],
+        "external_url": "https://example.invalid/artifact",
+    }
+
+
+def test_translate_worker_gitconfig_result_paths(tmp_path: Path) -> None:
+    results_dir = tmp_path / "results"
+    container_results_dir = runner_module.WORKER_CONTAINER_RESULTS_DIR
+    gitconfig_path = results_dir / "repeat-1" / "mock-repos" / "RHEL-12345" / "gitconfig"
+    gateway_gitconfig_path = results_dir / ".mock_gitconfig_RHEL-12345"
+    gitconfig_path.parent.mkdir(parents=True)
+    content = (
+        f'[url "file://{results_dir}/repeat-1/mock-repos/RHEL-12345/pkg"]\n'
+        "\tinsteadOf = https://example.invalid/pkg.git\n\n"
+        f"[include]\n\tpath = {results_dir}/repeat-1/source-cache-gitconfig\n"
+    )
+    gitconfig_path.write_text(content, encoding="utf-8")
+    gateway_gitconfig_path.write_text(content, encoding="utf-8")
+
+    runner_module._translate_worker_gitconfig_result_paths(
+        {
+            "GIT_CONFIG_GLOBAL": str(gitconfig_path),
+            "YMIR_BENCHMARK_GITCONFIG": str(gitconfig_path),
+        },
+        results_dir,
+        container_results_dir,
+    )
+
+    expected = (
+        f'[url "file://{container_results_dir}/repeat-1/mock-repos/RHEL-12345/pkg"]\n'
+        "\tinsteadOf = https://example.invalid/pkg.git\n\n"
+        f"[include]\n\tpath = {container_results_dir}/repeat-1/source-cache-gitconfig\n"
+    )
+    assert gitconfig_path.read_text(encoding="utf-8") == expected
+    assert gateway_gitconfig_path.read_text(encoding="utf-8") == expected
 
 
 def test_materialize_worker_cases_view_excludes_reports_and_other_cases(tmp_path: Path) -> None:
