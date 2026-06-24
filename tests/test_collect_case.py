@@ -181,13 +181,17 @@ def test_collect_case_infers_distgit_backport_source(tmp_path: Path) -> None:
     assert expected["backport_source"] == "distgit"
 
 
-def test_collect_case_infers_pkgs_devel_backport_source(
+def test_collect_case_infers_pkgs_devel_backport_source_and_semantic_reference(
     tmp_path: Path,
 ) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     patch_url = (
         "https://pkgs.devel.redhat.com/cgit/rpms/redis/patch/"
         "?h=rhel-9.8.0&id=0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
+    )
+    patch_path = _write_text(
+        tmp_path / "inputs" / "fix.patch",
+        "diff --git a/redis.spec b/redis.spec\n",
     )
 
     collect_case(
@@ -201,6 +205,7 @@ def test_collect_case_infers_pkgs_devel_backport_source(
             expected_basis="historical_jira_state",
             network_mode="replay_only",
             patch_urls=(patch_url,),
+            reference_patch=patch_path,
         )
     )
 
@@ -208,6 +213,7 @@ def test_collect_case_infers_pkgs_devel_backport_source(
         (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
     )
     assert expected["backport_source"] == "distgit"
+    assert expected["reference_patch_mode"] == "semantic_reference"
 
 
 def test_collect_case_infers_mixed_backport_source(tmp_path: Path) -> None:
