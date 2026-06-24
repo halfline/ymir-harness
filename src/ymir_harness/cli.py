@@ -1405,7 +1405,12 @@ def _prepare_write_inferred_koji_candidate_builds(
         if key in records and not args.overwrite:
             continue
         try:
-            records[key] = fetch_candidate_build(package, branch, as_of=as_of)
+            records[key] = fetch_candidate_build(
+                package,
+                branch,
+                as_of=as_of,
+                timeout=getattr(args, "http_timeout", None),
+            )
         except Exception as exc:
             warnings.append(f"skipped Koji candidate build for {package} {branch}: {exc}")
             continue
