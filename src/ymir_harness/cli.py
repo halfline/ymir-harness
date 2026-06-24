@@ -117,6 +117,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate.set_defaults(func=_cmd_validate_cases)
 
+    activate = subparsers.add_parser(
+        "activate-case",
+        help="promote a quarantined case to active after a passing replay run",
+    )
+    activate.add_argument("--cases", type=Path, required=True, help="benchmark_cases directory")
+    activate.add_argument(
+        "--case",
+        "--case-id",
+        dest="case_id",
+        required=True,
+        help="case id to activate",
+    )
+    activate.add_argument(
+        "--workflow",
+        choices=WORKFLOW_CHOICES,
+        default="none",
+        help="validate requirements for a selected workflow before activation",
+    )
+    activate.add_argument(
+        "--run-report",
+        type=Path,
+        help=(
+            "passing run.json to use as activation evidence; defaults to the newest "
+            "run report under CASES/reports/runs containing CASE"
+        ),
+    )
+    activate.add_argument("--json", action="store_true", help="print activation JSON")
+    activate.set_defaults(func=_cmd_activate_case)
+
     collect = subparsers.add_parser(
         "collect-case",
         help="scaffold one benchmark case from local files or read-only evidence fetches",
@@ -604,6 +633,175 @@ def _cmd_validate_cases(args: argparse.Namespace) -> int:
         sys.stdout.write(f"reports written to {reports_dir}\n")
 
     return 1 if report.has_blocking_errors else 0
+
+
+def _cmd_activate_case(args: argparse.Namespace) -> int:
+    try:
+        payload = _activate_case(
+            args.cases,
+            args.case_id,
+            workflow=_validation_workflow(args.workflow),
+            run_report_path=args.run_report,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"activate-case failed: {exc}\n")
+        return 1
+
+    if args.json:
+        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(
+            f"activated {payload['case_id']} using {payload['run_report']}\n"
+        )
+        sys.stdout.write(f"validation reports written to {payload['validation_reports_dir']}\n")
+    return 0
+
+
+def _activate_case(
+    cases_dir: Path,
+    case_id: str,
+    *,
+    workflow: str | None,
+    run_report_path: Path | None = None,
+) -> dict[str, object]:
+    cases_dir = cases_dir.resolve()
+    expected_path = cases_dir / "expected" / f"{case_id}.expected.json"
+    if not expected_path.is_file():
+        raise ValueError(f"expected fixture is missing: {expected_path}")
+
+    expected_text = expected_path.read_text(encoding="utf-8")
+    expected = load_json_file(expected_path)
+    _activate_validate_expected_policy(expected, expected_path)
+
+    validation_reports_dir = cases_dir / "reports"
+    pre_report = _activate_validate_selected_case(cases_dir, case_id, workflow)
+    write_validation_reports(pre_report, validation_reports_dir)
+    if pre_report.has_blocking_errors:
+        raise ValueError(
+            "fixture validation failed before activation; "
+            f"reports written to {validation_reports_dir}"
+        )
+
+    evidence_path = _activate_run_report_path(cases_dir, case_id, run_report_path)
+    entry_count = _activate_require_passing_run_report(evidence_path, case_id)
+
+    updated = dict(expected)
+    updated["case_status"] = "active"
+    updated.pop("case_status_reason", None)
+    expected_path.write_text(
+        json.dumps(updated, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    post_report = _activate_validate_selected_case(cases_dir, case_id, workflow)
+    write_validation_reports(post_report, validation_reports_dir)
+    if post_report.has_blocking_errors:
+        expected_path.write_text(expected_text, encoding="utf-8")
+        raise ValueError(
+            "activated fixture failed validation and was restored; "
+            f"reports written to {validation_reports_dir}"
+        )
+
+    return {
+        "case_id": case_id,
+        "cases_dir": str(cases_dir),
+        "expected_path": str(expected_path),
+        "run_report": str(evidence_path),
+        "run_report_entries": entry_count,
+        "status": "activated",
+        "validation_reports_dir": str(validation_reports_dir),
+    }
+
+
+def _activate_validate_expected_policy(expected: Mapping[str, Any], expected_path: Path) -> None:
+    case_status = expected.get("case_status")
+    if case_status != "quarantined":
+        raise ValueError(
+            f"case_status must be 'quarantined' before activation: "
+            f"{expected_path} has {case_status!r}"
+        )
+    network_mode = expected.get("network_mode")
+    if network_mode != "replay_only":
+        raise ValueError(
+            f"network_mode must be 'replay_only' before activation: "
+            f"{expected_path} has {network_mode!r}"
+        )
+    if expected.get("answer_leakage") == "explicit":
+        raise ValueError(f"explicit answer leakage cases cannot be activated: {expected_path}")
+
+
+def _activate_validate_selected_case(
+    cases_dir: Path,
+    case_id: str,
+    workflow: str | None,
+) -> Any:
+    report = validate_case_directory(cases_dir, workflow=workflow)
+    _, manifest_issues = load_case_manifest(cases_dir)
+    report = append_global_issues(report, manifest_issues)
+    return select_validation_cases(report, [case_id])
+
+
+def _activate_run_report_path(
+    cases_dir: Path,
+    case_id: str,
+    run_report_path: Path | None,
+) -> Path:
+    if run_report_path is not None:
+        return run_report_path
+
+    runs_dir = cases_dir / "reports" / "runs"
+    candidates = sorted(
+        runs_dir.glob("*/run.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        try:
+            if _activate_run_report_entries(candidate, case_id):
+                return candidate
+        except ValueError:
+            continue
+
+    raise ValueError(
+        f"no run report containing {case_id} was found under {runs_dir}; "
+        "pass --run-report"
+    )
+
+
+def _activate_require_passing_run_report(run_report_path: Path, case_id: str) -> int:
+    entries = _activate_run_report_entries(run_report_path, case_id)
+    if not entries:
+        raise ValueError(f"run report does not contain {case_id}: {run_report_path}")
+
+    non_passing = [
+        str(entry.get("status"))
+        for entry in entries
+        if isinstance(entry, Mapping) and entry.get("status") != "passed"
+    ]
+    if non_passing:
+        statuses = ", ".join(non_passing)
+        raise ValueError(
+            f"run report has non-passing entries for {case_id}: {statuses} "
+            f"({run_report_path})"
+        )
+    return len(entries)
+
+
+def _activate_run_report_entries(run_report_path: Path, case_id: str) -> list[Mapping[str, Any]]:
+    try:
+        report = load_json_file(run_report_path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"cannot read run report {run_report_path}: {exc}") from exc
+
+    entries = report.get("cases")
+    if not isinstance(entries, list):
+        raise ValueError(f"run report must include a cases list: {run_report_path}")
+    return [
+        entry
+        for entry in entries
+        if isinstance(entry, Mapping) and entry.get("case_id") == case_id
+    ]
 
 
 def _cmd_collect_case(args: argparse.Namespace) -> int:
