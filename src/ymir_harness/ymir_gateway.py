@@ -20,12 +20,14 @@ from ymir_harness.jira_replay import (
     jira_search_replay_miss,
     load_jira_search_response,
 )
+from ymir_harness.replay_metadata import install_specfile_changelog_replay
 from ymir_harness.ymir_source import ensure_ymir_source_path
 
 
 def main() -> None:
     ensure_ymir_source_path()
     _install_optional_gateway_shims()
+    install_specfile_changelog_replay()
     _patch_no_write_gateway_tools()
     from ymir.tools.privileged.gateway import main as gateway_main  # type: ignore[import-not-found]
 
