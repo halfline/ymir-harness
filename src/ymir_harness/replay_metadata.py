@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -67,6 +68,44 @@ def recorded_changelog_context(
         timestamp=timestamp.date(),
         git_timestamp=timestamp_text,
     )
+
+
+def install_specfile_changelog_replay() -> None:
+    try:
+        from specfile import Specfile
+    except ImportError:
+        return
+
+    if getattr(Specfile, "_ymir_harness_changelog_replay_patched", False):
+        return
+
+    original_add_changelog_entry = Specfile.add_changelog_entry
+
+    def add_changelog_entry(
+        self: Any,
+        entry: Any,
+        author: str | None = None,
+        email: str | None = None,
+        timestamp: Any = None,
+        evr: str | None = None,
+    ) -> Any:
+        context = changelog_context_from_environment(os.environ)
+        if context is not None:
+            author = author or context.author
+            email = email or context.email
+            timestamp = timestamp or context.timestamp
+        return original_add_changelog_entry(
+            self,
+            entry,
+            author=author,
+            email=email,
+            timestamp=timestamp,
+            evr=evr,
+        )
+
+    Specfile.add_changelog_entry = add_changelog_entry
+    Specfile._ymir_harness_changelog_replay_patched = True
+    Specfile._ymir_harness_original_add_changelog_entry = original_add_changelog_entry
 
 
 def changelog_context_from_environment(
