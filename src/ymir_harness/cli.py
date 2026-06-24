@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -1104,6 +1105,7 @@ def _prepare_mock_pre_fix_ref(
             requested_branch=requested_branch,
             remote_url=remote_url,
         )
+        or _prepare_patch_parent_ref(args, expected=expected, remote_url=remote_url)
         or resolve_source_cache_ref(
             args.cases,
             args.case_id,
@@ -1154,6 +1156,57 @@ def _prepare_internal_rhel_branch_parent_ref(
     return None
 
 
+def _prepare_patch_parent_ref(
+    args: argparse.Namespace,
+    *,
+    expected: Mapping[str, Any],
+    remote_url: str,
+) -> str | None:
+    for url in (
+        *_string_list(expected.get("patch_urls")),
+        *_string_list(expected.get("fix_sources")),
+    ):
+        commit = _prepare_commit_sha_from_url(url)
+        if commit is None:
+            continue
+        parent = _prepare_source_cache_parent(args, remote_url=remote_url, commit=commit)
+        if parent is not None:
+            return parent
+    return None
+
+
+def _prepare_commit_sha_from_url(url: str) -> str | None:
+    match = re.search(r"/-/commit/([0-9a-f]{40})(?:[./?#]|$)", url, re.IGNORECASE)
+    if match is not None:
+        return match.group(1)
+    match = re.search(r"/commit/([0-9a-f]{40})(?:[./?#]|$)", url, re.IGNORECASE)
+    return match.group(1) if match is not None else None
+
+
+def _prepare_source_cache_parent(
+    args: argparse.Namespace,
+    *,
+    remote_url: str,
+    commit: str,
+) -> str | None:
+    repository = source_cache_repo_for_object(args.cases, args.case_id, remote_url, commit)
+    if repository is None:
+        return None
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "--verify", f"{commit}^"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    parent = completed.stdout.strip()
+    if not parent or not source_cache_contains_object(args.cases, args.case_id, remote_url, parent):
+        return None
+    return parent
+
+
 def _prepare_zstream_override(branch: str, expected_branch: str) -> dict[str, str]:
     if expected_branch == branch:
         return {}
@@ -1168,6 +1221,15 @@ def _string_or_none(value: Any) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = value.strip()
+        return [value] if value else []
+    if not isinstance(value, list | tuple):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
 def _prepare_has_replay_candidates(
