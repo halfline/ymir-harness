@@ -677,6 +677,64 @@ def test_capture_missing_deduplicates_source_repo_aliases_with_overwrite(
     assert len(list((cases_dir / "source_cache" / "RHEL-12345" / "upstream").glob("*.json"))) == 1
 
 
+def test_capture_missing_records_koji_candidate_build_replay_miss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_file = tmp_path / "run.json"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        (
+            '{"reason": "Could not update release: Failed to update release: '
+            "Koji candidate build replay miss: package=redis "
+            'dist_git_branch=rhel-9.2.0"}\n'
+        ),
+    )
+    calls = []
+
+    def fake_fetch_candidate_build(
+        package: str,
+        dist_git_branch: str,
+        *,
+        as_of: str | None,
+        timeout: float | None,
+    ) -> dict[str, object]:
+        calls.append((package, dist_git_branch, as_of, timeout))
+        return {
+            "package": package,
+            "dist_git_branch": dist_git_branch,
+            "evr": {"epoch": 0, "version": "6.2.7", "release": "1.el9"},
+            "source_ref": "abc123",
+        }
+
+    monkeypatch.setattr(
+        capture_missing_module,
+        "fetch_candidate_build",
+        fake_fetch_candidate_build,
+    )
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            as_of="2026-05-31T07:21:36Z",
+            http_timeout=12.5,
+        )
+    )
+
+    assert calls == [("redis", "rhel-9.2.0", "2026-05-31T07:21:36Z", 12.5)]
+    assert [capture.key for capture in result.captured_koji_candidate_builds] == [
+        "redis|rhel-9.2.0"
+    ]
+    manifest = json.loads(
+        (cases_dir / "web_cache" / "RHEL-12345" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["koji_candidate_builds"]["redis|rhel-9.2.0"]["source_ref"] == "abc123"
+
+
 def test_capture_missing_skips_disallowed_hosts(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     run_file = tmp_path / "run.json"
