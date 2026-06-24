@@ -1106,6 +1106,7 @@ def _prepare_mock_pre_fix_ref(
             remote_url=remote_url,
         )
         or _prepare_patch_parent_ref(args, expected=expected, remote_url=remote_url)
+        or _prepare_merge_request_parent_ref(args, remote_url=remote_url)
         or resolve_source_cache_ref(
             args.cases,
             args.case_id,
@@ -1172,6 +1173,41 @@ def _prepare_patch_parent_ref(
         parent = _prepare_source_cache_parent(args, remote_url=remote_url, commit=commit)
         if parent is not None:
             return parent
+    return None
+
+
+def _prepare_merge_request_parent_ref(
+    args: argparse.Namespace,
+    *,
+    remote_url: str,
+) -> str | None:
+    commits_path = args.cases / "web_cache" / args.case_id / "gitlab" / "commits.json"
+    try:
+        commits = json.loads(commits_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(commits, list):
+        return None
+
+    commit_ids = {
+        commit.get("id")
+        for commit in commits
+        if isinstance(commit, Mapping) and isinstance(commit.get("id"), str)
+    }
+    for commit in commits:
+        if not isinstance(commit, Mapping):
+            continue
+        parent_ids = commit.get("parent_ids")
+        if not isinstance(parent_ids, list):
+            continue
+        for parent_id in parent_ids:
+            if (
+                isinstance(parent_id, str)
+                and parent_id
+                and parent_id not in commit_ids
+                and source_cache_contains_object(args.cases, args.case_id, remote_url, parent_id)
+            ):
+                return parent_id
     return None
 
 
