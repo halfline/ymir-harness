@@ -88,7 +88,8 @@ MISSING_URL_PATTERNS = (
 MISSING_LOOKASIDE_PATTERN = re.compile(
     r"([A-Za-z0-9][A-Za-z0-9._+-]*"
     r"(?:\.tar(?:\.[A-Za-z0-9]+)?|\.tgz|\.tbz2|\.txz|\.zip)) "
-    r"not found in lookaside cache"
+    r"(?:(?:tarball|archive|source|file)\s+)?"
+    r"(?:was\s+)?not\s+(?:found|available)\s+in\s+(?:the\s+)?lookaside cache"
 )
 TEXT_SUFFIXES = {".json", ".log", ".md", ".out", ".txt"}
 
@@ -1481,9 +1482,7 @@ def _missing_lookaside_sources_from_run_path(
         if base_url is None:
             continue
         for local_clone in _actual_local_clones(actual, run_path, case_id):
-            entries = {
-                entry.filename: entry for entry in _sources_file_entries(local_clone / "sources")
-            }
+            entries = _lookaside_entries_for_missing(local_clone, filenames)
             for filename in filenames:
                 source = entries.get(filename)
                 if source is None:
@@ -1503,6 +1502,35 @@ def _missing_lookaside_sources_from_run_path(
                     )
                 )
     return tuple(candidates)
+
+
+def _lookaside_entries_for_missing(
+    local_clone: Path, filenames: Sequence[str]
+) -> dict[str, _LookasideSource]:
+    entries = {entry.filename: entry for entry in _sources_file_entries(local_clone / "sources")}
+    missing = [filename for filename in filenames if filename not in entries]
+    if missing:
+        entries.update(_sources_file_entries_from_distgit_patches(local_clone, missing))
+    return entries
+
+
+def _sources_file_entries_from_distgit_patches(
+    local_clone: Path, filenames: Sequence[str]
+) -> dict[str, _LookasideSource]:
+    needed = set(filenames)
+    entries: dict[str, _LookasideSource] = {}
+    for patch_path in sorted((*local_clone.glob("*.patch"), *local_clone.glob("*.diff"))):
+        try:
+            lines = patch_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            entry = _parse_sources_file_line(line[1:])
+            if entry is not None and entry.filename in needed:
+                entries[entry.filename] = entry
+    return entries
 
 
 def _missing_lookaside_filenames(actual: Mapping[str, Any]) -> tuple[str, ...]:
