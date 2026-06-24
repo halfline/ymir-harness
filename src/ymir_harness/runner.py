@@ -332,8 +332,18 @@ copy_lookaside_sources() {
     [ -n "$source_cache" ] || return 0
     lookaside="$source_cache/lookaside"
     [ -d "$lookaside" ] || return 0
-    for source in "$lookaside"/*; do
-        [ -f "$source" ] || continue
+    [ -f sources ] || return 0
+    sed -n -E '
+        s/^[[:space:]]*[A-Za-z0-9_+.-]+[[:space:]]+\\(([^)]+)\\)[[:space:]]*=[[:space:]]*[0-9A-Fa-f]+[[:space:]]*$/\\1/p
+        s/^[[:space:]]*[A-Za-z0-9_+.-]+\\(([^)]+)\\)[[:space:]]*=[[:space:]]*[0-9A-Fa-f]+[[:space:]]*$/\\1/p
+        s/^[[:space:]]*[0-9A-Fa-f]+[[:space:]]+.*[[:space:]]([^[:space:]]+)[[:space:]]*$/\\1/p
+    ' sources | while IFS= read -r filename; do
+        [ -n "$filename" ] || continue
+        source="$lookaside/$filename"
+        if [ ! -f "$source" ]; then
+            printf '%s was not available in the lookaside cache\n' "$filename" >&2
+            return 1
+        fi
         destination="$(pwd)/$(basename "$source")"
         [ -e "$destination" ] || cp -p "$source" "$destination"
     done
