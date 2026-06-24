@@ -2399,6 +2399,7 @@ def _write_web_cache(
     required_urls = list(
         dict.fromkeys(
             [
+                *_expected_patch_urls(request, fetched),
                 *_effective_patch_urls(request, fetched),
                 *[record.url for record in request.web_records],
                 *[record.url for record in fetched.web_records],
