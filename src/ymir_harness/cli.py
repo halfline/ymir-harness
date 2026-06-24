@@ -476,6 +476,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace existing collected or captured fixture files",
     )
+    prepare.add_argument(
+        "--activate-on-pass",
+        action="store_true",
+        help="promote the case to active after prepare-case finishes with a passing replay",
+    )
     prepare.add_argument("--json", action="store_true", help="print preparation result JSON")
     prepare.add_argument(
         "--provenance",
@@ -942,6 +947,19 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
         sys.stderr.write(f"prepare-case failed: {exc}\n")
         return 2
 
+    if exit_code == 0 and args.activate_on_pass:
+        try:
+            activation = _activate_case(
+                args.cases,
+                args.case_id,
+                workflow=_validation_workflow(args.workflow),
+                run_report_path=_prepare_success_run_report(payload),
+            )
+        except ValueError as exc:
+            sys.stderr.write(f"prepare-case activation failed: {exc}\n")
+            return 2
+        payload["activation"] = activation
+
     encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if args.json:
         sys.stdout.write(encoded)
@@ -974,6 +992,10 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
                 sys.stdout.write(
                     f"  auto-allowed hosts: {', '.join(str(host) for host in auto_allowed_hosts)}\n"
                 )
+        if activation := payload.get("activation"):
+            sys.stdout.write(
+                f"activated {activation['case_id']} using {activation['run_report']}\n"
+            )
     return exit_code
 
 
@@ -1075,6 +1097,22 @@ def _prepare_case(
 
     payload["collected"] = collected
     return payload, exit_code
+
+
+def _prepare_success_run_report(payload: Mapping[str, object]) -> Path:
+    iterations = payload.get("iterations")
+    if not isinstance(iterations, list):
+        raise ValueError("prepare-case payload does not include iterations")
+    for iteration in reversed(iterations):
+        if not isinstance(iteration, Mapping):
+            continue
+        run = iteration.get("run")
+        if not isinstance(run, Mapping):
+            continue
+        run_json = run.get("run_json")
+        if isinstance(run_json, str) and run_json:
+            return Path(run_json)
+    raise ValueError("prepare-case did not produce a run report for activation")
 
 
 def _prepare_has_only_recorded_replay_candidates(capture_result: CaptureMissingResult) -> bool:
