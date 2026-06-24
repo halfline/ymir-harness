@@ -347,6 +347,105 @@ def test_cli_collect_case_allows_jira_derived_metadata(
     assert request.network_mode is None
 
 
+def test_cli_activate_case_promotes_quarantined_case(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_activatable_case(cases_dir)
+    run_report = cases_dir / "reports" / "runs" / "passing" / "run.json"
+    _write_activation_run_report(run_report, "RHEL-12345", ["passed", "passed"])
+
+    assert (
+        main(
+            [
+                "activate-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--run-report",
+                str(run_report),
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "activated"
+    assert output["run_report_entries"] == 2
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["case_status"] == "active"
+    assert "case_status_reason" not in expected
+    validation = json.loads(
+        (cases_dir / "reports" / "fixture-validation.json").read_text(encoding="utf-8")
+    )
+    assert validation["summary"]["invalid"] == 0
+
+
+def test_cli_activate_case_refuses_non_passing_report(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_activatable_case(cases_dir)
+    run_report = cases_dir / "reports" / "runs" / "failed" / "run.json"
+    _write_activation_run_report(run_report, "RHEL-12345", ["passed", "failed"])
+
+    assert (
+        main(
+            [
+                "activate-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--run-report",
+                str(run_report),
+            ]
+        )
+        == 1
+    )
+
+    output = capsys.readouterr()
+    assert "non-passing entries" in output.err
+    expected = json.loads(
+        (cases_dir / "expected" / "RHEL-12345.expected.json").read_text(encoding="utf-8")
+    )
+    assert expected["case_status"] == "quarantined"
+    assert expected["case_status_reason"] == "fixture scaffold prepared for replay experiments"
+
+
+def test_cli_activate_case_refuses_non_replay_only_case(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_activatable_case(cases_dir, network_mode="network_denied")
+    run_report = cases_dir / "reports" / "runs" / "passing" / "run.json"
+    _write_activation_run_report(run_report, "RHEL-12345", ["passed"])
+
+    assert (
+        main(
+            [
+                "activate-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--run-report",
+                str(run_report),
+            ]
+        )
+        == 1
+    )
+
+    assert "network_mode must be 'replay_only'" in capsys.readouterr().err
+
+
 def test_cli_run_writes_placeholder_report(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -2432,6 +2531,55 @@ def _write_result_report(path: Path, cases: dict[str, tuple[str, bool]]) -> None
                     "headline": headline,
                 }
                 for case_id, (status, headline) in cases.items()
+            ],
+        },
+    )
+
+
+def _write_activatable_case(cases_dir: Path, **overrides: object) -> None:
+    case_id = str(overrides.pop("case_id", "RHEL-12345"))
+    payload = {
+        "schema_version": 1,
+        "case_id": case_id,
+        "case_type": "not_affected",
+        "resolution": "not_affected",
+        "package": "dnsmasq",
+        "expected_basis": "maintainer_decision",
+        "ground_truth_confidence": "high",
+        "answer_leakage": "none",
+        "case_status": "quarantined",
+        "case_status_reason": "fixture scaffold prepared for replay experiments",
+        "network_mode": "replay_only",
+    }
+    payload.update(overrides)
+    _write_json(cases_dir / "expected" / f"{case_id}.expected.json", payload)
+    _write_json(
+        cases_dir / "web_cache" / case_id / "manifest.json",
+        {
+            "schema_version": 1,
+            "case_id": case_id,
+            "case_type": "not_affected",
+            "required_urls": [],
+            "recorded_files": {},
+        },
+    )
+
+
+def _write_activation_run_report(path: Path, case_id: str, statuses: list[str]) -> None:
+    _write_json(
+        path,
+        {
+            "schema_version": 1,
+            "run_id": path.parent.name,
+            "variant": "baseline",
+            "cases": [
+                {
+                    "case_id": case_id,
+                    "case_type": "not_affected",
+                    "status": status,
+                    "repetition": index,
+                }
+                for index, status in enumerate(statuses, start=1)
             ],
         },
     )
