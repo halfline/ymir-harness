@@ -28,6 +28,11 @@ from ymir_harness.jira_replay import (
     write_jira_dev_status_fixture,
     write_jira_search_fixture,
 )
+from ymir_harness.koji_replay import (
+    KOJI_CANDIDATE_BUILDS_MANIFEST_KEY,
+    candidate_build_key,
+    fetch_candidate_build,
+)
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.replay import canonicalize_replay_url, subprocess_command_key
 from ymir_harness.scoring import load_json_file
@@ -90,6 +95,11 @@ MISSING_LOOKASIDE_PATTERN = re.compile(
     r"(?:\.tar(?:\.[A-Za-z0-9]+)?|\.tgz|\.tbz2|\.txz|\.zip)) "
     r"(?:(?:tarball|archive|source|file)\s+)?"
     r"(?:was\s+)?not\s+(?:found|available)\s+in\s+(?:the\s+)?lookaside cache"
+)
+KOJI_CANDIDATE_BUILD_MISS_PATTERN = re.compile(
+    r"Koji candidate build replay miss:\s*"
+    r"package=(?P<package>[A-Za-z0-9._+-]+)\s+"
+    r"dist_git_branch=(?P<branch>[A-Za-z0-9._+-]+)"
 )
 TEXT_SUFFIXES = {".json", ".log", ".md", ".out", ".txt"}
 
@@ -194,6 +204,22 @@ class CapturedSubprocess:
 
 
 @dataclass(frozen=True)
+class CapturedKojiCandidateBuild:
+    package: str
+    dist_git_branch: str
+    key: str
+    relative_path: str
+
+    def to_json(self) -> dict[str, str]:
+        return {
+            "package": self.package,
+            "dist_git_branch": self.dist_git_branch,
+            "key": self.key,
+            "relative_path": self.relative_path,
+        }
+
+
+@dataclass(frozen=True)
 class _LookasideSource:
     filename: str
     algorithm: str
@@ -207,6 +233,20 @@ class _MissingLookasideSource:
     branch: str
     url: str
     source: _LookasideSource
+
+
+@dataclass(frozen=True)
+class _MissingKojiCandidateBuild:
+    package: str
+    dist_git_branch: str
+
+    @property
+    def key(self) -> str:
+        return candidate_build_key(self.package, self.dist_git_branch)
+
+    @property
+    def display_url(self) -> str:
+        return f"koji-candidate-build:{self.key}"
 
 
 @dataclass(frozen=True)
@@ -230,6 +270,7 @@ class CaptureMissingResult:
     captured_source: list[CapturedSource] = field(default_factory=list)
     captured_git_failures: list[CapturedGitFailure] = field(default_factory=list)
     captured_subprocesses: list[CapturedSubprocess] = field(default_factory=list)
+    captured_koji_candidate_builds: list[CapturedKojiCandidateBuild] = field(default_factory=list)
     skipped: list[CaptureFailure] = field(default_factory=list)
     failed: list[CaptureFailure] = field(default_factory=list)
 
@@ -245,6 +286,9 @@ class CaptureMissingResult:
             "captured_source": [capture.to_json() for capture in self.captured_source],
             "captured_git_failures": [capture.to_json() for capture in self.captured_git_failures],
             "captured_subprocesses": [capture.to_json() for capture in self.captured_subprocesses],
+            "captured_koji_candidate_builds": [
+                capture.to_json() for capture in self.captured_koji_candidate_builds
+            ],
             "skipped": [skip.to_json() for skip in self.skipped],
             "failed": [failure.to_json() for failure in self.failed],
         }
@@ -287,6 +331,9 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
     response_metadata = _manifest_mapping(manifest.get("response_metadata"))
     git_failures = _manifest_mapping(manifest.get("git_failures"))
     subprocess_replays = _manifest_raw_mapping(manifest.get("subprocess_replays"))
+    koji_candidate_builds = manifest.setdefault(KOJI_CANDIDATE_BUILDS_MANIFEST_KEY, {})
+    if not isinstance(koji_candidate_builds, dict):
+        koji_candidate_builds = None
     git_discovery_commands = _git_discovery_commands_from_run_path(run_path, urls)
     git_command_urls = _git_command_urls(git_discovery_commands)
     non_discovery_git_command_urls = _non_discovery_git_command_urls_from_run_path(run_path, urls)
@@ -530,6 +577,14 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
             )
         )
 
+    _capture_missing_koji_candidate_builds(
+        request,
+        result,
+        manifest_path=manifest_path,
+        records=koji_candidate_builds,
+        as_of=as_of,
+    )
+
     _capture_missing_lookaside_sources(cases_dir, request, result)
 
     manifest_changed = bool(
@@ -537,11 +592,14 @@ def capture_missing(request: CaptureMissingRequest) -> CaptureMissingResult:
         or result.captured_source
         or result.captured_git_failures
         or result.captured_subprocesses
+        or result.captured_koji_candidate_builds
     )
     if not request.dry_run and manifest_changed:
         manifest["required_urls"] = required_urls
         manifest["recorded_files"] = recorded_files
         manifest["response_metadata"] = response_metadata
+        if koji_candidate_builds is not None:
+            manifest[KOJI_CANDIDATE_BUILDS_MANIFEST_KEY] = koji_candidate_builds
         if git_failures:
             manifest["git_failures"] = git_failures
         else:
@@ -577,6 +635,83 @@ def _blocked_jira_requests_from_run_path(run_path: Path) -> list[JiraReplayMiss]
             for miss in jira_requests_from_run_path(run_path)
         }.values()
     )
+
+
+def _capture_missing_koji_candidate_builds(
+    request: CaptureMissingRequest,
+    result: CaptureMissingResult,
+    *,
+    manifest_path: Path,
+    records: dict[str, Any] | None,
+    as_of: str | None,
+) -> None:
+    misses = _missing_koji_candidate_builds_from_run_path(request.run_path)
+    if not misses:
+        return
+    if records is None:
+        for miss in misses:
+            result.failed.append(
+                CaptureFailure(
+                    url=miss.display_url,
+                    reason=f"{KOJI_CANDIDATE_BUILDS_MANIFEST_KEY} is not an object",
+                )
+            )
+        return
+
+    for miss in misses:
+        if miss.key in records and not request.overwrite:
+            result.skipped.append(
+                CaptureFailure(
+                    url=miss.display_url, reason="Koji candidate build is already recorded"
+                )
+            )
+            continue
+        if request.dry_run:
+            continue
+        try:
+            records[miss.key] = fetch_candidate_build(
+                miss.package,
+                miss.dist_git_branch,
+                as_of=as_of,
+                timeout=request.http_timeout,
+            )
+        except Exception as exc:
+            result.failed.append(CaptureFailure(url=miss.display_url, reason=str(exc)))
+            continue
+        result.captured_koji_candidate_builds.append(
+            CapturedKojiCandidateBuild(
+                package=miss.package,
+                dist_git_branch=miss.dist_git_branch,
+                key=miss.key,
+                relative_path=str(manifest_path.relative_to(request.cases_dir.resolve())),
+            )
+        )
+
+
+def _missing_koji_candidate_builds_from_run_path(
+    run_path: Path,
+) -> tuple[_MissingKojiCandidateBuild, ...]:
+    if run_path.is_file():
+        paths = [run_path]
+    elif run_path.is_dir():
+        paths = sorted(path for path in run_path.rglob("*") if _looks_like_text_artifact(path))
+    else:
+        raise CaptureMissingError(f"run path does not exist: {run_path}")
+
+    misses: list[_MissingKojiCandidateBuild] = []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for match in KOJI_CANDIDATE_BUILD_MISS_PATTERN.finditer(text):
+            misses.append(
+                _MissingKojiCandidateBuild(
+                    package=match.group("package"),
+                    dist_git_branch=match.group("branch"),
+                )
+            )
+    return tuple({miss.key: miss for miss in misses}.values())
 
 
 def _git_discovery_commands_from_run_path(
