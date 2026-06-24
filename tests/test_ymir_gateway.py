@@ -151,6 +151,11 @@ def test_patch_no_write_gateway_tools_replays_lookaside(
     lookaside = source_cache / "lookaside"
     lookaside.mkdir(parents=True)
     (lookaside / "redis-6.2.20.tar.gz").write_text("archive\n", encoding="utf-8")
+    (lookaside / "redis-6.2.22.tar.gz").write_text("future archive\n", encoding="utf-8")
+    (tmp_path / "sources").write_text(
+        "SHA512 (redis-6.2.20.tar.gz) = deadbeef\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("DRY_RUN", "true")
     monkeypatch.setenv("YMIR_BENCHMARK_SOURCE_CACHE_DIR", str(source_cache))
 
@@ -173,6 +178,7 @@ def test_patch_no_write_gateway_tools_replays_lookaside(
         "Successfully prepped sources from replay cache",
     )
     assert (tmp_path / "redis-6.2.20.tar.gz").read_text(encoding="utf-8") == "archive\n"
+    assert not (tmp_path / "redis-6.2.22.tar.gz").exists()
 
 
 def test_patch_no_write_gateway_tools_replays_patch_url(
