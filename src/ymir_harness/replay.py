@@ -7,6 +7,7 @@ import re
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from urllib.error import HTTPError
 from pathlib import Path
 from typing import Any
@@ -140,6 +141,7 @@ class ReplayCache:
         self._response_metadata = self._load_response_metadata(manifest_path)
         self._git_failures = self._load_git_failures(manifest_path)
         self._subprocess_replays = self._load_subprocess_replays(manifest_path)
+        self._as_of = self._load_case_as_of(manifest_path)
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> "ReplayCache | None":
@@ -186,9 +188,10 @@ class ReplayCache:
 
         path = self.path_for_url(url)
         try:
-            return path.read_bytes()
+            body = path.read_bytes()
         except OSError as exc:
             raise ReplayCacheError(f"recorded file cannot be read for URL {url}: {path}") from exc
+        return self._filter_recorded_body(url, body)
 
     def open_urllib_response(self, url: Any) -> addinfourl:
         url = _url_text(url)
@@ -278,6 +281,23 @@ class ReplayCache:
             and recorded
         }
         return output
+
+    def _filter_recorded_body(self, url: str, body: bytes) -> bytes:
+        if self._as_of is None or _source_gitlab_branches_request(url) is None:
+            return body
+        return _filter_gitlab_branches_body_as_of(body, self._as_of)
+
+    def _load_case_as_of(self, manifest_path: Path) -> datetime | None:
+        case_id = manifest_path.parent.name
+        cases_dir = manifest_path.parent.parent.parent
+        reconstruction_path = cases_dir / "jiras" / case_id / "reconstruction.json"
+        try:
+            reconstruction = json.loads(reconstruction_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(reconstruction, Mapping):
+            return None
+        return _parse_replay_timestamp(reconstruction.get("as_of"))
 
     def _load_response_metadata(self, manifest_path: Path) -> dict[str, Mapping[str, Any]]:
         manifest = self._load_manifest(manifest_path)
@@ -948,6 +968,70 @@ def _gitlab_branch_payloads(repo_path: Path, project_url: str) -> list[dict[str,
             }
         )
     return branches
+
+
+def _filter_gitlab_branches_body_as_of(body: bytes, as_of: datetime) -> bytes:
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    if not isinstance(payload, list):
+        return body
+
+    branches = []
+    for branch in payload:
+        if not isinstance(branch, Mapping):
+            branches.append(branch)
+            continue
+        if _gitlab_branch_is_after(branch, as_of):
+            continue
+        branches.append(branch)
+    return json.dumps(branches, separators=(",", ":")).encode("utf-8")
+
+
+def _gitlab_branch_is_after(branch: Mapping[str, Any], as_of: datetime) -> bool:
+    name = branch.get("name")
+    if isinstance(name, str) and _text_contains_date_after(name, as_of):
+        return True
+    commit = branch.get("commit")
+    return isinstance(commit, Mapping) and _gitlab_commit_is_after(commit, as_of)
+
+
+def _gitlab_commit_is_after(commit: Mapping[str, Any], as_of: datetime) -> bool:
+    for field_name in ("committed_date", "authored_date", "created_at"):
+        timestamp = _parse_replay_timestamp(commit.get(field_name))
+        if timestamp is not None:
+            return timestamp > as_of
+    return False
+
+
+def _text_contains_date_after(value: str, as_of: datetime) -> bool:
+    for match in re.finditer(r"\d{4}[-_]\d{2}[-_]\d{2}", value):
+        candidate = match.group(0).replace("_", "-")
+        try:
+            date = datetime.fromisoformat(candidate).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if date > as_of:
+            return True
+    return False
+
+
+def _parse_replay_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = value
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    if len(candidate) >= 5 and candidate[-5] in {"+", "-"} and candidate[-3] != ":":
+        candidate = f"{candidate[:-2]}:{candidate[-2:]}"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _gitlab_commit_payload(repo_path: Path, project_url: str, commit: str) -> dict[str, Any]:
