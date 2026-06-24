@@ -933,7 +933,8 @@ def _cmd_capture_missing(args: argparse.Namespace) -> int:
             f"captured {len(result.captured)} missing URL(s), "
             f"{len(result.captured_source)} source fixture(s), "
             f"{len(result.captured_git_failures)} git failure(s), "
-            f"{len(result.captured_subprocesses)} subprocess replay(s); "
+            f"{len(result.captured_subprocesses)} subprocess replay(s), "
+            f"{len(result.captured_koji_candidate_builds)} Koji candidate build(s); "
             f"skipped {len(result.skipped)}; failed {len(result.failed)}\n"
         )
     return 1 if result.failed else 0
