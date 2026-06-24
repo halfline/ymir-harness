@@ -519,6 +519,7 @@ def _patch_touched_files_metric(
     if (
         not expected_files
         and cases_dir is not None
+        and _normalize_token(expected.get("reference_patch_mode")) != "semantic_reference"
         and (actual_files or _actual_result_field(actual, "workflow") != "ymir-triage")
     ):
         expected_files = _reference_patch_touched_files(cases_dir, case_id, expected=expected)
