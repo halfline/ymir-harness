@@ -1493,6 +1493,148 @@ def test_cli_prepare_case_infers_mock_prefixed_ref_from_distgit_commit_patch(
     }
 
 
+def test_cli_prepare_case_infers_mock_prefixed_ref_from_merge_request_commits(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    case_id = "RHEL-12345"
+    remote_url = "https://gitlab.com/redhat/centos-stream/rpms/perl-HTTP-Daemon.git"
+
+    source_repo = tmp_path / "centos-source"
+    source_repo.mkdir()
+    subprocess.run(["git", "init", str(source_repo)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "-C", str(source_repo), "checkout", "-b", "c8s"], check=True)
+    (source_repo / "perl-HTTP-Daemon.spec").write_text(
+        "Name: perl-HTTP-Daemon\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source_repo), "add", "perl-HTTP-Daemon.spec"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "seed",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    pre_fix_ref = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "c8s"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    (source_repo / "perl-HTTP-Daemon.spec").write_text(
+        "Name: perl-HTTP-Daemon\nPatch3: CVE.patch\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source_repo), "add", "perl-HTTP-Daemon.spec"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fix CVE",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    fix_ref = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "c8s"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    (source_repo / "gating.yaml").write_text("---\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source_repo), "add", "gating.yaml"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "add gating",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    follow_up_ref = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "c8s"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    _write_source_fixture(cases_dir, tmp_path, case_id, source_repo, remote_url)
+    _write_json(
+        cases_dir / "web_cache" / case_id / "gitlab" / "commits.json",
+        [
+            {
+                "id": follow_up_ref,
+                "parent_ids": [fix_ref],
+                "title": "add gating",
+            },
+            {
+                "id": fix_ref,
+                "parent_ids": [pre_fix_ref],
+                "title": "fix CVE",
+            },
+        ],
+    )
+
+    warnings: list[str] = []
+    written_paths: list[Path] = []
+    cli_module._prepare_write_inferred_mock_data(
+        argparse.Namespace(
+            cases=cases_dir,
+            case_id=case_id,
+            workflow="ymir-backport",
+            overwrite=True,
+        ),
+        {
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "fix_sources": [
+                "https://gitlab.com/redhat/centos-stream/rpms/perl-HTTP-Daemon/-/merge_requests/5"
+            ],
+            "package": "perl-HTTP-Daemon",
+            "target_branch": "c8s",
+        },
+        written_paths,
+        warnings,
+    )
+
+    mock_path = cases_dir / "mock_data" / "backport" / f"{case_id}.json"
+    mock_data = json.loads(mock_path.read_text(encoding="utf-8"))
+    assert warnings == []
+    assert written_paths == [mock_path]
+    assert mock_data["repos"][0] == {
+        "branch": "c8s",
+        "package": "perl-HTTP-Daemon",
+        "pre_fix_ref": pre_fix_ref,
+        "remote_url": remote_url,
+    }
+
+
 def test_cli_prepare_case_overwrites_backport_expected_branch_from_triage_result(
     tmp_path: Path,
 ) -> None:
