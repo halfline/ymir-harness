@@ -21,6 +21,9 @@ from typing import Any
 from ymir_harness.artifacts import capture_backport_artifacts, merge_artifact_fields
 from ymir_harness.llm_judge import evaluate_backport_llm_judge
 from ymir_harness.models import SCHEMA_VERSION
+from ymir_harness.replay_metadata import (
+    replay_metadata_environment,
+)
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseRequest
 from ymir_harness.scoring import load_json_file
 from ymir_harness.source_fixtures import find_source_cache_repository
@@ -377,6 +380,7 @@ def _workflow_environment(
     *,
     workflow: AsyncWorkflow | None,
 ) -> Any:
+    request = _request_with_replay_metadata_environment(request)
     if workflow is not None or _string_or_none(request.environment.get(MCP_GATEWAY_URL_ENV)):
         _workflow_debug(request, "workflow_environment", mode="external_gateway_or_injected")
         with _request_environment(request):
@@ -924,6 +928,15 @@ def _request_with_environment(
         variant=request.variant,
         features=request.features,
     )
+
+
+def _request_with_replay_metadata_environment(request: RunCaseRequest) -> RunCaseRequest:
+    replay_env = replay_metadata_environment(request.cases_dir, request.case_id)
+    if not replay_env:
+        return request
+    environment = dict(request.environment)
+    environment.update(replay_env)
+    return _request_with_environment(request, environment)
 
 
 def _triage_dependencies(
