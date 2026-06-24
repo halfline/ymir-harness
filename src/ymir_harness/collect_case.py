@@ -1914,11 +1914,15 @@ def _write_expected(
         "case_status_reason": request.case_status_reason,
         "network_mode": request.network_mode,
     }
+    reference_patch_mode = request.reference_patch_mode or _infer_reference_patch_mode(
+        request,
+        fetched,
+    )
     for name, value in (
         ("target_branch", request.target_branch),
         ("fix_version", request.fix_version),
         ("notes", request.notes),
-        ("reference_patch_mode", request.reference_patch_mode),
+        ("reference_patch_mode", reference_patch_mode),
     ):
         if value is not None:
             expected[name] = value
@@ -2384,6 +2388,19 @@ def _reference_patch_body(
     if bodies:
         return b"\n".join(bodies)
     return fetched.gitlab_patch_body
+
+
+def _infer_reference_patch_mode(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> str | None:
+    if request.expected_basis != "historical_jira_state":
+        return None
+    if request.resolution not in {"backport", "rebase", "rebuild"}:
+        return None
+    if request.reference_patch is not None or _reference_patch_body(request, fetched) is not None:
+        return "semantic_reference"
+    return None
 
 
 def _write_web_cache(
