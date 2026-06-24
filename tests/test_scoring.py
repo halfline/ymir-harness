@@ -618,6 +618,37 @@ def test_score_case_derives_patch_scope_from_reference_patch(tmp_path: Path) -> 
     assert metrics["patch_touched_files"].expected == ["source.c"]
 
 
+def test_score_case_does_not_derive_patch_scope_from_semantic_reference(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    _write_text(
+        cases_dir / "mock_data" / "backport" / "reference_patches" / "RHEL-12345.patch",
+        _source_patch_text("redis.spec"),
+    )
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "redis",
+        "reference_patch_mode": "semantic_reference",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "redis",
+        "patch_touched_files": ["src/rdb.c"],
+    }
+
+    report = score_case(expected, actual, cases_dir=cases_dir)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["patch_touched_files"].status == "skipped"
+    assert metrics["patch_touched_files"].actual == ["src/rdb.c"]
+
+
 def test_score_case_skips_reference_patch_scope_for_triage_without_patch_scope(
     tmp_path: Path,
 ) -> None:
