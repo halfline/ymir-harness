@@ -1262,6 +1262,137 @@ def test_cli_prepare_case_infers_mock_data_from_matching_source_branch(
     }
 
 
+def test_cli_prepare_case_infers_backport_mock_branch_from_triage_result(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    case_id = "RHEL-12345"
+    source_remote_url = "https://gitlab.com/redhat/centos-stream/rpms/qt6-qtdeclarative.git"
+    replay_remote_url = "https://gitlab.com/redhat/rhel/rpms/qt6-qtdeclarative.git"
+
+    source_repo = tmp_path / "centos-source"
+    source_repo.mkdir()
+    subprocess.run(["git", "init", str(source_repo)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "-C", str(source_repo), "checkout", "-b", "c10s"], check=True)
+    (source_repo / "qt6-qtdeclarative.spec").write_text(
+        "Name: qt6-qtdeclarative\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source_repo), "add", "qt6-qtdeclarative.spec"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "seed",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    pre_fix_ref = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "c10s"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    (source_repo / "qt6-qtdeclarative.spec").write_text(
+        "Name: qt6-qtdeclarative\nPatch1: fix.patch\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source_repo), "add", "qt6-qtdeclarative.spec"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repo),
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fix",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    fix_ref = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "c10s"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    _write_source_fixture(cases_dir, tmp_path, case_id, source_repo, source_remote_url)
+    _write_json(
+        cases_dir / "triage_results" / f"{case_id}.actual.json",
+        {
+            "case_id": case_id,
+            "data": {
+                "package": "qt6-qtdeclarative",
+            },
+            "resolution": "backport",
+            "target_branch": "rhel-10.2",
+        },
+    )
+    _write_json(
+        cases_dir
+        / "web_cache"
+        / case_id
+        / "gitlab"
+        / "internal_rhel"
+        / "qt6-qtdeclarative"
+        / "branches.json",
+        [
+            {
+                "commit": {
+                    "id": fix_ref,
+                    "parent_ids": [pre_fix_ref],
+                },
+                "name": "rhel-10.2",
+            }
+        ],
+    )
+
+    warnings: list[str] = []
+    written_paths: list[Path] = []
+    cli_module._prepare_write_inferred_mock_data(
+        argparse.Namespace(
+            cases=cases_dir,
+            case_id=case_id,
+            workflow="ymir-backport",
+            overwrite=True,
+        ),
+        {
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "package": "qt6-qtdeclarative",
+            "target_branch": "c10s",
+        },
+        written_paths,
+        warnings,
+    )
+
+    mock_path = cases_dir / "mock_data" / "backport" / f"{case_id}.json"
+    mock_data = json.loads(mock_path.read_text(encoding="utf-8"))
+    assert warnings == []
+    assert written_paths == [mock_path]
+    assert mock_data["repos"][0] == {
+        "branch": "rhel-10.2",
+        "package": "qt6-qtdeclarative",
+        "pre_fix_ref": pre_fix_ref,
+        "remote_url": replay_remote_url,
+    }
+    assert mock_data["zstream_override"] == {"10": "rhel-10.2"}
+
+
 def test_cli_prepare_case_overwrites_backport_expected_branch_from_triage_result(
     tmp_path: Path,
 ) -> None:
