@@ -625,6 +625,58 @@ def test_capture_missing_canonicalizes_escaped_newline_context_suffix(
     assert result.captured_git_failures == []
 
 
+def test_capture_missing_deduplicates_source_repo_aliases_with_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    source_repo, _pre_fix_ref = _create_git_repo(tmp_path)
+    gitconfig_path = tmp_path / "gitconfig"
+    gitconfig_path.write_text(
+        "\n".join(
+            [
+                f'[url "{source_repo.resolve().as_uri()}"]',
+                "\tinsteadOf = https://github.com/redis/redis.git",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig_path))
+    run_file = tmp_path / "run.json"
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_file,
+        "\n".join(
+            [
+                '{"reason": "external subprocess URL blocked: https://github.com/redis/redis"}',
+                '{"reason": "external subprocess URL blocked: https://github.com/redis/redis.git"}',
+                "",
+            ]
+        ),
+    )
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_file,
+            case_id="RHEL-12345",
+            overwrite=True,
+        )
+    )
+
+    assert result.candidate_urls == [
+        "https://github.com/redis/redis",
+        "https://github.com/redis/redis.git",
+    ]
+    assert [capture.url for capture in result.captured_source] == ["https://github.com/redis/redis"]
+    assert [(failure.url, failure.reason) for failure in result.skipped] == [
+        ("https://github.com/redis/redis.git", "source repo is already captured")
+    ]
+    assert len(list((cases_dir / "source_cache" / "RHEL-12345" / "upstream").glob("*.json"))) == 1
+
+
 def test_capture_missing_skips_disallowed_hosts(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     run_file = tmp_path / "run.json"
