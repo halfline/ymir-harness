@@ -273,8 +273,13 @@ def test_dry_run_package_shim_copies_lookaside_sources(tmp_path: Path) -> None:
     lookaside_dir = cases_dir / "source_cache" / "RHEL-12345" / "lookaside"
     lookaside_dir.mkdir(parents=True)
     (lookaside_dir / "redis.tar.gz").write_text("cached source\n", encoding="utf-8")
+    (lookaside_dir / "future.tar.gz").write_text("future source\n", encoding="utf-8")
     workdir = tmp_path / "work"
     workdir.mkdir()
+    (workdir / "sources").write_text(
+        "SHA512 (redis.tar.gz) = deadbeef\n",
+        encoding="utf-8",
+    )
     env = build_no_write_environment(
         cases_dir,
         tmp_path / "results",
@@ -293,6 +298,41 @@ def test_dry_run_package_shim_copies_lookaside_sources(tmp_path: Path) -> None:
     )
 
     assert (workdir / "redis.tar.gz").read_text(encoding="utf-8") == "cached source\n"
+    assert not (workdir / "future.tar.gz").exists()
+
+
+def test_dry_run_package_shim_reports_missing_referenced_lookaside_source(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "cases"
+    lookaside_dir = cases_dir / "source_cache" / "RHEL-12345" / "lookaside"
+    lookaside_dir.mkdir(parents=True)
+    (lookaside_dir / "redis.tar.gz").write_text("cached source\n", encoding="utf-8")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "sources").write_text(
+        "SHA512 (future.tar.gz) = deadbeef\n",
+        encoding="utf-8",
+    )
+    env = build_no_write_environment(
+        cases_dir,
+        tmp_path / "results",
+        base_env={"PATH": "/usr/bin:/bin"},
+        case_id="RHEL-12345",
+    )
+    rhpkg = Path(env["YMIR_BENCHMARK_COMMAND_SHIMS"]) / "rhpkg"
+
+    completed = subprocess.run(
+        [str(rhpkg), "sources"],
+        cwd=workdir,
+        env={**os.environ, **env},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    assert completed.stderr == "future.tar.gz was not available in the lookaside cache\n"
 
 
 def test_dry_run_package_shim_warns_on_noop_commands(tmp_path: Path) -> None:
