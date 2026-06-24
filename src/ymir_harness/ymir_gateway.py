@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import shutil
 import sys
 from collections.abc import AsyncIterator, Mapping
@@ -245,10 +246,15 @@ def _copy_replay_lookaside_sources(dist_git_path: Path) -> int:
     if not lookaside_dir.is_dir():
         raise ReplayCacheError(f"lookaside source cache is missing: {lookaside_dir}")
 
+    sources_file = dist_git_path / "sources"
+    source_names = _sources_file_names(sources_file)
     copied = 0
-    for source in sorted(lookaside_dir.iterdir()):
+    for source_name in source_names:
+        source = lookaside_dir / source_name
         if not source.is_file():
-            continue
+            raise ReplayCacheError(
+                f"{source_name} was not available in the lookaside cache"
+            )
         destination = dist_git_path / source.name
         if destination.exists():
             continue
@@ -257,6 +263,33 @@ def _copy_replay_lookaside_sources(dist_git_path: Path) -> int:
     if copied == 0 and not any(child.is_file() for child in lookaside_dir.iterdir()):
         raise ReplayCacheError(f"lookaside source cache is empty: {lookaside_dir}")
     return copied
+
+
+def _sources_file_names(path: Path) -> tuple[str, ...]:
+    if not path.is_file():
+        return ()
+    names: list[str] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        name = _parse_sources_file_name(line)
+        if name:
+            names.append(name)
+    return tuple(dict.fromkeys(names))
+
+
+def _parse_sources_file_name(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    modern = re.fullmatch(r"[A-Za-z0-9_+.-]+\s+\(([^)]+)\)\s+=\s*[0-9A-Fa-f]+", stripped)
+    if modern is not None:
+        return modern.group(1).strip()
+    tagged = re.fullmatch(r"[A-Za-z0-9_+.-]+\(([^)]+)\)\s*=\s*[0-9A-Fa-f]+", stripped)
+    if tagged is not None:
+        return tagged.group(1).strip()
+    legacy = stripped.split()
+    if len(legacy) >= 2 and re.fullmatch(r"[0-9A-Fa-f]+", legacy[0]):
+        return legacy[-1].strip()
+    return None
 
 
 def _install_optional_gateway_shims() -> None:
