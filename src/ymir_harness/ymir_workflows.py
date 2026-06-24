@@ -208,8 +208,14 @@ async def _run_ymir_backport(
     if missing_dependency is not None:
         return missing_dependency
 
+    using_default_agent_factory = agent_factory is None
     workflow_runner, default_agent_factory = _backport_dependencies(workflow, agent_factory)
     if workflow is None:
+        if using_default_agent_factory:
+            default_agent_factory = _bind_backport_agent_factory_fix_version(
+                default_agent_factory,
+                fix_version=inputs.fix_version,
+            )
         default_agent_factory = _wrap_backport_replay_agent_factory(
             default_agent_factory,
             request=request,
@@ -988,6 +994,21 @@ def _wrap_backport_replay_agent_factory(
         if inspect.isawaitable(result):
             return _wrap_backport_replay_agent_awaitable(result, request=request)
         return _wrap_backport_replay_agent(result, request=request)
+
+    return factory
+
+
+def _bind_backport_agent_factory_fix_version(
+    agent_factory: AgentFactory,
+    *,
+    fix_version: str | None,
+) -> AgentFactory:
+    if fix_version is None:
+        return agent_factory
+
+    def factory(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("fix_version", fix_version)
+        return agent_factory(*args, **kwargs)
 
     return factory
 
