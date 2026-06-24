@@ -37,9 +37,22 @@ RESULT_COMMENT_MARKERS = (
 JIRA_FIELD_ALIASES = {
     "fixed in build": ("customfield_10578",),
 }
+JIRA_DEV_SUMMARY_FIELDS = {"customfield_10000"}
+JIRA_EMBEDDED_LINK_VOLATILE_FIELDS = {
+    "customfield_10000",
+    "resolution",
+    "resolutiondate",
+    "status",
+    "statusCategory",
+    "statuscategorychangedate",
+    "updated",
+}
 EMPTY_JQL_PATTERN = re.compile(
     r"(?i)(?:\"(?P<quoted>[^\"]+)\"|(?P<bare>[A-Za-z][A-Za-z0-9_ ]+))\s+is\s+"
     r"(?P<not>not\s+)?empty\b"
+)
+JIRA_TIMESTAMP_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})"
 )
 
 
@@ -140,6 +153,7 @@ def reconstruct_issue_as_of(issue: Mapping[str, Any], *, as_of: str | None) -> d
     changelog = payload.get("changelog")
     histories = changelog.get("histories") if isinstance(changelog, Mapping) else None
     if not isinstance(histories, list):
+        _scrub_future_issue_fields(fields, as_of_timestamp)
         return payload
 
     future_histories = []
@@ -164,6 +178,7 @@ def reconstruct_issue_as_of(issue: Mapping[str, Any], *, as_of: str | None) -> d
     resolution_date = _parse_jira_timestamp(fields.get("resolutiondate"))
     if resolution_date is not None and resolution_date > as_of_timestamp:
         fields["resolutiondate"] = None
+    _scrub_future_issue_fields(fields, as_of_timestamp)
     return payload
 
 
@@ -454,6 +469,59 @@ def _rewind_field_from_changelog_item(fields: dict[str, Any], item: Mapping[str,
         return
     if target.startswith("customfield_"):
         fields[target] = from_string
+
+
+def _scrub_future_issue_fields(fields: dict[str, Any], as_of: datetime) -> None:
+    for field_name in JIRA_DEV_SUMMARY_FIELDS:
+        if _value_contains_timestamp_after(fields.get(field_name), as_of):
+            fields[field_name] = None
+    _scrub_embedded_issue_links(fields, as_of)
+
+
+def _scrub_embedded_issue_links(fields: dict[str, Any], as_of: datetime) -> None:
+    links = fields.get("issuelinks")
+    if not isinstance(links, list):
+        return
+    scrubbed_links = []
+    for link in links:
+        if not isinstance(link, Mapping):
+            scrubbed_links.append(copy.deepcopy(link))
+            continue
+        link_payload = copy.deepcopy(dict(link))
+        for issue_side in ("inwardIssue", "outwardIssue"):
+            issue = link_payload.get(issue_side)
+            if not isinstance(issue, Mapping):
+                continue
+            issue_payload = copy.deepcopy(dict(issue))
+            issue_fields = issue_payload.get("fields")
+            if isinstance(issue_fields, Mapping):
+                field_payload = copy.deepcopy(dict(issue_fields))
+                for field_name in JIRA_EMBEDDED_LINK_VOLATILE_FIELDS:
+                    field_payload.pop(field_name, None)
+                for field_name in list(field_payload):
+                    if (
+                        field_name.startswith("customfield_")
+                        and _value_contains_timestamp_after(field_payload[field_name], as_of)
+                    ):
+                        field_payload.pop(field_name, None)
+                issue_payload["fields"] = field_payload
+            link_payload[issue_side] = issue_payload
+        scrubbed_links.append(link_payload)
+    fields["issuelinks"] = scrubbed_links
+
+
+def _value_contains_timestamp_after(value: Any, as_of: datetime) -> bool:
+    if isinstance(value, str):
+        for match in JIRA_TIMESTAMP_PATTERN.finditer(value):
+            timestamp = _parse_jira_timestamp(match.group(0))
+            if timestamp is not None and timestamp > as_of:
+                return True
+        return False
+    if isinstance(value, Mapping):
+        return any(_value_contains_timestamp_after(item, as_of) for item in value.values())
+    if isinstance(value, list):
+        return any(_value_contains_timestamp_after(item, as_of) for item in value)
+    return False
 
 
 def _matches_empty_jql_predicates(issue: Mapping[str, Any], jql: str) -> bool:

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ymir_harness.jira_replay import filter_dev_status_as_of
+from ymir_harness.jira_replay import filter_dev_status_as_of, reconstruct_issue_as_of
 
 
 class JiraMockMaterializationError(RuntimeError):
@@ -35,8 +35,10 @@ def materialize_ymir_jira_mock(
     target_dir = ymir_jira_mock_dir(results_dir, repetition)
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    fixture_dirs = [(case_id, structured_jira_fixture_dir(cases_dir, case_id))]
-    linked_root = structured_jira_fixture_dir(cases_dir, case_id) / "linked"
+    root_fixture_dir = structured_jira_fixture_dir(cases_dir, case_id)
+    root_as_of = _fixture_as_of(root_fixture_dir)
+    fixture_dirs = [(case_id, root_fixture_dir)]
+    linked_root = root_fixture_dir / "linked"
     if linked_root.is_dir():
         fixture_dirs.extend(
             (path.name, path)
@@ -44,9 +46,19 @@ def materialize_ymir_jira_mock(
             if path.is_dir() and (path / "issue.json").is_file()
         )
 
+    payloads: dict[str, dict[str, Any]] = {}
     for fixture_id, fixture_dir in fixture_dirs:
+        payloads[fixture_id] = _build_ymir_jira_mock_issue_from_dir(
+            fixture_dir,
+            fixture_id,
+            fallback_as_of=root_as_of,
+        )
+
+    for payload in payloads.values():
+        _normalize_embedded_issue_links(payload, payloads)
+
+    for fixture_id, payload in payloads.items():
         target_path = target_dir / fixture_id
-        payload = _build_ymir_jira_mock_issue_from_dir(fixture_dir, fixture_id)
         target_path.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -59,7 +71,12 @@ def build_ymir_jira_mock_issue(cases_dir: Path, case_id: str) -> dict[str, Any]:
     return _build_ymir_jira_mock_issue_from_dir(jira_dir, case_id)
 
 
-def _build_ymir_jira_mock_issue_from_dir(jira_dir: Path, case_id: str) -> dict[str, Any]:
+def _build_ymir_jira_mock_issue_from_dir(
+    jira_dir: Path,
+    case_id: str,
+    *,
+    fallback_as_of: str | None = None,
+) -> dict[str, Any]:
     starting_issue_path = jira_dir / "starting-issue.json"
     issue_path = starting_issue_path if starting_issue_path.is_file() else jira_dir / "issue.json"
     uses_starting_issue = issue_path == starting_issue_path
@@ -86,6 +103,7 @@ def _build_ymir_jira_mock_issue_from_dir(jira_dir: Path, case_id: str) -> dict[s
     else:
         fields = copy.deepcopy(dict(fields))
     payload["fields"] = fields
+    as_of = _fixture_as_of(jira_dir) or fallback_as_of
 
     comments_path = jira_dir / "comments.json"
     links_path = jira_dir / "links.json"
@@ -113,7 +131,7 @@ def _build_ymir_jira_mock_issue_from_dir(jira_dir: Path, case_id: str) -> dict[s
         filtered_summary, filtered_details = filter_dev_status_as_of(
             summary if isinstance(summary, Mapping) else {},
             details if isinstance(details, Mapping) else {},
-            as_of=_fixture_as_of(jira_dir),
+            as_of=as_of,
         )
         payload["dev_status"] = {
             key: copy.deepcopy(value)
@@ -124,6 +142,8 @@ def _build_ymir_jira_mock_issue_from_dir(jira_dir: Path, case_id: str) -> dict[s
             }.items()
             if key not in {"schema_version", "case_id", "case_type", "reconstruction"}
         }
+    if as_of:
+        payload = reconstruct_issue_as_of(payload, as_of=as_of)
     return payload
 
 
@@ -231,3 +251,65 @@ def _normalized_remote_links(
     if not isinstance(link_values, list):
         raise JiraMockMaterializationError(f"Jira remote links must be a list: {path}")
     return copy.deepcopy(link_values)
+
+
+def _normalize_embedded_issue_links(
+    payload: dict[str, Any],
+    payloads_by_key: Mapping[str, Mapping[str, Any]],
+) -> None:
+    fields = payload.get("fields")
+    if not isinstance(fields, Mapping):
+        return
+    links = fields.get("issuelinks")
+    if not isinstance(links, list):
+        return
+
+    normalized_links = []
+    for link in links:
+        if not isinstance(link, Mapping):
+            normalized_links.append(copy.deepcopy(link))
+            continue
+        link_payload = copy.deepcopy(dict(link))
+        for issue_side in ("inwardIssue", "outwardIssue"):
+            issue = link_payload.get(issue_side)
+            if isinstance(issue, Mapping):
+                link_payload[issue_side] = _normalize_embedded_issue(issue, payloads_by_key)
+        normalized_links.append(link_payload)
+    fields["issuelinks"] = normalized_links
+
+
+def _normalize_embedded_issue(
+    issue: Mapping[str, Any],
+    payloads_by_key: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    issue_payload = copy.deepcopy(dict(issue))
+    issue_key = issue_payload.get("key")
+    source = payloads_by_key.get(str(issue_key)) if issue_key is not None else None
+    if not isinstance(source, Mapping):
+        return issue_payload
+    source_fields = source.get("fields")
+    if not isinstance(source_fields, Mapping):
+        return issue_payload
+
+    embedded_fields = issue_payload.get("fields")
+    if isinstance(embedded_fields, Mapping):
+        field_payload = copy.deepcopy(dict(embedded_fields))
+    else:
+        field_payload = {}
+
+    for field_name in (
+        "components",
+        "fixVersions",
+        "issuetype",
+        "priority",
+        "resolution",
+        "resolutiondate",
+        "status",
+        "summary",
+        "updated",
+        "versions",
+    ):
+        if field_name in source_fields:
+            field_payload[field_name] = copy.deepcopy(source_fields[field_name])
+    issue_payload["fields"] = field_payload
+    return issue_payload
