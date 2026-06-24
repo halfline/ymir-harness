@@ -32,6 +32,13 @@ from ymir_harness.capture_missing import (
     jira_requests_from_run_path,
 )
 from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
+from ymir_harness.jira_replay import derive_as_of
+from ymir_harness.koji_replay import (
+    KOJI_CANDIDATE_BUILDS_MANIFEST_KEY,
+    candidate_build_branches,
+    candidate_build_key,
+    fetch_candidate_build,
+)
 from ymir_harness.models import (
     ALLOWED_ANSWER_LEAKAGE,
     ALLOWED_BACKPORT_SOURCES,
@@ -42,6 +49,7 @@ from ymir_harness.models import (
     ALLOWED_NETWORK_MODES,
     ALLOWED_REFERENCE_PATCH_MODES,
     ALLOWED_RESOLUTIONS,
+    SCHEMA_VERSION,
 )
 from ymir_harness.replay import canonicalize_replay_url
 from ymir_harness.reports import write_validation_reports
@@ -899,6 +907,7 @@ def _prepare_complete_existing_case(args: argparse.Namespace) -> dict[str, objec
     warnings: list[str] = []
     expected = _prepare_write_inferred_expected_data(args, expected, written_paths, warnings)
     _prepare_write_inferred_mock_data(args, expected, written_paths, warnings)
+    _prepare_write_inferred_koji_candidate_builds(args, expected, written_paths, warnings)
     if not written_paths and not warnings:
         return None
     return {
@@ -1010,6 +1019,70 @@ def _prepare_write_inferred_mock_data(
     mock_path.parent.mkdir(parents=True, exist_ok=True)
     mock_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     written_paths.append(mock_path)
+
+
+def _prepare_write_inferred_koji_candidate_builds(
+    args: argparse.Namespace,
+    expected: Mapping[str, Any],
+    written_paths: list[Path],
+    warnings: list[str],
+) -> None:
+    if args.workflow != "ymir-backport" or expected.get("network_mode") == "network_denied":
+        return
+
+    package = _prepare_mock_package(args, expected)
+    requested_branch = _prepare_mock_requested_branch(args, expected)
+    if package is None or requested_branch is None:
+        return
+
+    manifest_path = args.cases / "web_cache" / args.case_id / "manifest.json"
+    manifest = _prepare_load_web_manifest(manifest_path, expected)
+    records = manifest.setdefault(KOJI_CANDIDATE_BUILDS_MANIFEST_KEY, {})
+    if not isinstance(records, dict):
+        warnings.append(
+            "Koji candidate build fixtures were not written; "
+            f"{KOJI_CANDIDATE_BUILDS_MANIFEST_KEY} is not an object"
+        )
+        return
+
+    as_of = args.as_of or derive_as_of(args.cases, args.case_id)
+    wrote = False
+    for branch in candidate_build_branches(requested_branch):
+        key = candidate_build_key(package, branch)
+        if key in records and not args.overwrite:
+            continue
+        try:
+            records[key] = fetch_candidate_build(package, branch, as_of=as_of)
+        except Exception as exc:
+            warnings.append(f"skipped Koji candidate build for {package} {branch}: {exc}")
+            continue
+        wrote = True
+
+    if not wrote:
+        return
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    written_paths.append(manifest_path)
+
+
+def _prepare_load_web_manifest(
+    manifest_path: Path,
+    expected: Mapping[str, Any],
+) -> dict[str, Any]:
+    if manifest_path.is_file():
+        loaded = load_json_file(manifest_path)
+        if isinstance(loaded, Mapping):
+            return dict(loaded)
+    return {
+        "case_id": expected.get("case_id"),
+        "case_type": expected.get("case_type"),
+        KOJI_CANDIDATE_BUILDS_MANIFEST_KEY: {},
+        "recorded_files": {},
+        "required_urls": [],
+        "schema_version": SCHEMA_VERSION,
+    }
 
 
 def _prepare_mock_package(args: argparse.Namespace, expected: Mapping[str, Any]) -> str | None:
