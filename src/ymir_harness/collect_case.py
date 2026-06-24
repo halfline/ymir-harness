@@ -1405,7 +1405,12 @@ def _fetch_koji_candidate_builds(
     records: dict[str, Any] = {}
     for branch in candidate_build_branches(request.target_branch):
         try:
-            record = fetch_candidate_build(request.package, branch, as_of=as_of)
+            record = fetch_candidate_build(
+                request.package,
+                branch,
+                as_of=as_of,
+                timeout=request.http_timeout,
+            )
         except Exception as exc:
             result.warnings.append(
                 f"skipped Koji candidate build for {request.package} {branch}: {exc}"

@@ -43,6 +43,7 @@ def fetch_candidate_build(
     dist_git_branch: str,
     *,
     as_of: str | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     try:
         import koji  # type: ignore[import-not-found]
@@ -54,7 +55,7 @@ def fetch_candidate_build(
         f"{dist_git_branch}-candidate",
         f"{dist_git_branch}-z-candidate",
     ]
-    session = koji.ClientSession(BREWHUB_URL)
+    session = koji.ClientSession(BREWHUB_URL, opts=_koji_session_opts(timeout=timeout))
     ssl_verify = True
     event = None
     if as_of is not None:
@@ -65,7 +66,10 @@ def fetch_candidate_build(
             except Exception as exc:
                 if not _is_ssl_verification_error(exc):
                     raise
-                session = koji.ClientSession(BREWHUB_URL, opts={"no_ssl_verify": True})
+                session = koji.ClientSession(
+                    BREWHUB_URL,
+                    opts=_koji_session_opts(no_ssl_verify=True, timeout=timeout),
+                )
                 ssl_verify = False
                 event = session.getLastEvent(before=before.timestamp(), strict=True)
 
@@ -76,7 +80,10 @@ def fetch_candidate_build(
         except Exception as exc:
             if not _is_ssl_verification_error(exc):
                 raise
-            session = koji.ClientSession(BREWHUB_URL, opts={"no_ssl_verify": True})
+            session = koji.ClientSession(
+                BREWHUB_URL,
+                opts=_koji_session_opts(no_ssl_verify=True, timeout=timeout),
+            )
             ssl_verify = False
             if as_of is not None and event is None:
                 before = _parse_timestamp(as_of)
@@ -111,6 +118,19 @@ def fetch_candidate_build(
         "source_ref": source_ref,
         **({"replay_as_of": as_of, "koji_event": dict(event)} if event is not None else {}),
     }
+
+
+def _koji_session_opts(
+    *,
+    no_ssl_verify: bool = False,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    opts: dict[str, Any] = {}
+    if no_ssl_verify:
+        opts["no_ssl_verify"] = True
+    if timeout is not None:
+        opts["timeout"] = timeout
+    return opts
 
 
 def _list_tagged(
