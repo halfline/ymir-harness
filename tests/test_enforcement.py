@@ -619,6 +619,62 @@ def test_enforcement_source_cache_overrides_recorded_gitlab_branches(
     assert future_ref not in json.dumps(branches)
 
 
+def test_enforcement_filters_recorded_gitlab_branches_as_of_without_source_cache(
+    tmp_path: Path,
+) -> None:
+    branches_url = "https://gitlab.com/api/v4/projects/42/repository/branches"
+    manifest_path = _write_replay_manifest(
+        tmp_path,
+        {branches_url: "gitlab/branches.json"},
+    )
+    reconstruction_path = tmp_path / "jiras" / "RHEL-12345" / "reconstruction.json"
+    reconstruction_path.parent.mkdir(parents=True)
+    reconstruction_path.write_text(
+        json.dumps({"as_of": "2025-09-12T09:46:42Z"}) + "\n",
+        encoding="utf-8",
+    )
+    gitlab_dir = manifest_path.parent / "gitlab"
+    gitlab_dir.mkdir()
+    (gitlab_dir / "branches.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "rhel-9.2.0",
+                    "commit": {
+                        "id": "1" * 40,
+                        "title": "historical",
+                        "committed_date": "2025-09-02T00:00:00+0000",
+                    },
+                },
+                {
+                    "name": "rhel-9.9.0",
+                    "commit": {
+                        "id": "2" * 40,
+                        "title": "future",
+                        "committed_date": "2025-10-02T00:00:00+0000",
+                    },
+                },
+                {
+                    "name": "rhel-9.6.0-backup-2025-10-07T08_58_14",
+                    "commit": {
+                        "id": "3" * 40,
+                        "title": "old commit on future branch",
+                        "committed_date": "2025-09-02T00:00:00+0000",
+                    },
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        branches = json.loads(urllib.request.urlopen(branches_url).read().decode("utf-8"))
+
+    assert [branch["name"] for branch in branches] == ["rhel-9.2.0"]
+    assert "future" not in json.dumps(branches)
+    assert "backup-2025-10-07" not in json.dumps(branches)
+
+
 def test_enforcement_does_not_replay_unaliased_same_path_source_cache_url(
     tmp_path: Path,
 ) -> None:
