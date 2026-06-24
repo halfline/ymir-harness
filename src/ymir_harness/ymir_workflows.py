@@ -805,6 +805,7 @@ def _workflow_state_snapshot(state: Any) -> dict[str, Any]:
         "attempts_remaining",
         "incremental_fix_attempts_remaining",
         "build_error",
+        "fix_version",
         "abandon_autorelease",
         "used_cherry_pick_workflow",
     )
