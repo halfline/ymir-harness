@@ -1341,6 +1341,180 @@ def test_cli_prepare_backport_runs_triage_when_result_is_missing(
     ]
 
 
+def test_cli_prepare_backport_does_not_recollect_existing_triage_fixture(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_root = tmp_path / "cases"
+    triage_cases_dir = cases_root / "ymir-triage"
+    backport_cases_dir = cases_root / "ymir-backport"
+    case_id = "RHEL-12345"
+    jira_url = "https://redhat.atlassian.net/browse/RHEL-12345"
+    triage_actual = {
+        "schema_version": 1,
+        "case_id": case_id,
+        "case_type": "cve_backport",
+        "workflow": "ymir-triage",
+        "resolution": "backport",
+        "data": {
+            "package": "dnsmasq",
+            "target_branch": "rhel-9.8.0",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+        },
+    }
+    _write_json(
+        triage_cases_dir / "expected" / f"{case_id}.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "target_branch": "rhel-9.8.0",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+            "case_status": "quarantined",
+            "network_mode": "replay_only",
+        },
+    )
+    _write_json(
+        triage_cases_dir / "web_cache" / case_id / "manifest.json",
+        {
+            "schema_version": 1,
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "required_urls": [],
+            "recorded_files": {},
+        },
+    )
+    collect_requests: list[tuple[str, str | None]] = []
+    build_calls: list[tuple[str, str]] = []
+
+    def fake_collect_case(request):
+        collect_requests.append((Path(request.cases_dir).name, request.jira_url))
+        return CollectCaseResult(case_id=request.case_id, cases_dir=request.cases_dir)
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id=case_id,
+                    case_type="cve_backport",
+                    case_status="quarantined",
+                    status="valid",
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        cases_name = Path(cases_dir_arg).name
+        build_calls.append((cases_name, kwargs["run_id"]))
+        if cases_name == "ymir-triage":
+            actual_path = results_dir / "repeat-1" / "actual-results" / f"{case_id}.actual.json"
+            _write_json(actual_path, triage_actual)
+            return RunReport(
+                cases_dir=cases_dir_arg,
+                results_dir=results_dir,
+                entries=[
+                    RunCaseResult(
+                        case_id=case_id,
+                        case_type="cve_backport",
+                        status="passed",
+                        actual_path=actual_path,
+                    )
+                ],
+                run_id=kwargs["run_id"],
+                variant=kwargs["variant"],
+            )
+
+        triage_result_path = backport_cases_dir / "triage_results" / f"{case_id}.actual.json"
+        assert json.loads(triage_result_path.read_text(encoding="utf-8")) == triage_actual
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id=case_id,
+                    case_type="cve_backport",
+                    status="passed",
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    monkeypatch.setattr(cli_module, "collect_case", fake_collect_case)
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "_prepare_complete_existing_case", lambda _args: None)
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(backport_cases_dir),
+                "--case",
+                case_id,
+                "--workflow",
+                "ymir-backport",
+                "--jira-url",
+                jira_url,
+                "--variant",
+                "baseline",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "succeeded"
+    assert output["triage_result"]["status"] == "generated"
+    assert collect_requests == [("ymir-backport", jira_url)]
+    assert build_calls == [
+        ("ymir-triage", "baseline-RHEL-12345-iter-1"),
+        ("ymir-backport", "baseline-RHEL-12345-iter-1"),
+    ]
+
+
+def test_prepare_backport_triage_args_preserve_collect_inputs_with_overwrite(
+    tmp_path: Path,
+) -> None:
+    cases_root = tmp_path / "cases"
+    triage_cases_dir = cases_root / "ymir-triage"
+    backport_cases_dir = cases_root / "ymir-backport"
+    case_id = "RHEL-12345"
+    _write_json(
+        triage_cases_dir / "expected" / f"{case_id}.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "resolution": "backport",
+        },
+    )
+    args = argparse.Namespace(
+        cases=backport_cases_dir,
+        case_id=case_id,
+        jira_url="https://redhat.atlassian.net/browse/RHEL-12345",
+        jira_base_url=None,
+        gitlab_mr_url="https://gitlab.example/group/pkg/-/merge_requests/1",
+        overwrite=True,
+        run_id="prepare-RHEL-12345",
+    )
+
+    triage_args = cli_module._prepare_backport_triage_args(args, triage_cases_dir)
+
+    assert triage_args.jira_url == args.jira_url
+    assert triage_args.gitlab_mr_url == args.gitlab_mr_url
+    assert triage_args.run_id == "prepare-RHEL-12345-triage"
+
+
 def test_cli_prepare_backport_uses_existing_triage_result(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
