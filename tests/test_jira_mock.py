@@ -296,6 +296,97 @@ def test_materialize_ymir_jira_mock_filters_dev_status_as_of(tmp_path: Path) -> 
     ]
 
 
+def test_materialize_ymir_jira_mock_scrubs_future_issue_link_state(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    as_of = "2026-05-31T07:21:36.534999Z"
+    future_dev_summary = (
+        "{pullrequest={dataType=pullrequest, state=MERGED}, "
+        'json={"cachedValue":{"summary":{"pullrequest":{"overall":'
+        '{"count":1,"lastUpdated":"2026-05-31T07:32:09.495+0000"}}}}}}'
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "reconstruction.json",
+        {"as_of": as_of},
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "starting-issue.json",
+        {
+            "id": "10001",
+            "key": "RHEL-12345",
+            "fields": {
+                "customfield_10000": future_dev_summary,
+                "issuelinks": [
+                    {
+                        "outwardIssue": {
+                            "key": "RHEL-23456",
+                            "fields": {
+                                "status": {"name": "Closed"},
+                                "summary": "Linked current summary",
+                            },
+                        }
+                    }
+                ],
+                "status": {"name": "Planning"},
+                "summary": "Backport CVE fix",
+            },
+        },
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "linked" / "RHEL-23456" / "issue.json",
+        {
+            "id": "10002",
+            "key": "RHEL-23456",
+            "fields": {
+                "status": {"name": "Closed"},
+                "summary": "Linked current summary",
+            },
+        },
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "linked" / "RHEL-23456" / "starting-issue.json",
+        {
+            "id": "10002",
+            "key": "RHEL-23456",
+            "fields": {
+                "issuelinks": [
+                    {
+                        "inwardIssue": {
+                            "key": "RHEL-12345",
+                            "fields": {
+                                "status": {"name": "Closed"},
+                                "summary": "Current main summary",
+                            },
+                        }
+                    }
+                ],
+                "status": {"name": "New"},
+                "summary": "Linked historical summary",
+            },
+        },
+    )
+
+    target_dir = materialize_ymir_jira_mock(
+        cases_dir,
+        results_dir,
+        "RHEL-12345",
+        repetition=1,
+    )
+
+    payload = json.loads((target_dir / "RHEL-12345").read_text(encoding="utf-8"))
+    link_issue = payload["fields"]["issuelinks"][0]["outwardIssue"]
+    assert payload["fields"]["customfield_10000"] is None
+    assert link_issue["fields"]["status"] == {"name": "New"}
+    assert link_issue["fields"]["summary"] == "Linked historical summary"
+
+    linked_payload = json.loads((target_dir / "RHEL-23456").read_text(encoding="utf-8"))
+    back_link_issue = linked_payload["fields"]["issuelinks"][0]["inwardIssue"]
+    assert back_link_issue["fields"]["status"] == {"name": "Planning"}
+    assert back_link_issue["fields"]["summary"] == "Backport CVE fix"
+
+
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
