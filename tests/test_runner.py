@@ -2144,6 +2144,9 @@ def test_source_cache_git_aliases_include_related_forges() -> None:
     )
     assert "https://gitlab.com/redhat/rhel/rpms/qt6-qtdeclarative.git" in distgit_aliases
     assert "https://gitlab.com/redhat/rhel/rpms/qt6-qtdeclarative" in distgit_aliases
+    assert "https://pkgs.devel.redhat.com/git/rpms/qt6-qtdeclarative" in distgit_aliases
+    assert "git://pkgs.devel.redhat.com/rpms/qt6-qtdeclarative" in distgit_aliases
+    assert "https://pkgs.devel.redhat.com/cgit/rpms/qt6-qtdeclarative" in distgit_aliases
 
     github_qt_aliases = source_cache_git_aliases("https://github.com/qt/qtdeclarative.git")
     assert "https://code.qt.io/qt/qtdeclarative.git" in github_qt_aliases
