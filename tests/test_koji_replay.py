@@ -98,6 +98,7 @@ def test_fetch_candidate_build_uses_koji_event_for_as_of(monkeypatch) -> None:
         def __init__(self, url, opts=None):
             self.url = url
             self.opts = opts
+            calls.append(("ClientSession", url, opts))
 
         def getLastEvent(self, *, before, strict):
             calls.append(("getLastEvent", before, strict))
@@ -135,10 +136,12 @@ def test_fetch_candidate_build_uses_koji_event_for_as_of(monkeypatch) -> None:
         "redis",
         "rhel-9.6.0",
         as_of="2025-09-12T09:46:42Z",
+        timeout=12.5,
     )
 
     assert record["source_ref"] == "abc123"
     assert record["replay_as_of"] == "2025-09-12T09:46:42Z"
     assert record["koji_event"]["id"] == 9876
+    assert calls[0] == ("ClientSession", "https://brewhub.engineering.redhat.com/brewhub", {"timeout": 12.5})
     list_tagged_calls = [call for call in calls if call[0] == "listTagged"]
     assert [call[1]["event"] for call in list_tagged_calls] == [9876, 9876]
