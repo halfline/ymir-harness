@@ -22,6 +22,7 @@ from ymir_harness.artifacts import capture_backport_artifacts, merge_artifact_fi
 from ymir_harness.llm_judge import evaluate_backport_llm_judge
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.replay_metadata import (
+    install_specfile_changelog_replay,
     replay_metadata_environment,
 )
 from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseRequest
@@ -2462,6 +2463,7 @@ def _request_environment(request: RunCaseRequest):
 
     os.environ.clear()
     os.environ.update(env)
+    install_specfile_changelog_replay()
     try:
         yield
     finally:
