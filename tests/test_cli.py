@@ -1635,6 +1635,98 @@ def test_cli_prepare_case_infers_mock_prefixed_ref_from_merge_request_commits(
     }
 
 
+def test_cli_prepare_case_infers_backport_koji_candidate_builds_from_triage_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    case_id = "RHEL-12345"
+    as_of = "2026-05-20T12:00:00.000000Z"
+    calls: list[tuple[str, str, str | None]] = []
+
+    def fake_fetch_candidate_build(package: str, branch: str, *, as_of: str | None = None):
+        calls.append((package, branch, as_of))
+        return {
+            "dist_git_branch": branch,
+            "evr": {
+                "epoch": 0,
+                "release": "1.el10",
+                "version": "6.10.1",
+            },
+            "package": package,
+            "source_ref": f"{package}-{branch}-ref",
+        }
+
+    monkeypatch.setattr(cli_module, "fetch_candidate_build", fake_fetch_candidate_build)
+    _write_json(
+        cases_dir / "expected" / f"{case_id}.expected.json",
+        {
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "network_mode": "replay_only",
+            "package": "qt6-qtdeclarative",
+            "target_branch": "c10s",
+        },
+    )
+    _write_json(
+        cases_dir / "triage_results" / f"{case_id}.actual.json",
+        {
+            "case_id": case_id,
+            "data": {
+                "package": "qt6-qtdeclarative",
+            },
+            "resolution": "backport",
+            "target_branch": "rhel-10.2",
+        },
+    )
+    _write_json(cases_dir / "jiras" / case_id / "reconstruction.json", {"as_of": as_of})
+    _write_json(
+        cases_dir / "web_cache" / case_id / "manifest.json",
+        {
+            "case_id": case_id,
+            "case_type": "cve_backport",
+            "koji_candidate_builds": {},
+            "recorded_files": {},
+            "required_urls": [],
+            "schema_version": 1,
+        },
+    )
+
+    warnings: list[str] = []
+    written_paths: list[Path] = []
+    expected = cli_module._prepare_load_expected(cases_dir, case_id)
+    assert expected is not None
+    cli_module._prepare_write_inferred_koji_candidate_builds(
+        argparse.Namespace(
+            as_of=None,
+            cases=cases_dir,
+            case_id=case_id,
+            workflow="ymir-backport",
+            overwrite=False,
+        ),
+        expected,
+        written_paths,
+        warnings,
+    )
+
+    manifest_path = cases_dir / "web_cache" / case_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert warnings == []
+    assert written_paths == [manifest_path]
+    assert calls == [
+        ("qt6-qtdeclarative", "rhel-10.2", as_of),
+        ("qt6-qtdeclarative", "rhel-10.3", as_of),
+    ]
+    assert (
+        manifest["koji_candidate_builds"]["qt6-qtdeclarative|rhel-10.2"]["source_ref"]
+        == "qt6-qtdeclarative-rhel-10.2-ref"
+    )
+    assert (
+        manifest["koji_candidate_builds"]["qt6-qtdeclarative|rhel-10.3"]["source_ref"]
+        == "qt6-qtdeclarative-rhel-10.3-ref"
+    )
+
+
 def test_cli_prepare_case_overwrites_backport_expected_branch_from_triage_result(
     tmp_path: Path,
 ) -> None:
