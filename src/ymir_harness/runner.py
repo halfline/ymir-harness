@@ -62,10 +62,23 @@ AGENT_TIMEOUT_ENV = "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS"
 EVENT_TRACE_FIELDS = ("events", "tool_events", "tool_calls", "trace")
 DEFAULT_WORKER_CONTAINER_TOOL = "podman"
 DEFAULT_WORKER_CONTAINER_VERSION = "c10s"
+WORKER_CONTAINER_RESULTS_DIR = Path("/ymir-harness-results")
 WORKER_CONTAINER_PATH = (
     "/opt/beeai-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 WORKER_CONTAINER_VERSIONS = frozenset({"c9s", "c10s"})
+PATH_LIST_ENVIRONMENT_NAMES = frozenset(
+    {
+        "LD_LIBRARY_PATH",
+        "PATH",
+        "PYTHONPATH",
+    }
+)
+JSON_PATH_ENVIRONMENT_NAMES = frozenset(
+    {
+        "YMIR_BENCHMARK_MOCK_REPOS",
+    }
+)
 _BUILT_WORKER_IMAGES: set[tuple[str, str, str, str]] = set()
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
@@ -1239,17 +1252,28 @@ def _execute_isolated_case_workflow(
     request_path = worker_dir / f"{request.case_id}.request.json"
     result_path = worker_dir / f"{request.case_id}.result.json"
     cases_view = _materialize_worker_cases_view(request, worker_dir)
+    container_results_dir = WORKER_CONTAINER_RESULTS_DIR
 
     worker_environment = _isolated_worker_environment(
         request.environment,
         worker_home,
         container_version=container_version,
     )
+    _translate_worker_gitconfig_result_paths(
+        worker_environment,
+        request.results_dir,
+        container_results_dir,
+    )
+    worker_request = _container_worker_request(
+        request,
+        worker_environment,
+        container_results_dir=container_results_dir,
+    )
     request_path.write_text(
         json.dumps(
             {
                 "workflow": workflow,
-                "request": _request_payload(_request_with_environment(request, worker_environment)),
+                "request": _request_payload(worker_request),
             },
             indent=2,
             sort_keys=True,
@@ -1266,6 +1290,7 @@ def _execute_isolated_case_workflow(
         worker_home=worker_home,
         worker_image=worker_image,
         cases_mount_source=cases_view,
+        container_results_dir=container_results_dir,
     )
     _write_worker_container_artifacts(
         worker_dir,
@@ -1285,9 +1310,14 @@ def _execute_isolated_case_workflow(
     )
     if completed.returncode != 0:
         raise RuntimeError(f"isolated {workflow} worker exited with status {completed.returncode}")
-    return _execution_from_payload(
+    execution = _execution_from_payload(
         json.loads(result_path.read_text(encoding="utf-8")),
         base_dir=_harness_root(),
+    )
+    return _host_execution_from_container(
+        execution,
+        host_results_dir=request.results_dir,
+        container_results_dir=container_results_dir,
     )
 
 
@@ -1357,6 +1387,7 @@ def _filesystem_isolation_command(
     worker_home: Path,
     worker_image: str,
     cases_mount_source: Path | None = None,
+    container_results_dir: Path = WORKER_CONTAINER_RESULTS_DIR,
 ) -> list[str]:
     tool = _container_tool(request.environment)
     if shutil.which(tool) is None:
@@ -1379,7 +1410,7 @@ def _filesystem_isolation_command(
         "--volume",
         _container_volume(cases_mount_source or request.cases_dir, request.cases_dir, "ro"),
         "--volume",
-        _container_volume(request.results_dir, request.results_dir, "rw"),
+        _container_volume(request.results_dir, container_results_dir, "rw"),
         "--env",
         "PYTHONUNBUFFERED=1",
     ]
@@ -1391,7 +1422,11 @@ def _filesystem_isolation_command(
                 "--volume",
                 _container_volume(
                     adc_path,
-                    worker_home / ".config" / "gcloud" / "application_default_credentials.json",
+                    _translate_path_under(
+                        worker_home / ".config" / "gcloud" / "application_default_credentials.json",
+                        request.results_dir,
+                        container_results_dir,
+                    ),
                     "ro",
                 ),
             ]
@@ -1403,8 +1438,8 @@ def _filesystem_isolation_command(
             "python",
             "-m",
             "ymir_harness.workflow_worker",
-            str(request_path),
-            str(result_path),
+            str(_translate_path_under(request_path, request.results_dir, container_results_dir)),
+            str(_translate_path_under(result_path, request.results_dir, container_results_dir)),
         ]
     )
     return command
@@ -1573,12 +1608,25 @@ def _container_debug_shell_command(
     worker_home: Path,
     worker_image: str,
 ) -> list[str]:
+    container_results_dir = WORKER_CONTAINER_RESULTS_DIR
+    container_home = _translate_path_under(
+        worker_home,
+        request.results_dir,
+        container_results_dir,
+    )
+    container_path = _translate_environment_value(
+        "PATH",
+        _worker_container_path(request.environment),
+        request.results_dir,
+        container_results_dir,
+    )
     command = _filesystem_isolation_command(
         request,
         request_path=Path("/dev/null"),
         result_path=Path("/dev/null"),
         worker_home=worker_home,
         worker_image=worker_image,
+        container_results_dir=container_results_dir,
     )
     image_index = command.index(worker_image)
     return [
@@ -1586,11 +1634,11 @@ def _container_debug_shell_command(
         "--interactive",
         "--tty",
         "--env",
-        f"HOME={worker_home}",
+        f"HOME={container_home}",
         "--env",
         f"PYTHONPATH={_container_pythonpath()}",
         "--env",
-        f"PATH={_worker_container_path(request.environment)}",
+        f"PATH={container_path}",
         worker_image,
         "bash",
         "-l",
@@ -1684,22 +1732,169 @@ def _container_pythonpath() -> str:
     return "/opt/ymir-harness/src:/home/beeai"
 
 
-def _request_with_environment(
+def _container_worker_request(
     request: RunCaseRequest,
     environment: Mapping[str, str],
+    *,
+    container_results_dir: Path,
 ) -> RunCaseRequest:
     return RunCaseRequest(
         case_id=request.case_id,
         case_type=request.case_type,
         repetition=request.repetition,
         cases_dir=request.cases_dir,
-        results_dir=request.results_dir,
+        results_dir=container_results_dir,
         expected_path=request.expected_path,
-        actual_path=request.actual_path,
-        environment=environment,
+        actual_path=_translate_path_under(
+            request.actual_path,
+            request.results_dir,
+            container_results_dir,
+        ),
+        environment=_translate_environment_result_paths(
+            environment,
+            request.results_dir,
+            container_results_dir,
+        ),
         variant=request.variant,
         features=request.features,
     )
+
+
+def _translate_environment_result_paths(
+    environment: Mapping[str, str],
+    host_results_dir: Path,
+    container_results_dir: Path,
+) -> dict[str, str]:
+    return {
+        name: _translate_environment_value(
+            name,
+            value,
+            host_results_dir,
+            container_results_dir,
+        )
+        for name, value in environment.items()
+    }
+
+
+def _translate_environment_value(
+    name: str,
+    value: str,
+    host_results_dir: Path,
+    container_results_dir: Path,
+) -> str:
+    if name in PATH_LIST_ENVIRONMENT_NAMES:
+        return os.pathsep.join(
+            _translate_path_string(part, host_results_dir, container_results_dir)
+            for part in value.split(os.pathsep)
+        )
+    if name in JSON_PATH_ENVIRONMENT_NAMES:
+        return _translate_json_path_value(value, host_results_dir, container_results_dir)
+    return _translate_path_string(value, host_results_dir, container_results_dir)
+
+
+def _translate_worker_gitconfig_result_paths(
+    environment: Mapping[str, str],
+    host_results_dir: Path,
+    container_results_dir: Path,
+) -> None:
+    paths: list[Path] = []
+    for name in ("GIT_CONFIG_GLOBAL", "YMIR_BENCHMARK_GITCONFIG"):
+        value = environment.get(name)
+        if not value:
+            continue
+        paths.append(Path(value))
+    paths.extend(sorted(host_results_dir.glob(".mock_gitconfig*")))
+
+    seen: set[Path] = set()
+    for path in paths:
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        content = path.read_text(encoding="utf-8")
+        translated = content.replace(str(host_results_dir), str(container_results_dir))
+        if translated != content:
+            path.write_text(translated, encoding="utf-8")
+
+
+def _translate_json_path_value(
+    value: str,
+    source_root: Path,
+    destination_root: Path,
+) -> str:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    translated = _translate_result_paths_in_json(payload, source_root, destination_root)
+    return json.dumps(translated, sort_keys=True)
+
+
+def _translate_path_string(
+    value: str,
+    source_root: Path,
+    destination_root: Path,
+) -> str:
+    path = Path(value)
+    if not path.is_absolute():
+        return value
+    translated = _translate_path_under(path, source_root, destination_root)
+    return str(translated)
+
+
+def _translate_path_under(path: Path, source_root: Path, destination_root: Path) -> Path:
+    try:
+        relative = path.relative_to(source_root)
+    except ValueError:
+        return path
+    return destination_root / relative
+
+
+def _host_execution_from_container(
+    execution: RunCaseExecution,
+    *,
+    host_results_dir: Path,
+    container_results_dir: Path,
+) -> RunCaseExecution:
+    actual_path = (
+        _translate_path_under(execution.actual_path, container_results_dir, host_results_dir)
+        if execution.actual_path is not None
+        else None
+    )
+    actual_result = (
+        _translate_result_paths_in_json(
+            execution.actual_result,
+            container_results_dir,
+            host_results_dir,
+        )
+        if execution.actual_result is not None
+        else None
+    )
+    return RunCaseExecution(
+        status=execution.status,
+        actual_result=actual_result if isinstance(actual_result, Mapping) else None,
+        actual_path=actual_path,
+        reason=execution.reason,
+    )
+
+
+def _translate_result_paths_in_json(
+    value: Any,
+    source_root: Path,
+    destination_root: Path,
+) -> Any:
+    if isinstance(value, str):
+        return _translate_path_string(value, source_root, destination_root)
+    if isinstance(value, list):
+        return [
+            _translate_result_paths_in_json(item, source_root, destination_root)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _translate_result_paths_in_json(item, source_root, destination_root)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _request_payload(request: RunCaseRequest) -> dict[str, Any]:
