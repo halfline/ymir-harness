@@ -436,8 +436,10 @@ def _fetch_evidence(
     recorded_patch_urls = {
         record.url for record in gitlab_records if _patch_url_candidate(record.url) is not None
     }
+    recorded_patch_urls.update(record.url for record in request.web_records)
     valid_jira_patch_urls: list[str] = []
-    for index, patch_url in enumerate(jira_patch_urls, start=1):
+    patch_urls_to_fetch = _candidate_patch_urls_to_fetch(request, jira_patch_urls)
+    for index, patch_url in enumerate(patch_urls_to_fetch, start=1):
         if patch_url in recorded_patch_urls:
             continue
         if _private_gitlab_url_without_token(patch_url, request.gitlab_token_env):
@@ -2905,6 +2907,16 @@ def _effective_patch_urls(
     urls.extend(fetched.jira_patch_urls)
     if fetched.gitlab_patch_url:
         urls.append(fetched.gitlab_patch_url)
+    return tuple(dict.fromkeys(urls))
+
+
+def _candidate_patch_urls_to_fetch(
+    request: CollectCaseRequest,
+    jira_patch_urls: Sequence[str],
+) -> tuple[str, ...]:
+    urls = [*request.patch_urls, *jira_patch_urls]
+    if request.mock_agent == "backport":
+        urls.extend(_triage_result_patch_urls(request))
     return tuple(dict.fromkeys(urls))
 
 
