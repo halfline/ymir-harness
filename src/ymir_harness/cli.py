@@ -1183,6 +1183,10 @@ def _prepare_backport_triage_args(
     triage_args = argparse.Namespace(**vars(args))
     triage_args.cases = triage_cases_dir
     triage_args.workflow = "ymir-triage"
+    if not args.overwrite and _prepare_load_expected(triage_cases_dir, args.case_id) is not None:
+        triage_args.jira_url = None
+        triage_args.jira_base_url = None
+        triage_args.gitlab_mr_url = None
     if args.run_id:
         triage_args.run_id = f"{args.run_id}-triage"
     return triage_args
