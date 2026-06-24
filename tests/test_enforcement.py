@@ -938,6 +938,50 @@ def test_enforcement_allows_compound_mock_rewritten_git_subprocess_url(
     assert (clone_path / ".git").is_dir()
 
 
+def test_enforcement_allows_semicolon_pipe_mock_rewritten_git_subprocess_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+    repo_path = tmp_path / "repo.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(repo_path)], check=True)
+    gitconfig_path = tmp_path / "gitconfig"
+    gitconfig_path.write_text(
+        "\n".join(
+            [
+                f'[url "{repo_path.resolve().as_uri()}"]',
+                "\tinsteadOf = https://example.invalid/repo.git",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig_path))
+
+    clone_path = tmp_path / "clone"
+    environment = {
+        **_environment(manifest_path),
+        "MOCK_BLOCKED_URLS": "https://example.invalid/repo.git",
+    }
+    command = (
+        f"rm -rf {shlex.quote(str(clone_path))} 2>/dev/null; "
+        f"git clone https://example.invalid/repo.git {shlex.quote(str(clone_path))} "
+        "2>&1 | tail -5"
+    )
+    with enforce_benchmark_boundaries(environment):
+        completed = subprocess.run(
+            command,
+            check=False,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    assert completed.returncode == 0
+    assert (clone_path / ".git").is_dir()
+
+
 def _environment(manifest_path: Path) -> dict[str, str]:
     return {
         "YMIR_BENCHMARK_NETWORK_MODE": "replay_only",
