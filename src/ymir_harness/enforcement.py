@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -909,7 +910,7 @@ def _is_mock_git_command(
 def _shell_command_segments(tokens: Sequence[str]) -> list[list[str]]:
     segments: list[list[str]] = []
     current: list[str] = []
-    for token in tokens:
+    for token in _split_shell_separators(tokens):
         if token in {"&&", "||", ";", "|"}:
             if current:
                 segments.append(current)
@@ -919,6 +920,18 @@ def _shell_command_segments(tokens: Sequence[str]) -> list[list[str]]:
     if current:
         segments.append(current)
     return segments
+
+
+def _split_shell_separators(tokens: Sequence[str]) -> list[str]:
+    output: list[str] = []
+    for token in tokens:
+        if token in {"&&", "||", ";", "|"}:
+            output.append(token)
+            continue
+        for part in re.split(r"(;)", token):
+            if part:
+                output.append(part)
+    return output
 
 
 def _is_git_command(tokens: Sequence[str]) -> bool:
