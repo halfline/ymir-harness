@@ -3012,6 +3012,8 @@ def _backport_source_for_url(url: str) -> str | None:
         return "distgit"
     if hostname == "src.fedoraproject.org" and path.startswith("/rpms/"):
         return "distgit"
+    if hostname == "pkgs.devel.redhat.com" and path.startswith("/cgit/rpms/"):
+        return "distgit"
     if parsed.scheme in {"http", "https"} and hostname:
         return "upstream"
     return None
