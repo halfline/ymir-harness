@@ -2370,6 +2370,85 @@ def test_collect_case_caches_lookaside_sources_from_spec_source_url(
     assert result.warnings == []
 
 
+def test_collect_case_caches_lookaside_sources_from_sourceforge_mirror_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_body = b"source archive\n"
+    archive_hash = hashlib.sha512(archive_body).hexdigest()
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    (source_repo / "libpng12.spec").write_text(
+        "\n".join(
+            [
+                "Name: libpng12",
+                "Version: 1.2.57",
+                "Source0: https://ftp-osl.osuosl.org/pub/libpng/src/libpng12/libpng-%{version}.tar.xz",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (source_repo / "sources").write_text(
+        f"SHA512 (libpng-1.2.57.tar.xz) = {archive_hash}\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source_repo), "add", "libpng12.spec", "sources"], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-q", "-m", "add sources"], check=True)
+    pre_fix_ref = subprocess.check_output(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    monkeypatch.setattr(
+        collect_case_module,
+        "_run_package_sources_command",
+        lambda *args, **kwargs: "rhpkg is not installed",
+    )
+    stale_source_url = "https://ftp-osl.osuosl.org/pub/libpng/src/libpng12/libpng-1.2.57.tar.xz"
+    fallback_source_url = "https://download.sourceforge.net/libpng/libpng-1.2.57.tar.xz"
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        collect_case_module,
+        "urlopen",
+        _fake_urlopen(
+            {
+                stale_source_url: OSError("stale mirror"),
+                fallback_source_url: archive_body,
+            },
+            seen_urls,
+        ),
+    )
+
+    result = collect_case(
+        CollectCaseRequest(
+            cases_dir=tmp_path / "benchmark_cases",
+            case_id="RHEL-12345",
+            case_type="cve_backport",
+            resolution="backport",
+            package="libpng12",
+            target_branch="rhel-8.8.0",
+            mock_repo=MockRepoInput(
+                remote_url="https://gitlab.example/group/libpng12.git",
+                source_url=str(source_repo),
+                pre_fix_ref=pre_fix_ref,
+                branch="rhel-8.8.0",
+            ),
+        )
+    )
+
+    cached_archive = (
+        tmp_path
+        / "benchmark_cases"
+        / "source_cache"
+        / "RHEL-12345"
+        / "lookaside"
+        / "libpng-1.2.57.tar.xz"
+    )
+    assert cached_archive.read_bytes() == archive_body
+    assert stale_source_url in seen_urls
+    assert fallback_source_url in seen_urls
+    assert result.warnings == []
+
+
 def test_collect_case_caches_gitlab_project_source_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
