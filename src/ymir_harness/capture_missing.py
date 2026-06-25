@@ -96,6 +96,13 @@ MISSING_LOOKASIDE_PATTERN = re.compile(
     r"(?:(?:tarball|archive|source|file)\s+)?"
     r"(?:was\s+)?not\s+(?:found|available)\s+in\s+(?:the\s+)?lookaside cache"
 )
+LOOKASIDE_CACHE_MISS_PATTERN = re.compile(r"lookaside source cache is missing:\s*([^\s\"')]+)")
+LOOKASIDE_TOOL_INPUT_PATTERN = re.compile(
+    r"HarnessLookasideToolInput\("
+    r"dist_git_path=PosixPath\('(?P<clone_path>[^']+)'\),\s*"
+    r"package='(?P<package>[^']+)',\s*"
+    r"dist_git_branch='(?P<branch>[^']+)'\)"
+)
 KOJI_CANDIDATE_BUILD_MISS_PATTERN = re.compile(
     r"Koji candidate build replay miss:\s*"
     r"package=(?P<package>[A-Za-z0-9._+-]+)\s+"
@@ -178,6 +185,12 @@ class CapturedSource:
 
 
 @dataclass(frozen=True)
+class LookasideSourceReplayMiss:
+    filename: str
+    url: str
+
+
+@dataclass(frozen=True)
 class CapturedGitFailure:
     url: str
     returncode: int
@@ -233,6 +246,13 @@ class _MissingLookasideSource:
     branch: str
     url: str
     source: _LookasideSource
+
+
+@dataclass(frozen=True)
+class _LookasideCacheMiss:
+    package: str
+    branch: str
+    clone_path: Path
 
 
 @dataclass(frozen=True)
@@ -1041,6 +1061,16 @@ def jira_requests_from_run_path(run_path: Path) -> list[JiraReplayMiss]:
     return misses
 
 
+def lookaside_source_requests_from_run_path(
+    run_path: Path,
+    case_id: str,
+) -> list[LookasideSourceReplayMiss]:
+    return [
+        LookasideSourceReplayMiss(filename=missing.filename, url=missing.url)
+        for missing in _missing_lookaside_sources_from_run_path(run_path, case_id)
+    ]
+
+
 def blocked_urls_from_run_path(run_path: Path) -> list[BlockedUrl]:
     if run_path.is_file():
         paths = [run_path]
@@ -1613,6 +1643,29 @@ def _missing_lookaside_sources_from_run_path(
 ) -> tuple[_MissingLookasideSource, ...]:
     candidates: list[_MissingLookasideSource] = []
     seen: set[tuple[str, str]] = set()
+
+    def add_candidate(
+        *,
+        filename: str,
+        package: str,
+        branch: str,
+        url: str,
+        source: _LookasideSource,
+    ) -> None:
+        key = (filename, url)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(
+            _MissingLookasideSource(
+                filename=filename,
+                package=package,
+                branch=branch,
+                url=url,
+                source=source,
+            )
+        )
+
     for actual_path in sorted(run_path.glob("repeat-*/actual-results/*.actual.json")):
         try:
             actual = load_json_file(actual_path)
@@ -1635,20 +1688,81 @@ def _missing_lookaside_sources_from_run_path(
                 if source is None:
                     continue
                 url = _lookaside_source_url(base_url, package, source)
-                key = (filename, url)
-                if key in seen:
-                    continue
-                seen.add(key)
-                candidates.append(
-                    _MissingLookasideSource(
-                        filename=filename,
-                        package=package,
-                        branch=branch,
-                        url=url,
-                        source=source,
-                    )
+                add_candidate(
+                    filename=filename,
+                    package=package,
+                    branch=branch,
+                    url=url,
+                    source=source,
                 )
+
+    for miss in _lookaside_cache_misses_from_run_path(run_path, case_id):
+        base_url = _lookaside_base_url(miss.branch)
+        if base_url is None:
+            continue
+        for source in _sources_file_entries(miss.clone_path / "sources"):
+            url = _lookaside_source_url(base_url, miss.package, source)
+            add_candidate(
+                filename=source.filename,
+                package=miss.package,
+                branch=miss.branch,
+                url=url,
+                source=source,
+            )
     return tuple(candidates)
+
+
+def _lookaside_cache_misses_from_run_path(
+    run_path: Path,
+    case_id: str,
+) -> tuple[_LookasideCacheMiss, ...]:
+    candidates: list[_LookasideCacheMiss] = []
+    seen: set[tuple[str, str, Path]] = set()
+    for path in _run_text_artifacts(run_path):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if LOOKASIDE_CACHE_MISS_PATTERN.search(text) is None:
+            continue
+        for match in LOOKASIDE_TOOL_INPUT_PATTERN.finditer(text):
+            clone_path = _host_run_path(Path(match.group("clone_path")), run_path)
+            if not clone_path.is_dir():
+                continue
+            package = match.group("package")
+            branch = match.group("branch")
+            key = (package, branch, clone_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                _LookasideCacheMiss(package=package, branch=branch, clone_path=clone_path)
+            )
+    return tuple(candidates)
+
+
+def _run_text_artifacts(run_path: Path) -> tuple[Path, ...]:
+    if run_path.is_file():
+        return (run_path,) if _looks_like_text_artifact(run_path) else ()
+    if not run_path.is_dir():
+        return ()
+    return tuple(
+        sorted(
+            path
+            for path in run_path.rglob("*")
+            if _looks_like_text_artifact(path)
+            and not _is_worker_case_view_artifact(run_path, path)
+        )
+    )
+
+
+def _host_run_path(path: Path, run_path: Path) -> Path:
+    if path.is_absolute():
+        try:
+            return run_path / path.relative_to("/ymir-harness-results")
+        except ValueError:
+            return path
+    return run_path / path
 
 
 def _lookaside_entries_for_missing(
