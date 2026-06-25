@@ -17,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 import yaml
@@ -1049,10 +1049,23 @@ def _is_patch_url(url: str) -> bool:
 def _patch_url_candidate(url: str) -> str | None:
     if _is_patch_url(url):
         return url
-    path = urlparse(url).path
+    parsed = urlparse(url)
+    path = parsed.path
+    if _is_pkgs_devel_cgit_commit_url(parsed):
+        return urlunparse(parsed._replace(path=path.replace("/commit", "/patch", 1)))
     if "/-/merge_requests/" in path or "/-/commit/" in path:
         return url.rstrip("/") + ".patch"
     return None
+
+
+def _is_pkgs_devel_cgit_commit_url(parsed_url: Any) -> bool:
+    hostname = (parsed_url.hostname or "").lower()
+    path = parsed_url.path
+    return (
+        hostname == "pkgs.devel.redhat.com"
+        and path.startswith("/cgit/")
+        and (path.endswith("/commit") or "/commit/" in path)
+    )
 
 
 def _patch_suffix(url: str) -> str:
