@@ -1276,6 +1276,51 @@ def test_score_result_directory_accepts_equivalent_pkgs_devel_patch_url(
     )
 
 
+def test_score_result_directory_accepts_equivalent_pkgs_devel_module_patch_url(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    actual_dir = tmp_path / "actual-results"
+    commit_sha = "0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
+    expected_url = f"https://gitlab.com/redhat/rhel/modules/maven/-/commit/{commit_sha}.patch"
+    actual_url = (
+        "https://pkgs.devel.redhat.com/cgit/modules/maven/patch/"
+        f"?h=stream-maven-3.9-rhel-9.6.0&id={commit_sha}"
+    )
+
+    _write_json(
+        cases_dir / "expected" / "RHEL-12345.expected.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "plexus-utils",
+            "case_status": "active",
+            "patch_urls": [expected_url],
+        },
+    )
+    _write_json(
+        actual_dir / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "plexus-utils",
+            "patch_urls": [actual_url],
+        },
+    )
+
+    report = score_result_directory(cases_dir, actual_dir)
+
+    assert report.entries[0].status == "passed"
+    metrics = {metric.name: metric for metric in report.entries[0].score.metrics}
+    assert metrics["patch_urls"].status == "pass"
+    assert metrics["patch_urls"].notes == (
+        "actual patch URLs include the expected patch commit IDs"
+    )
+
+
 def test_score_result_directory_collects_headline_results(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     actual_dir = tmp_path / "actual-results"
