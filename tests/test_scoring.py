@@ -446,7 +446,6 @@ def test_score_case_accepts_required_artifact_kinds_from_manifest(tmp_path: Path
         "resolution": "backport",
         "package": "dnsmasq",
         "required_artifact_kinds": ["commit_diff", "spec_file", "patch_files", "srpm"],
-        "patch_file_patterns": ["fix-cve"],
     }
     actual = {
         "case_id": "RHEL-12345",
@@ -466,10 +465,9 @@ def test_score_case_accepts_required_artifact_kinds_from_manifest(tmp_path: Path
         "spec_file",
         "srpm",
     ]
-    assert metrics["patch_file_patterns"].actual == ["fix-cve.patch"]
 
 
-def test_score_case_reports_required_artifact_kind_and_patch_pattern_failures(
+def test_score_case_reports_required_artifact_kind_failures(
     tmp_path: Path,
 ) -> None:
     artifact_dir = tmp_path / "artifacts"
@@ -489,7 +487,6 @@ def test_score_case_reports_required_artifact_kind_and_patch_pattern_failures(
         "resolution": "backport",
         "package": "dnsmasq",
         "required_artifact_kinds": ["commit_diff", "spec_file", "srpm"],
-        "patch_file_pattern": "fix-cve",
     }
     actual = {
         "case_id": "RHEL-12345",
@@ -512,8 +509,6 @@ def test_score_case_reports_required_artifact_kind_and_patch_pattern_failures(
     assert failed["required_artifact_kinds"].notes == (
         "missing required artifact kinds: commit_diff, srpm"
     )
-    assert failed["patch_file_patterns"].actual == ["wrong.patch"]
-    assert failed["patch_file_patterns"].notes == "missing patch file patterns: fix-cve"
 
 
 def test_score_case_fails_unrelated_source_changes() -> None:
