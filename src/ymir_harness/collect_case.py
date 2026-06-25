@@ -2330,7 +2330,7 @@ def _write_mock_data(
             }
         ],
     }
-    if mock_repo.source_url is not None:
+    if mock_repo.source_url is not None and not _is_mock_repo_cache_source(request, mock_repo):
         payload["repos"][0]["source_url"] = mock_repo.source_url
     if mock_repo.zstream_override:
         payload["zstream_override"] = dict(mock_repo.zstream_override)
@@ -2368,6 +2368,20 @@ def _write_mock_data(
             overwrite=request.overwrite,
             result=result,
         )
+
+
+def _is_mock_repo_cache_source(request: CollectCaseRequest, mock_repo: MockRepoInput) -> bool:
+    if request.mock_repo_cache is None or mock_repo.source_url is None:
+        return False
+    parsed = urlparse(mock_repo.source_url)
+    if parsed.scheme and parsed.scheme != "file":
+        return False
+    source_path = Path(parsed.path if parsed.scheme == "file" else mock_repo.source_url)
+    try:
+        source_path.expanduser().resolve().relative_to(request.mock_repo_cache.expanduser().resolve())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _reference_patch_body(
