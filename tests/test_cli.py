@@ -18,7 +18,7 @@ import ymir_harness.cli as cli_module
 from ymir_harness.cli import main
 from ymir_harness.collect_case import CollectCaseResult
 from ymir_harness.models import CaseValidationResult, RunCaseResult, RunReport, ValidationReport
-from ymir_harness.runner import RunCaseExecution
+from ymir_harness.runner import AGENT_TIMEOUT_ENV, RunCaseExecution
 from ymir_harness.source_fixtures import write_source_fixture_from_repository
 
 
@@ -30,27 +30,35 @@ def test_cli_prints_version(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().out == f"ymir-harness {__version__}\n"
 
 
-def test_prepare_run_environment_defaults_agent_timeout(
+def test_prepare_run_environment_does_not_default_agent_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(cli_module.AGENT_TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(AGENT_TIMEOUT_ENV, raising=False)
+    monkeypatch.delenv(cli_module.STOP_ON_REPLAY_MISS_ENV, raising=False)
+    monkeypatch.delenv("YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL", raising=False)
 
     environment = cli_module._prepare_run_environment()
 
+    assert AGENT_TIMEOUT_ENV not in environment
+    assert environment[cli_module.STOP_ON_REPLAY_MISS_ENV] == "1"
     assert (
-        environment[cli_module.AGENT_TIMEOUT_ENV]
-        == cli_module.DEFAULT_PREPARE_AGENT_TIMEOUT_SECONDS
+        environment["YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL"]
+        == cli_module.DEFAULT_PREPARE_WORKFLOW_PROGRESS_INTERVAL_SECONDS
     )
 
 
 def test_prepare_run_environment_preserves_configured_agent_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(cli_module.AGENT_TIMEOUT_ENV, "45")
+    monkeypatch.setenv(AGENT_TIMEOUT_ENV, "45")
+    monkeypatch.setenv(cli_module.STOP_ON_REPLAY_MISS_ENV, "0")
+    monkeypatch.setenv("YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL", "5")
 
     environment = cli_module._prepare_run_environment()
 
-    assert environment[cli_module.AGENT_TIMEOUT_ENV] == "45"
+    assert environment[AGENT_TIMEOUT_ENV] == "45"
+    assert environment[cli_module.STOP_ON_REPLAY_MISS_ENV] == "0"
+    assert environment["YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL"] == "5"
 
 
 def test_cli_scores_result_to_stdout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1122,10 +1130,7 @@ def test_cli_prepare_case_collects_until_run_succeeds(
     def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
         status = run_statuses.pop(0)
         run_ids.append(kwargs["run_id"])
-        assert (
-            kwargs["base_env"][cli_module.AGENT_TIMEOUT_ENV]
-            == cli_module.DEFAULT_PREPARE_AGENT_TIMEOUT_SECONDS
-        )
+        assert AGENT_TIMEOUT_ENV not in kwargs["base_env"]
         return RunReport(
             cases_dir=cases_dir_arg,
             results_dir=results_dir,
