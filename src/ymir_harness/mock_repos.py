@@ -165,6 +165,9 @@ def _materialize_repo(
     remote_url = _required_string(repo_config, "remote_url", mock_path, index)
     pre_fix_ref = _required_string(repo_config, "pre_fix_ref", mock_path, index)
     source_url = _optional_string(repo_config, "source_url", mock_path, index)
+    branch_aliases = tuple(
+        alias for alias in _string_list(repo_config.get("branch_aliases")) if alias != branch
+    )
 
     source = _cloneable_source(
         source_url
@@ -183,7 +186,11 @@ def _materialize_repo(
     destination = workdir / _repo_dir_name(package, index)
     _run_git(["clone", "--quiet", source, str(destination)], mock_path)
     _run_git(["-C", str(destination), "checkout", "--quiet", "--detach", pre_fix_ref], mock_path)
-    _run_git(["-C", str(destination), "branch", "--force", branch, pre_fix_ref], mock_path)
+    for branch_name in (branch, *branch_aliases):
+        _run_git(
+            ["-C", str(destination), "branch", "--force", branch_name, pre_fix_ref],
+            mock_path,
+        )
 
     return MaterializedRepo(
         package=package,

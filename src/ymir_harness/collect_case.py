@@ -146,6 +146,7 @@ class MockRepoInput:
     branch: str
     agent: str = "triage"
     source_url: str | None = None
+    branch_aliases: tuple[str, ...] = ()
     zstream_override: Mapping[str, str] = field(default_factory=dict)
     blocked_original_urls: tuple[str, ...] = ()
 
@@ -1372,7 +1373,7 @@ def _complete_request(
         fix_version=fix_version,
     )
     if target_branch is None and mock_repo is not None:
-        target_branch = mock_repo.branch
+        target_branch = _expected_target_branch_from_mock_repo(mock_repo, fix_version)
 
     return replace(
         request,
@@ -1661,6 +1662,7 @@ def _derive_mock_repo(
         pre_fix_ref=pre_fix_ref,
         branch=branch,
         agent=request.mock_agent,
+        branch_aliases=_mock_repo_branch_aliases(branch, fix_version),
         zstream_override=_zstream_override(branch, expected_branch),
     )
 
@@ -1702,6 +1704,39 @@ def _zstream_override(branch: str, expected_branch: str | None) -> dict[str, str
     if match is None:
         return {}
     return {match.group(1): expected_branch}
+
+
+def _expected_target_branch_from_mock_repo(
+    mock_repo: MockRepoInput,
+    fix_version: str | None,
+) -> str:
+    if mock_repo.branch.startswith("stream-"):
+        product_branch = _rhel_product_branch(fix_version)
+        if product_branch is not None:
+            return product_branch
+    return mock_repo.branch
+
+
+def _mock_repo_branch_aliases(branch: str, fix_version: str | None) -> tuple[str, ...]:
+    if not branch.startswith("stream-"):
+        return ()
+    product_branch = _rhel_product_branch(fix_version)
+    if product_branch is None or product_branch == branch:
+        return ()
+    return (product_branch,)
+
+
+def _rhel_product_branch(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    match = re.fullmatch(r"rhel-(\d+)\.(\d+)(?:\.(\d+))?\.z", normalized)
+    if match is None:
+        return None
+    major, minor, patch = match.groups()
+    if patch is not None:
+        return f"rhel-{major}.{minor}.{patch}"
+    return f"rhel-{major}.{minor}.0"
 
 
 def _nonempty_string(value: Any) -> str | None:
@@ -2332,6 +2367,8 @@ def _write_mock_data(
     }
     if mock_repo.source_url is not None and not _is_mock_repo_cache_source(request, mock_repo):
         payload["repos"][0]["source_url"] = mock_repo.source_url
+    if mock_repo.branch_aliases:
+        payload["repos"][0]["branch_aliases"] = list(mock_repo.branch_aliases)
     if mock_repo.zstream_override:
         payload["zstream_override"] = dict(mock_repo.zstream_override)
     if mock_repo.blocked_original_urls:
