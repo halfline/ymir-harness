@@ -30,6 +30,7 @@ from ymir_harness.capture_missing import (
     blocked_urls_from_run_path,
     capture_missing,
     jira_requests_from_run_path,
+    lookaside_source_requests_from_run_path,
 )
 from ymir_harness.comparison import compare_result_reports, render_comparison_markdown
 from ymir_harness.jira_replay import derive_as_of
@@ -1789,9 +1790,33 @@ def _prepare_has_replay_candidates(
                 case_id,
             )
         ]
-        return bool(blocked_urls or jira_requests_from_run_path(results_dir))
+        lookaside_sources = _prepare_unrecorded_lookaside_sources(
+            results_dir,
+            cases_dir,
+            case_id,
+        )
+        return bool(
+            blocked_urls or jira_requests_from_run_path(results_dir) or lookaside_sources
+        )
     except CaptureMissingError:
         return False
+
+
+def _prepare_unrecorded_lookaside_sources(
+    results_dir: Path,
+    cases_dir: Path | None,
+    case_id: str | None,
+) -> list[tuple[str, str]]:
+    if case_id is None:
+        return []
+    requests = lookaside_source_requests_from_run_path(results_dir, case_id)
+    if cases_dir is None:
+        return [(request.filename, request.url) for request in requests]
+    return [
+        (request.filename, request.url)
+        for request in requests
+        if not (cases_dir / "source_cache" / case_id / "lookaside" / request.filename).is_file()
+    ]
 
 
 def _prepare_blocked_url_is_recorded(
