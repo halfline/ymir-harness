@@ -2805,6 +2805,39 @@ def test_prepare_has_replay_candidates_ignores_recorded_source_cache_repo(
     assert not cli_module._prepare_has_replay_candidates(run_dir, cases_dir, case_id)
 
 
+def test_prepare_has_replay_candidates_detects_unrecorded_lookaside_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    case_id = "RHEL-12345"
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    request = argparse.Namespace(
+        filename="redis-6.2.22.tar.gz",
+        url="https://pkgs.devel.redhat.com/repo/rpms/redis/redis-6.2.22.tar.gz",
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "lookaside_source_requests_from_run_path",
+        lambda _results_dir, _case_id: [request],
+    )
+
+    assert cli_module._prepare_has_replay_candidates(run_dir, cases_dir, case_id)
+
+    cached_source = (
+        cases_dir
+        / "source_cache"
+        / case_id
+        / "lookaside"
+        / "redis-6.2.22.tar.gz"
+    )
+    cached_source.parent.mkdir(parents=True)
+    cached_source.write_bytes(b"cached")
+
+    assert not cli_module._prepare_has_replay_candidates(run_dir, cases_dir, case_id)
+
+
 def test_cli_prepare_case_blocks_passing_run_with_uncaptured_replay_miss(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
