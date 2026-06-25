@@ -1126,34 +1126,19 @@ def _patch_backport_no_write_subprocesses(backport_module: Any) -> None:
     if getattr(backport_module, "_ymir_harness_check_subprocess_patched", False):
         return
 
-    original_check_subprocess = backport_module.check_subprocess
     original_get_unpacked_sources = backport_module.tasks.get_unpacked_sources
-
-    async def harness_check_subprocess(
-        cmd: str | list[str],
-        shell: bool = False,
-        cwd: Path | None = None,
-        env: dict[str, str] | None = None,
-    ) -> tuple[str | None, str | None]:
-        if (
-            os.getenv("DRY_RUN", "False").lower() == "true"
-            and cwd is not None
-            and _is_package_prep_command(cmd)
-        ):
-            source_dir = _materialize_replay_unpacked_sources(cwd)
-            if source_dir is None:
-                raise RuntimeError(f"replay source archive is missing for {cwd}")
-            return "", ""
-        return await original_check_subprocess(cmd, shell=shell, cwd=cwd, env=env)
 
     def harness_get_unpacked_sources(local_clone: Path, package: str) -> Path:
         if os.getenv("DRY_RUN", "False").lower() == "true":
+            try:
+                return original_get_unpacked_sources(local_clone, package)
+            except (FileNotFoundError, ValueError):
+                pass
             source_dir = _materialize_replay_unpacked_sources(local_clone)
             if source_dir is not None:
                 return source_dir
         return original_get_unpacked_sources(local_clone, package)
 
-    backport_module.check_subprocess = harness_check_subprocess
     backport_module.tasks.get_unpacked_sources = harness_get_unpacked_sources
     backport_module._ymir_harness_check_subprocess_patched = True
 
