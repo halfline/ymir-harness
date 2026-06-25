@@ -105,7 +105,7 @@ COMMENT_RESOLUTION_HINTS = (
     ),
 )
 CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
-URL_PATTERN = re.compile(r"https?://[^\s<>\]\[\"']+")
+URL_PATTERN = re.compile(r"https?://[^\s<>\]\[\"'|]+")
 RESULT_COMMENT_PATTERNS = (
     "*resolution*",
     "advisory ",
