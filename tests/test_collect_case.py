@@ -45,6 +45,34 @@ def _stub_koji_candidate_builds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(collect_case_module, "fetch_candidate_build", fake_fetch_candidate_build)
 
 
+def test_derive_cve_ids_prefers_issue_cve_over_comment_prerequisites() -> None:
+    issue = {
+        "fields": {
+            "summary": "CVE-2025-10911 libxslt: use-after-free [rhel-9.4.z]",
+            "customfield_10667": "CVE-2025-10911",
+        }
+    }
+    comments = {
+        "comments": [
+            {
+                "body": (
+                    "The first patch is a prerequisite that also fixes "
+                    "CVE-2023-40403."
+                )
+            }
+        ]
+    }
+
+    assert collect_case_module._derive_cve_ids(issue, comments) == ["CVE-2025-10911"]
+
+
+def test_derive_cve_ids_uses_comments_when_issue_has_no_cve() -> None:
+    issue = {"fields": {"summary": "dnsmasq update [rhel-9.4.z]"}}
+    comments = {"comments": [{"body": "Output from Ymir: CVE-2026-0001"}]}
+
+    assert collect_case_module._derive_cve_ids(issue, comments) == ["CVE-2026-0001"]
+
+
 def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     issue_json = _write_json(
