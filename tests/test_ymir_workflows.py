@@ -718,6 +718,43 @@ def test_ymir_triage_executor_logs_workflow_progress(
     assert '"event": "workflow_finished"' in stderr
 
 
+def test_ymir_triage_executor_stops_on_replay_miss(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _request(
+        tmp_path,
+        environment={
+            "DRY_RUN": "true",
+            "YMIR_HARNESS_STOP_ON_REPLAY_MISS": "1",
+            "YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL": "0.001",
+        },
+    )
+    missing_url = "https://example.invalid/missing.patch"
+
+    async def workflow(*_args, **_kwargs):
+        gateway_dir = request.results_dir / "repeat-1" / "mcp-gateway"
+        gateway_dir.mkdir(parents=True)
+        (gateway_dir / "RHEL-12345.debug.log").write_text(
+            f"Failed to fetch patch from {missing_url}: "
+            "URL is not recorded in replay cache\n",
+            encoding="utf-8",
+        )
+        await workflow_module.asyncio.sleep(1)
+
+    executor = make_ymir_triage_executor(
+        workflow=workflow,
+        agent_factory=lambda _gateway_tools, _local_tool_options: object(),
+    )
+
+    with pytest.raises(RuntimeError, match=missing_url):
+        executor(request)
+
+    stderr = capsys.readouterr().err
+    assert '"event": "workflow_replay_miss_detected"' in stderr
+    assert missing_url in stderr
+
+
 def test_ymir_triage_executor_times_out_live_agent_factory(
     tmp_path: Path,
     monkeypatch,
