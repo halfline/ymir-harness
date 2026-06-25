@@ -1841,6 +1841,103 @@ def test_build_run_report_clones_mock_repo_source_url(tmp_path: Path) -> None:
     ]
 
 
+def test_build_run_report_mock_repo_advertises_source_cache_heads(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    source_repo, pre_fix_ref = _create_git_repo(tmp_path)
+    fix_ref = subprocess.run(
+        ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    _run_git(source_repo, "branch", "rhel-10.0", pre_fix_ref)
+    _run_git(source_repo, "branch", "rhel-10.2", fix_ref)
+    _run_git(source_repo, "checkout", "rhel-10.0")
+    _run_git(source_repo, "branch", "-D", "master")
+    original_url = "https://gitlab.com/redhat/rhel/rpms/dnsmasq.git"
+    _write_source_fixture(cases_dir, tmp_path, "RHEL-12345", source_repo, original_url)
+    _write_expected(
+        cases_dir,
+        "RHEL-12345",
+        {
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "resolution": "backport",
+            "package": "dnsmasq",
+            "network_mode": "network_denied",
+        },
+    )
+    _write_json(
+        cases_dir / "mock_data" / "backport" / "RHEL-12345.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "case_type": "cve_backport",
+            "repos": [
+                {
+                    "package": "dnsmasq",
+                    "remote_url": original_url,
+                    "pre_fix_ref": pre_fix_ref,
+                    "branch": "rhel-10.0",
+                }
+            ],
+        },
+    )
+    requests = []
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(request):
+        requests.append(request)
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": "RHEL-12345",
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    local_path = Path(
+        json.loads(requests[0].environment["YMIR_BENCHMARK_MOCK_REPOS"])[0]["local_path"]
+    )
+    branchless_clone = tmp_path / "branchless-clone"
+    subprocess.run(["git", "clone", "--quiet", str(local_path), str(branchless_clone)], check=True)
+    subprocess.run(
+        ["git", "-C", str(branchless_clone), "cat-file", "-e", f"{fix_ref}^{{commit}}"],
+        check=True,
+    )
+    fixed_text = subprocess.run(
+        ["git", "-C", str(branchless_clone), "show", f"{fix_ref}:source.c"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout
+
+    assert report.entries[0].status == "passed"
+    assert fixed_text == "fixed\n"
+
+
 def test_build_run_report_materializes_https_mock_repo_from_source_fixture_manifest(
     tmp_path: Path,
 ) -> None:
