@@ -1618,6 +1618,32 @@ def test_backport_patch_fetch_candidates_include_triage_result(tmp_path: Path) -
     ) == (request_patch_url, jira_patch_url, triage_patch_url)
 
 
+def test_triage_patch_fetch_candidates_include_gitlab_mr_description() -> None:
+    request_patch_url = "https://example.invalid/request.patch"
+    jira_patch_url = "https://gitlab.example/redhat/rpms/pkg/-/merge_requests/64.patch"
+    upstream_patch_url = (
+        "https://github.example/upstream/pkg/commit/"
+        "1111111111111111111111111111111111111111.patch"
+    )
+    request = CollectCaseRequest(
+        cases_dir=Path("benchmark_cases"),
+        case_id="RHEL-12345",
+        mock_agent="triage",
+        patch_urls=(request_patch_url,),
+    )
+
+    assert collect_case_module._candidate_patch_urls_to_fetch(
+        request,
+        (jira_patch_url,),
+        gitlab_mr={
+            "description": (
+                "Upstream patches:\n"
+                f" - {upstream_patch_url}\n"
+            )
+        },
+    ) == (request_patch_url, jira_patch_url, upstream_patch_url)
+
+
 def test_backport_reference_patch_prefers_triage_result_patch_body(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     triage_patch_url = "https://github.example/upstream/pkg/commit/first.patch"
