@@ -1023,6 +1023,26 @@ def test_collect_case_normalizes_gitlab_links_as_patch_urls() -> None:
     ]
 
 
+def test_collect_case_normalizes_pkgs_devel_cgit_commit_links_as_patch_urls() -> None:
+    issue = {
+        "fields": {
+            "description": (
+                "Review https://pkgs.devel.redhat.com/cgit/rpms/plexus-utils/commit/"
+                "?h=stream-maven-3.9-rhel-9.7.0&id=5932cc080162dcd3bf95468a07b66aa1a0351288 "
+                "and https://pkgs.devel.redhat.com/cgit/modules/maven/commit/"
+                "?h=stream-maven-3.9-rhel-9.7.0&id=0f5a1406a203380ebcbd78a218924b38330ec93d"
+            )
+        }
+    }
+
+    assert collect_case_module._patch_urls_from_jira_evidence(issue) == [
+        "https://pkgs.devel.redhat.com/cgit/rpms/plexus-utils/patch/"
+        "?h=stream-maven-3.9-rhel-9.7.0&id=5932cc080162dcd3bf95468a07b66aa1a0351288",
+        "https://pkgs.devel.redhat.com/cgit/modules/maven/patch/"
+        "?h=stream-maven-3.9-rhel-9.7.0&id=0f5a1406a203380ebcbd78a218924b38330ec93d",
+    ]
+
+
 def test_collect_case_derives_product_branch_alias_for_stream_branches() -> None:
     assert collect_case_module._mock_repo_branch_aliases(  # noqa: SLF001
         "stream-maven-3.9-rhel-9.6.0",
