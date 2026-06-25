@@ -1619,10 +1619,23 @@ def _derive_fix_version(issue: Mapping[str, Any] | None) -> str | None:
 
 
 def _derive_cve_ids(issue: Mapping[str, Any] | None, comments: Any) -> list[str]:
-    values: list[str] = []
-    for text in [*_issue_text_values(issue), *_comment_bodies(comments)]:
-        values.extend(match.group(0).upper() for match in CVE_PATTERN.finditer(text))
-    return list(dict.fromkeys(values))
+    for values in (
+        _issue_cve_field_values(issue),
+        _issue_summary_label_values(issue),
+        _issue_description_values(issue),
+        _comment_bodies(comments),
+    ):
+        cve_ids = _extract_cve_ids(values)
+        if cve_ids:
+            return cve_ids
+    return []
+
+
+def _extract_cve_ids(values: Iterable[str]) -> list[str]:
+    cve_ids: list[str] = []
+    for text in values:
+        cve_ids.extend(match.group(0).upper() for match in CVE_PATTERN.finditer(text))
+    return list(dict.fromkeys(cve_ids))
 
 
 def _derive_network_mode(request: CollectCaseRequest, fetched: FetchedEvidence) -> str:
@@ -1775,6 +1788,45 @@ def _issue_text_values(issue: Mapping[str, Any] | None) -> list[str]:
     for label in _issue_labels(issue):
         values.append(label)
     return values
+
+
+def _issue_cve_field_values(issue: Mapping[str, Any] | None) -> list[str]:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return []
+    return _text_values(fields.get("customfield_10667"))
+
+
+def _issue_summary_label_values(issue: Mapping[str, Any] | None) -> list[str]:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return []
+    values = []
+    summary = fields.get("summary")
+    if isinstance(summary, str):
+        values.append(summary)
+    values.extend(_issue_labels(issue))
+    return values
+
+
+def _issue_description_values(issue: Mapping[str, Any] | None) -> list[str]:
+    fields = _issue_fields(issue)
+    if fields is None:
+        return []
+    return _text_values(fields.get("description"))
+
+
+def _text_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        return [json.dumps(value, sort_keys=True)]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        values = []
+        for item in value:
+            values.extend(_text_values(item))
+        return values
+    return []
 
 
 def _comment_bodies(comments: Any) -> list[str]:
