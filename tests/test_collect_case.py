@@ -1479,6 +1479,40 @@ def test_triage_expected_patch_urls_ignore_backport_only_result_comment(
     )
 
 
+def test_triage_expected_patch_urls_prefer_gitlab_mr_description(
+    tmp_path: Path,
+) -> None:
+    upstream_patch_url = (
+        "https://github.example/upstream/pkg/commit/"
+        "1111111111111111111111111111111111111111.patch"
+    )
+    downstream_patch_url = (
+        "https://gitlab.example/redhat/rpms/pkg/-/merge_requests/64.patch"
+    )
+    request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-12345",
+        expected_basis="historical_jira_state",
+        mock_agent="triage",
+    )
+    fetched = collect_case_module.FetchedEvidence(
+        jira_patch_urls=(downstream_patch_url,),
+        gitlab_mr={
+            "description": (
+                "Backport upstream commit 1111111111111111111111111111111111111111\n\n"
+                "Upstream patches:\n"
+                f" - {upstream_patch_url}\n"
+            )
+        },
+        gitlab_mr_url="https://gitlab.example/redhat/rpms/pkg/-/merge_requests/64",
+        gitlab_patch_url=downstream_patch_url,
+    )
+
+    assert collect_case_module._expected_patch_urls(request, fetched) == (
+        upstream_patch_url,
+    )
+
+
 def test_historical_expected_patch_urls_use_first_completed_agent_result(
     tmp_path: Path,
 ) -> None:
