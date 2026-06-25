@@ -224,7 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument(
         "--mock-repo-cache",
         type=Path,
-        help="clone/fetch mock repos into this local cache and write source_url",
+        help="clone/fetch mock repos into this local cache for fixture generation",
     )
     collect.add_argument(
         "--zstream-override",
