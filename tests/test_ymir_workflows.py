@@ -1244,6 +1244,66 @@ def test_is_package_prep_command_detects_rhpkg_and_centpkg() -> None:
     assert not _is_package_prep_command(["rhpkg", "sources"])
 
 
+def test_backport_no_write_patch_leaves_package_prep_subprocess_unmocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    async def check_subprocess(
+        cmd: str | list[str],
+        shell: bool = False,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> tuple[str | None, str | None]:
+        calls.append((cmd, shell, cwd, env))
+        return "stdout", "stderr"
+
+    tasks = types.SimpleNamespace(
+        get_unpacked_sources=lambda local_clone, package: local_clone / f"{package}-sources"
+    )
+    backport_module = types.SimpleNamespace(
+        check_subprocess=check_subprocess,
+        tasks=tasks,
+    )
+
+    workflow_module._patch_backport_no_write_subprocesses(backport_module)
+    monkeypatch.setenv("DRY_RUN", "true")
+
+    result = asyncio.run(backport_module.check_subprocess(["rhpkg", "prep"], cwd=tmp_path))
+
+    assert backport_module.check_subprocess is check_subprocess
+    assert result == ("stdout", "stderr")
+    assert calls == [(["rhpkg", "prep"], False, tmp_path, None)]
+
+
+def test_backport_no_write_get_unpacked_sources_prefers_real_prep_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_source_dir = tmp_path / "vim82"
+    real_source_dir.mkdir()
+
+    def get_unpacked_sources(local_clone: Path, package: str) -> Path:
+        assert local_clone == tmp_path
+        assert package == "vim"
+        return real_source_dir
+
+    def fail_materialize(_local_clone: Path) -> Path | None:
+        raise AssertionError("fallback materializer should not run after real prep output exists")
+
+    backport_module = types.SimpleNamespace(
+        check_subprocess=lambda *args, **kwargs: None,
+        tasks=types.SimpleNamespace(get_unpacked_sources=get_unpacked_sources),
+    )
+
+    workflow_module._patch_backport_no_write_subprocesses(backport_module)
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setattr(workflow_module, "_materialize_replay_unpacked_sources", fail_materialize)
+
+    assert backport_module.tasks.get_unpacked_sources(tmp_path, "vim") == real_source_dir
+
+
 def test_materialize_replay_unpacked_sources_extracts_source0_archive(tmp_path: Path) -> None:
     (tmp_path / "redis.spec").write_text(
         "Name: redis\nVersion: 6.2.20\nSource0: %{name}-%{version}.tar.gz\n%prep\n%autosetup -p1\n",
