@@ -656,9 +656,7 @@ def _cmd_activate_case(args: argparse.Namespace) -> int:
         json.dump(payload, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
     else:
-        sys.stdout.write(
-            f"activated {payload['case_id']} using {payload['run_report']}\n"
-        )
+        sys.stdout.write(f"activated {payload['case_id']} using {payload['run_report']}\n")
         sys.stdout.write(f"validation reports written to {payload['validation_reports_dir']}\n")
     return 0
 
@@ -769,8 +767,7 @@ def _activate_run_report_path(
             continue
 
     raise ValueError(
-        f"no run report containing {case_id} was found under {runs_dir}; "
-        "pass --run-report"
+        f"no run report containing {case_id} was found under {runs_dir}; pass --run-report"
     )
 
 
@@ -787,8 +784,7 @@ def _activate_require_passing_run_report(run_report_path: Path, case_id: str) ->
     if non_passing:
         statuses = ", ".join(non_passing)
         raise ValueError(
-            f"run report has non-passing entries for {case_id}: {statuses} "
-            f"({run_report_path})"
+            f"run report has non-passing entries for {case_id}: {statuses} ({run_report_path})"
         )
     return len(entries)
 
@@ -803,9 +799,7 @@ def _activate_run_report_entries(run_report_path: Path, case_id: str) -> list[Ma
     if not isinstance(entries, list):
         raise ValueError(f"run report must include a cases list: {run_report_path}")
     return [
-        entry
-        for entry in entries
-        if isinstance(entry, Mapping) and entry.get("case_id") == case_id
+        entry for entry in entries if isinstance(entry, Mapping) and entry.get("case_id") == case_id
     ]
 
 
@@ -1903,8 +1897,7 @@ def _merge_capture_results(
     captured_urls.update(capture.url for capture in base.captured_source)
     captured_urls.update(capture.url for capture in base.captured_git_failures)
     captured_urls.update(
-        f"koji-candidate-build:{capture.key}"
-        for capture in base.captured_koji_candidate_builds
+        f"koji-candidate-build:{capture.key}" for capture in base.captured_koji_candidate_builds
     )
     base.skipped = [skip for skip in base.skipped if skip.url not in captured_urls]
     return base
