@@ -54,6 +54,7 @@ from ymir_harness.models import (
 from ymir_harness.replay import canonicalize_replay_url
 from ymir_harness.reports import write_validation_reports
 from ymir_harness.runner import (
+    STOP_ON_REPLAY_MISS_ENV,
     append_global_issues,
     build_run_report,
     default_results_dir,
@@ -79,6 +80,7 @@ from ymir_harness.ymir_workflows import (
 
 WORKFLOW_CHOICES = ("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild")
 MAX_PREPARE_AUTO_ALLOWED_HOSTS = 16
+DEFAULT_PREPARE_WORKFLOW_PROGRESS_INTERVAL_SECONDS = "2"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2071,6 +2073,11 @@ def _prepare_run_iteration(
 
 def _prepare_run_environment() -> dict[str, str]:
     environment = dict(os.environ)
+    environment.setdefault(
+        "YMIR_HARNESS_WORKFLOW_PROGRESS_INTERVAL",
+        DEFAULT_PREPARE_WORKFLOW_PROGRESS_INTERVAL_SECONDS,
+    )
+    environment.setdefault(STOP_ON_REPLAY_MISS_ENV, "1")
     return environment
 
 

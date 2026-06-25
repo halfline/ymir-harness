@@ -13,19 +13,25 @@ import sys
 import time
 import traceback
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
 from ymir_harness.artifacts import capture_backport_artifacts, merge_artifact_fields
+from ymir_harness.capture_missing import CaptureMissingError, blocked_urls_from_run_path
 from ymir_harness.llm_judge import evaluate_backport_llm_judge
 from ymir_harness.models import SCHEMA_VERSION
 from ymir_harness.replay_metadata import (
     install_specfile_changelog_replay,
     replay_metadata_environment,
 )
-from ymir_harness.runner import DEFAULT_CHAT_MODEL, RunCaseExecution, RunCaseRequest
+from ymir_harness.runner import (
+    DEFAULT_CHAT_MODEL,
+    STOP_ON_REPLAY_MISS_ENV,
+    RunCaseExecution,
+    RunCaseRequest,
+)
 from ymir_harness.scoring import load_json_file
 from ymir_harness.source_fixtures import find_source_cache_repository
 from ymir_harness.ymir_source import ensure_ymir_source_path
@@ -463,6 +469,9 @@ async def _await_workflow(
     _workflow_debug(request, "workflow_started", workflow=workflow_name)
     task = asyncio.create_task(awaitable)
     interval = _workflow_progress_interval(request)
+    stop_on_replay_miss = _stop_on_replay_miss(request)
+    if stop_on_replay_miss and interval <= 0:
+        interval = 1.0
 
     try:
         if interval <= 0:
@@ -472,6 +481,23 @@ async def _await_workflow(
                 done, _pending = await asyncio.wait({task}, timeout=interval)
                 if done:
                     break
+                if stop_on_replay_miss:
+                    replay_miss = _first_replay_miss(request)
+                    if replay_miss is not None:
+                        _workflow_debug(
+                            request,
+                            "workflow_replay_miss_detected",
+                            workflow=workflow_name,
+                            reason=replay_miss.reason,
+                            url=replay_miss.url,
+                        )
+                        task.cancel()
+                        with suppress(BaseException):
+                            await task
+                        raise RuntimeError(
+                            f"replay miss: URL is not recorded in replay cache: "
+                            f"{replay_miss.url}"
+                        )
                 _workflow_debug(
                     request,
                     "workflow_waiting",
@@ -509,6 +535,24 @@ def _workflow_progress_interval(request: RunCaseRequest) -> float:
         return float(raw_value)
     except ValueError:
         return WORKFLOW_PROGRESS_INTERVAL_SECONDS
+
+
+def _stop_on_replay_miss(request: RunCaseRequest) -> bool:
+    return _truthy_environment(request.environment.get(STOP_ON_REPLAY_MISS_ENV))
+
+
+def _truthy_environment(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "none", "off"}
+
+
+def _first_replay_miss(request: RunCaseRequest):
+    try:
+        blocked_urls = blocked_urls_from_run_path(request.results_dir)
+    except CaptureMissingError:
+        return None
+    return blocked_urls[0] if blocked_urls else None
 
 
 def _agent_timeout_seconds(request: RunCaseRequest) -> float | None:
