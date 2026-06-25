@@ -3111,10 +3111,22 @@ def _expected_patch_urls(
                 return tuple(filtered)
         return tuple(historical_urls)
 
+    if request.mock_agent == "triage":
+        gitlab_mr_patch_urls = _gitlab_mr_description_patch_urls(fetched.gitlab_mr)
+        if gitlab_mr_patch_urls:
+            return tuple(gitlab_mr_patch_urls)
+
     if request.mock_agent == "triage" and fetched.jira_patch_urls:
         return tuple(fetched.jira_patch_urls)
 
     return _effective_patch_urls(request, fetched)
+
+
+def _gitlab_mr_description_patch_urls(gitlab_mr: Mapping[str, Any] | None) -> list[str]:
+    if gitlab_mr is None:
+        return []
+    description = gitlab_mr.get("description")
+    return _patch_urls_from_jira_evidence(description)
 
 
 def _triage_result_patch_urls(request: CollectCaseRequest) -> tuple[str, ...]:
