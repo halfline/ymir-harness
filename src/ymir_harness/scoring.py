@@ -910,7 +910,7 @@ def _backport_source_for_url(url: str) -> str | None:
         path.startswith("/redhat/rhel/rpms/") or path.startswith("/redhat/centos-stream/rpms/")
     ):
         return "distgit"
-    if hostname == "pkgs.devel.redhat.com" and path.startswith("/cgit/rpms/"):
+    if hostname == "pkgs.devel.redhat.com" and path.startswith("/cgit/"):
         return "distgit"
     if hostname == "src.fedoraproject.org" and path.startswith("/rpms/"):
         return "distgit"
