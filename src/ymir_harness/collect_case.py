@@ -2734,16 +2734,49 @@ def _download_spec_sources(
             source = source_by_filename.get(filename)
             if source is None or (checkout / filename).is_file():
                 continue
-            request = Request(url, headers={"User-Agent": "ymir-harness"})
-            try:
-                with urlopen(request, timeout=timeout) as response:
-                    body = response.read()
-            except OSError:
-                continue
-            if not _lookaside_checksum_matches(body, source):
-                continue
-            (checkout / filename).write_bytes(body)
+            for candidate_url in _spec_source_candidate_urls(url, filename):
+                request = Request(candidate_url, headers={"User-Agent": "ymir-harness"})
+                try:
+                    with urlopen(request, timeout=timeout) as response:
+                        body = response.read()
+                except OSError:
+                    continue
+                if not _lookaside_checksum_matches(body, source):
+                    continue
+                (checkout / filename).write_bytes(body)
+                break
     return all((checkout / source.filename).is_file() for source in sources)
+
+
+def _spec_source_candidate_urls(url: str, filename: str) -> tuple[str, ...]:
+    candidates = [url]
+    candidates.extend(_sourceforge_mirror_candidates(url, filename))
+    return tuple(dict.fromkeys(candidates))
+
+
+def _sourceforge_mirror_candidates(url: str, filename: str) -> tuple[str, ...]:
+    parsed = urlparse(url)
+    path_parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if not path_parts:
+        return ()
+
+    project: str | None = None
+    if "sourceforge" in parsed.netloc:
+        if "project" in path_parts:
+            project_index = path_parts.index("project")
+            if len(path_parts) > project_index + 1:
+                project = path_parts[project_index + 1]
+        elif path_parts:
+            project = path_parts[0]
+    elif "ftp-osl.osuosl.org" in parsed.netloc and path_parts[:1] == ["pub"]:
+        if len(path_parts) > 1:
+            project = path_parts[1]
+
+    if not project:
+        return ()
+    return (
+        f"https://download.sourceforge.net/{quote(project, safe='')}/{quote(filename, safe='')}",
+    )
 
 
 def _spec_source_urls(spec_path: Path) -> tuple[str, ...]:
