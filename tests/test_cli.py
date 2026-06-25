@@ -1325,6 +1325,7 @@ def test_cli_prepare_backport_runs_triage_when_result_is_missing(
                 "ymir-backport",
                 "--variant",
                 "baseline",
+                "--activate-on-pass",
                 "--json",
             ]
         )
@@ -1334,7 +1335,17 @@ def test_cli_prepare_backport_runs_triage_when_result_is_missing(
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "succeeded"
     assert output["triage_result"]["status"] == "generated"
+    assert output["triage_result"]["activation"]["status"] == "activated"
+    assert output["activation"]["status"] == "activated"
     assert Path(output["triage_result"]["written_path"]).is_file()
+    triage_expected = json.loads(
+        (triage_cases_dir / "expected" / f"{case_id}.expected.json").read_text(encoding="utf-8")
+    )
+    backport_expected = json.loads(
+        (backport_cases_dir / "expected" / f"{case_id}.expected.json").read_text(encoding="utf-8")
+    )
+    assert triage_expected["case_status"] == "active"
+    assert backport_expected["case_status"] == "active"
     assert build_calls == [
         ("ymir-triage", "baseline-RHEL-12345-iter-1"),
         ("ymir-backport", "baseline-RHEL-12345-iter-1"),
@@ -1627,6 +1638,125 @@ def test_cli_prepare_backport_uses_existing_triage_result(
         "path": str(cases_dir / "triage_results" / f"{case_id}.actual.json"),
         "status": "cached",
     }
+    assert build_calls == [("ymir-backport", "baseline-RHEL-12345-iter-1")]
+
+
+def test_cli_prepare_backport_activation_promotes_cached_sibling_triage(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_root = tmp_path / "cases"
+    triage_cases_dir = cases_root / "ymir-triage"
+    backport_cases_dir = cases_root / "ymir-backport"
+    case_id = "RHEL-12345"
+    cached_triage_result = {
+        "schema_version": 1,
+        "case_id": case_id,
+        "case_type": "cve_backport",
+        "workflow": "ymir-triage",
+        "resolution": "backport",
+        "data": {
+            "package": "dnsmasq",
+            "target_branch": "rhel-9.8.0",
+            "patch_urls": ["https://example.invalid/fix.patch"],
+        },
+    }
+    for cases_dir in (triage_cases_dir, backport_cases_dir):
+        _write_json(
+            cases_dir / "expected" / f"{case_id}.expected.json",
+            {
+                "schema_version": 1,
+                "case_id": case_id,
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+                "target_branch": "rhel-9.8.0",
+                "patch_urls": ["https://example.invalid/fix.patch"],
+                "case_status": "quarantined",
+                "network_mode": "replay_only",
+            },
+        )
+    _write_json(
+        backport_cases_dir / "triage_results" / f"{case_id}.actual.json",
+        cached_triage_result,
+    )
+    _write_activation_run_report(
+        triage_cases_dir / "reports" / "runs" / "passing-triage" / "run.json",
+        case_id,
+        ["passed"],
+    )
+
+    build_calls: list[tuple[str, str]] = []
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id=case_id,
+                    case_type="cve_backport",
+                    case_status="quarantined",
+                    status="valid",
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        build_calls.append((Path(cases_dir_arg).name, kwargs["run_id"]))
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id=case_id,
+                    case_type="cve_backport",
+                    status="passed",
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "_prepare_complete_existing_case", lambda _args: None)
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(backport_cases_dir),
+                "--case",
+                case_id,
+                "--workflow",
+                "ymir-backport",
+                "--variant",
+                "baseline",
+                "--activate-on-pass",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "succeeded"
+    assert output["triage_result"]["status"] == "cached"
+    assert output["triage_result"]["activation"]["status"] == "activated"
+    assert output["activation"]["status"] == "activated"
+    triage_expected = json.loads(
+        (triage_cases_dir / "expected" / f"{case_id}.expected.json").read_text(encoding="utf-8")
+    )
+    backport_expected = json.loads(
+        (backport_cases_dir / "expected" / f"{case_id}.expected.json").read_text(encoding="utf-8")
+    )
+    assert triage_expected["case_status"] == "active"
+    assert backport_expected["case_status"] == "active"
     assert build_calls == [("ymir-backport", "baseline-RHEL-12345-iter-1")]
 
 
