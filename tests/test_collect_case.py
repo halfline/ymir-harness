@@ -124,7 +124,7 @@ def test_collect_case_writes_fixture_scaffold(tmp_path: Path) -> None:
         "patch_files",
         "srpm",
     ]
-    assert expected["patch_file_patterns"] == ["RHEL-12345"]
+    assert "patch_file_patterns" not in expected
     assert (cases_dir / "cases.yaml").read_text(encoding="utf-8") == "cases:\n  - RHEL-12345\n"
 
     mock = json.loads(
@@ -244,7 +244,7 @@ def test_collect_case_infers_mixed_backport_source(tmp_path: Path) -> None:
     assert expected["backport_source"] == "mixed"
 
 
-def test_collect_case_uses_jira_issue_patch_file_pattern(tmp_path: Path) -> None:
+def test_collect_case_omits_patch_file_patterns(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
 
     collect_case(
@@ -279,7 +279,7 @@ def test_collect_case_uses_jira_issue_patch_file_pattern(tmp_path: Path) -> None
         "patch_files",
         "srpm",
     ]
-    assert expected["patch_file_patterns"] == ["RHEL-12345"]
+    assert "patch_file_patterns" not in expected
 
 
 def test_collect_case_warns_when_auto_discovered_gitlab_mr_is_private(
@@ -1868,7 +1868,7 @@ def test_collect_case_infers_backport_from_auto_discovered_gitlab_mr(
         "patch_files",
         "srpm",
     ]
-    assert expected["patch_file_patterns"] == ["RHEL-12345"]
+    assert "patch_file_patterns" not in expected
 
     mock = json.loads(
         (cases_dir / "mock_data" / "backport" / "RHEL-12345.json").read_text(encoding="utf-8")
