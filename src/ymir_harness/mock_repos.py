@@ -185,6 +185,7 @@ def _materialize_repo(
 
     destination = workdir / _repo_dir_name(package, index)
     _run_git(["clone", "--quiet", source, str(destination)], mock_path)
+    _promote_remote_head_refs(destination, mock_path)
     _run_git(["-C", str(destination), "checkout", "--quiet", "--detach", pre_fix_ref], mock_path)
     for branch_name in (branch, *branch_aliases):
         _run_git(
@@ -264,6 +265,44 @@ def _source_cache_clone_source(
 def _repo_dir_name(package: str, index: int) -> str:
     safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in package)
     return f"{index:02d}-{safe or 'repo'}"
+
+
+def _promote_remote_head_refs(repository: Path, mock_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "for-each-ref",
+            "--format=%(refname)%09%(objectname)",
+            "refs/remotes/origin",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        detail = f": {stderr}" if stderr else ""
+        raise MockRepoMaterializationError(
+            f"git for-each-ref failed for {mock_path}{detail}"
+        )
+
+    prefix = "refs/remotes/origin/"
+    for line in completed.stdout.splitlines():
+        ref_name, _separator, object_name = line.partition("\t")
+        if not object_name or ref_name == "refs/remotes/origin/HEAD":
+            continue
+        if not ref_name.startswith(prefix):
+            continue
+        branch_name = ref_name.removeprefix(prefix)
+        if not branch_name:
+            continue
+        _run_git(
+            ["-C", str(repository), "update-ref", f"refs/heads/{branch_name}", object_name],
+            mock_path,
+        )
 
 
 def _run_git(command: list[str], mock_path: Path) -> None:
