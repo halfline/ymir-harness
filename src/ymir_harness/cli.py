@@ -950,12 +950,7 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
 
     if exit_code == 0 and args.activate_on_pass:
         try:
-            activation = _activate_case(
-                args.cases,
-                args.case_id,
-                workflow=_validation_workflow(args.workflow),
-                run_report_path=_prepare_success_run_report(payload),
-            )
+            activation = _prepare_activate_on_pass(args, payload)
         except ValueError as exc:
             sys.stderr.write(f"prepare-case activation failed: {exc}\n")
             return 2
@@ -996,10 +991,83 @@ def _cmd_prepare_case(args: argparse.Namespace) -> int:
                     f"  auto-allowed hosts: {', '.join(str(host) for host in auto_allowed_hosts)}\n"
                 )
         if activation := payload.get("activation"):
+            triage_result = payload.get("triage_result")
+            if isinstance(triage_result, Mapping):
+                triage_activation = triage_result.get("activation")
+                if isinstance(triage_activation, Mapping):
+                    if triage_activation.get("status") == "activated":
+                        sys.stdout.write(
+                            "activated sibling triage "
+                            f"{triage_activation['case_id']} using "
+                            f"{triage_activation['run_report']}\n"
+                        )
+                    elif triage_activation.get("status") == "already_active":
+                        sys.stdout.write(
+                            f"sibling triage {triage_activation['case_id']} is already active\n"
+                        )
             sys.stdout.write(
                 f"activated {activation['case_id']} using {activation['run_report']}\n"
             )
     return exit_code
+
+
+def _prepare_activate_on_pass(
+    args: argparse.Namespace,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    triage_activation = _prepare_activate_sibling_triage(args, payload)
+    if triage_activation is not None:
+        triage_result = payload.get("triage_result")
+        if isinstance(triage_result, dict):
+            triage_result["activation"] = triage_activation
+
+    return _activate_case(
+        args.cases,
+        args.case_id,
+        workflow=_validation_workflow(args.workflow),
+        run_report_path=_prepare_success_run_report(payload),
+    )
+
+
+def _prepare_activate_sibling_triage(
+    args: argparse.Namespace,
+    payload: Mapping[str, object],
+) -> dict[str, object] | None:
+    if args.workflow != "ymir-backport":
+        return None
+
+    triage_result = payload.get("triage_result")
+    if not isinstance(triage_result, Mapping) or triage_result.get("status") not in {
+        "cached",
+        "generated",
+    }:
+        return None
+
+    triage_cases_dir = _prepare_sibling_triage_cases_dir(args.cases)
+    if triage_cases_dir is None:
+        return None
+
+    expected = _prepare_load_expected(triage_cases_dir, args.case_id)
+    if expected is None:
+        return None
+    if expected.get("case_status") == "active":
+        return {
+            "case_id": args.case_id,
+            "cases_dir": str(triage_cases_dir.resolve()),
+            "expected_path": str(
+                (triage_cases_dir / "expected" / f"{args.case_id}.expected.json").resolve()
+            ),
+            "status": "already_active",
+        }
+
+    run_report = _string_or_none(triage_result.get("run_report"))
+
+    return _activate_case(
+        triage_cases_dir,
+        args.case_id,
+        workflow=_validation_workflow("ymir-triage"),
+        run_report_path=Path(run_report) if run_report is not None else None,
+    )
 
 
 def _prepare_case(
