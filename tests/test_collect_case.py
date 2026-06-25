@@ -1010,7 +1010,8 @@ def test_collect_case_normalizes_gitlab_links_as_patch_urls() -> None:
     issue = {
         "fields": {
             "description": (
-                "Review https://gitlab.example/group/pkg/-/merge_requests/7 and "
+                "Review [https://gitlab.example/group/pkg/-/merge_requests/7|"
+                "https://gitlab.example/group/pkg/-/merge_requests/7|smart-link] and "
                 "https://gitlab.example/group/pkg/-/commit/abc123."
             ),
         },
