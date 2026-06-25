@@ -1288,9 +1288,7 @@ def test_cli_prepare_backport_runs_triage_when_result_is_missing(
                 variant=kwargs["variant"],
             )
 
-        triage_result_path = (
-            backport_cases_dir / "triage_results" / f"{case_id}.actual.json"
-        )
+        triage_result_path = backport_cases_dir / "triage_results" / f"{case_id}.actual.json"
         assert json.loads(triage_result_path.read_text(encoding="utf-8")) == triage_actual
         return RunReport(
             cases_dir=cases_dir_arg,
