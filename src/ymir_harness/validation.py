@@ -1444,6 +1444,9 @@ def _validate_mock_repo_entry(
     branch = repo.get("branch")
     if isinstance(branch, str) and branch:
         branches_seen.add(branch)
+    branch_aliases = repo.get("branch_aliases")
+    if isinstance(branch_aliases, list):
+        branches_seen.update(alias for alias in branch_aliases if isinstance(alias, str) and alias)
 
     remote_url = repo.get("remote_url")
     source_url = repo.get("source_url")
