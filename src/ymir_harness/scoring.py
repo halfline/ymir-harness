@@ -795,7 +795,7 @@ def _patch_url_commit_ids(url: str) -> set[str]:
     path = parsed.path
     if (
         hostname == "pkgs.devel.redhat.com"
-        and path.startswith("/cgit/rpms/")
+        and path.startswith("/cgit/")
         and path.rstrip("/").endswith("/patch")
     ):
         commit = (parse_qs(parsed.query).get("id") or [""])[0]
