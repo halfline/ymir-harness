@@ -1692,6 +1692,7 @@ def test_build_run_report_materializes_local_mock_repos(tmp_path: Path) -> None:
                     "remote_url": str(source_repo),
                     "pre_fix_ref": pre_fix_ref,
                     "branch": "c9s",
+                    "branch_aliases": ["rhel-8.10.0"],
                 }
             ],
         },
@@ -1738,6 +1739,11 @@ def test_build_run_report_materializes_local_mock_repos(tmp_path: Path) -> None:
     local_path = Path(repos[0]["local_path"])
     assert report.entries[0].status == "passed"
     assert (local_path / "source.c").read_text(encoding="utf-8") == "pre-fix\n"
+    alias_ref = subprocess.check_output(
+        ["git", "-C", str(local_path), "rev-parse", "rhel-8.10.0"],
+        text=True,
+    ).strip()
+    assert alias_ref == pre_fix_ref
     assert Path(env["GIT_CONFIG_GLOBAL"]).is_file()
     assert str(source_repo) in Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
     assert env["MOCK_BLOCKED_URLS"] == str(source_repo)

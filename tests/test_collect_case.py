@@ -994,6 +994,31 @@ def test_collect_case_normalizes_gitlab_links_as_patch_urls() -> None:
     ]
 
 
+def test_collect_case_derives_product_branch_alias_for_stream_branches() -> None:
+    assert collect_case_module._mock_repo_branch_aliases(  # noqa: SLF001
+        "stream-maven-3.9-rhel-9.6.0",
+        "rhel-9.6.z",
+    ) == ("rhel-9.6.0",)
+    assert collect_case_module._mock_repo_branch_aliases(  # noqa: SLF001
+        "stream-maven-3.8-rhel-8.8.0",
+        "rhel-8.8.0.z",
+    ) == ("rhel-8.8.0",)
+    assert (
+        collect_case_module._mock_repo_branch_aliases("c9s", "rhel-9.6.z") == ()  # noqa: SLF001
+    )
+    assert (
+        collect_case_module._expected_target_branch_from_mock_repo(  # noqa: SLF001
+            MockRepoInput(
+                remote_url="https://gitlab.example/group/plexus-utils.git",
+                pre_fix_ref="base123",
+                branch="stream-maven-3.9-rhel-9.6.0",
+            ),
+            "rhel-9.6.z",
+        )
+        == "rhel-9.6.0"
+    )
+
+
 def test_collect_case_infers_backport_from_human_assessment_comment(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     issue_json = _write_json(
