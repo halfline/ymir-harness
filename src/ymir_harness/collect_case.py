@@ -1948,9 +1948,6 @@ def _write_expected(
     required_artifact_kinds = _expected_required_artifact_kinds(request)
     if required_artifact_kinds:
         expected["required_artifact_kinds"] = list(required_artifact_kinds)
-    patch_file_patterns = _expected_patch_file_patterns(request)
-    if patch_file_patterns:
-        expected["patch_file_patterns"] = list(patch_file_patterns)
 
     _write_json(
         cases_dir / "expected" / f"{request.case_id}.expected.json",
@@ -3027,16 +3024,6 @@ def _expected_required_artifact_kinds(request: CollectCaseRequest) -> tuple[str,
     if request.mock_repo is None or request.mock_repo.agent != "backport":
         return ()
     return ("commit_diff", "spec_file", "patch_files", "srpm")
-
-
-def _expected_patch_file_patterns(
-    request: CollectCaseRequest,
-) -> tuple[str, ...]:
-    if request.resolution != "backport":
-        return ()
-    if request.mock_repo is None or request.mock_repo.agent != "backport":
-        return ()
-    return (request.case_id,)
 
 
 def _infer_backport_source(resolution: str | None, patch_urls: Sequence[str]) -> str | None:

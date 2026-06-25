@@ -106,7 +106,6 @@ def _score_case_once(
         ),
         _required_artifacts_metric(expected, actual),
         _required_artifact_kinds_metric(expected, actual),
-        _patch_file_patterns_metric(expected, actual),
         _compare("case_id", expected.get("case_id"), actual.get("case_id") or case_id),
         _compare(
             "jira_issue",
@@ -442,30 +441,6 @@ def _required_artifact_kinds_metric(
     )
 
 
-def _patch_file_patterns_metric(
-    expected: Mapping[str, Any], actual: Mapping[str, Any]
-) -> ScoreMetric:
-    patterns = _expected_patch_file_patterns(expected)
-    patch_names = _actual_patch_file_names(actual)
-    if not patterns:
-        return ScoreMetric(
-            name="patch_file_patterns",
-            status="skipped",
-            expected=patterns,
-            actual=patch_names,
-            notes="expected result declares no patch file patterns",
-        )
-
-    missing = [pattern for pattern in patterns if not any(pattern in name for name in patch_names)]
-    return ScoreMetric(
-        name="patch_file_patterns",
-        status="pass" if not missing else "fail",
-        expected=patterns,
-        actual=patch_names,
-        notes=f"missing patch file patterns: {', '.join(missing)}" if missing else None,
-    )
-
-
 def _expected_jira_issue(expected: Mapping[str, Any], case_id: str) -> str | None:
     return _string_or_none(expected.get("jira_issue")) or _string_or_none(case_id)
 
@@ -648,28 +623,6 @@ def _actual_artifact_kinds(actual: Mapping[str, Any]) -> list[str]:
         elif artifact_path.suffix in {".patch", ".diff"}:
             kinds.add("patch_files")
     return sorted(kinds)
-
-
-def _expected_patch_file_patterns(expected: Mapping[str, Any]) -> list[str]:
-    values = [
-        *_normalize_list(expected.get("patch_file_patterns")),
-        *_normalize_list(expected.get("patch_file_pattern")),
-    ]
-    return sorted(dict.fromkeys(value for value in values if value))
-
-
-def _actual_patch_file_names(actual: Mapping[str, Any]) -> list[str]:
-    names = []
-    captured = _artifact_manifest_captured_files(actual)
-    for path in _normalize_list(captured.get("patch_files")):
-        names.append(Path(path).name)
-    for artifact in _normalize_list(_actual_result_field(actual, "generated_artifacts")):
-        artifact_path = Path(artifact)
-        if artifact_path.name == "commit.diff":
-            continue
-        if artifact_path.suffix in {".patch", ".diff"}:
-            names.append(artifact_path.name)
-    return sorted(dict.fromkeys(name for name in names if name))
 
 
 def _artifact_manifest_captured_files(actual: Mapping[str, Any]) -> Mapping[str, Any]:
