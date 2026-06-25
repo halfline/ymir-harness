@@ -121,6 +121,7 @@ RESULT_COMMENT_PATTERNS = (
     "rel_prep",
     "released on",
     "resolved in a recent advisory",
+    "update created by jt-triage",
     "ymir_triaged",
     "ymir_backported",
     "ymir_rebased",
@@ -3193,6 +3194,7 @@ def _backport_source_for_url(url: str) -> str | None:
 
 
 def _historical_result_patch_urls(comments: Any, *, agent: str | None = None) -> list[str]:
+    jt_triage_urls: list[str] = []
     for comment in _comment_values(comments):
         if not _is_result_comment(comment):
             continue
@@ -3204,8 +3206,18 @@ def _historical_result_patch_urls(comments: Any, *, agent: str | None = None) ->
         body_text = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
         urls = _patch_urls_from_jira_evidence(body_text)
         if urls:
+            if _is_jt_triage_result_comment(comment):
+                if not jt_triage_urls:
+                    jt_triage_urls = list(dict.fromkeys(urls))
+                continue
             return list(dict.fromkeys(urls))
-    return []
+    return jt_triage_urls
+
+
+def _is_jt_triage_result_comment(comment: Mapping[str, Any]) -> bool:
+    body = comment.get("body")
+    body_text = body if isinstance(body, str) else json.dumps(body, sort_keys=True)
+    return "update created by jt-triage" in _normalized_text(body_text)
 
 
 def _result_comment_agents(comment: Mapping[str, Any]) -> set[str]:
@@ -3220,6 +3232,8 @@ def _result_comment_agents(comment: Mapping[str, Any]) -> set[str]:
         ):
             agents.add(agent)
     if "ymir_triaged" in lowered_body:
+        agents.add("triage")
+    if "update created by jt-triage" in lowered_body:
         agents.add("triage")
     for agent in ("backport", "rebase", "rebuild"):
         if f"ymir_{agent}ed" in lowered_body:
