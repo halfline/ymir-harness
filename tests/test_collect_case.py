@@ -2174,10 +2174,12 @@ def test_collect_case_caches_mock_repo_source(tmp_path: Path) -> None:
         (cases_dir / "mock_data" / "triage" / "RHEL-12345.json").read_text(encoding="utf-8")
     )
     repo = mock["repos"][0]
-    cached_repo = Path(repo["source_url"])
     assert repo["remote_url"] == "https://gitlab.example/group/pkg.git"
+    assert "source_url" not in repo
+    cached_repo = cache_dir.resolve() / collect_case_module._mock_repo_cache_name(  # noqa: SLF001
+        "https://gitlab.example/group/pkg.git"
+    )
     assert cached_repo.is_dir()
-    assert cached_repo.parent == cache_dir.resolve()
     subprocess.run(
         ["git", "-C", str(cached_repo), "cat-file", "-e", f"{pre_fix_ref}^{{commit}}"],
         check=True,
