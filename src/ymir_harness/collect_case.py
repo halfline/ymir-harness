@@ -439,7 +439,11 @@ def _fetch_evidence(
     }
     recorded_patch_urls.update(record.url for record in request.web_records)
     valid_jira_patch_urls: list[str] = []
-    patch_urls_to_fetch = _candidate_patch_urls_to_fetch(request, jira_patch_urls)
+    patch_urls_to_fetch = _candidate_patch_urls_to_fetch(
+        request,
+        jira_patch_urls,
+        gitlab_mr=gitlab_mr,
+    )
     for index, patch_url in enumerate(patch_urls_to_fetch, start=1):
         if patch_url in recorded_patch_urls:
             continue
@@ -3077,8 +3081,12 @@ def _effective_patch_urls(
 def _candidate_patch_urls_to_fetch(
     request: CollectCaseRequest,
     jira_patch_urls: Sequence[str],
+    *,
+    gitlab_mr: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
     urls = [*request.patch_urls, *jira_patch_urls]
+    if request.mock_agent == "triage":
+        urls.extend(_gitlab_mr_description_patch_urls(gitlab_mr))
     if request.mock_agent == "backport":
         urls.extend(_triage_result_patch_urls(request))
     return tuple(dict.fromkeys(urls))
