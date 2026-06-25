@@ -143,6 +143,35 @@ def test_score_case_infers_distgit_backport_source_from_pkgs_devel_cgit_patch() 
     assert {metric.name: metric for metric in report.metrics}["backport_source"].actual == "distgit"
 
 
+def test_score_case_infers_distgit_backport_source_from_pkgs_devel_module_patch() -> None:
+    patch_url = (
+        "https://pkgs.devel.redhat.com/cgit/modules/maven/patch/"
+        "?h=stream-maven-3.9-rhel-9.6.0&id=0bfb2e457d6fc7c8c1b88e6d00930e321ec47ee1"
+    )
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "plexus-utils",
+        "target_branch": "rhel-9.6.0",
+        "patch_urls": [patch_url],
+        "backport_source": "distgit",
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "plexus-utils",
+        "target_branch": "rhel-9.6.0",
+        "patch_urls": [patch_url],
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+    assert {metric.name: metric for metric in report.metrics}["backport_source"].actual == "distgit"
+
+
 def test_score_case_reports_backport_source_mismatch() -> None:
     expected = {
         "case_id": "RHEL-12345",
