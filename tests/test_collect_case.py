@@ -1563,6 +1563,101 @@ def test_historical_expected_patch_urls_use_first_completed_agent_result(
     ) == (first_patch_url,)
 
 
+def test_historical_triage_expected_patch_urls_use_jt_triage_result(
+    tmp_path: Path,
+) -> None:
+    triage_patch_url = (
+        "https://pkgs.devel.redhat.com/cgit/rpms/plexus-utils/commit/"
+        "?h=stream-maven-3.9-rhel-9.7.0&id=5932cc080162dcd3bf95468a07b66aa1a0351288"
+    )
+    later_build_patch_url = (
+        "https://pkgs.devel.redhat.com/cgit/rpms/plexus-utils/commit/"
+        "?h=stream-maven-3.9-rhel-9.6.0&id=39f3ce512c6dc8bb5e35c36a9043de55465e7cd9"
+    )
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": (
+                        "Patches in upstream commit(s):\n"
+                        f"{triage_patch_url}\n"
+                        "_This update created by jt-triage_"
+                    ),
+                    "author": {"displayName": "Package Maintainer"},
+                },
+                {
+                    "body": f"Fixed by rpm commit: {later_build_patch_url}",
+                    "author": {"displayName": "Package Maintainer"},
+                },
+            ]
+        },
+    )
+    request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-12345",
+        expected_basis="historical_jira_state",
+        mock_agent="triage",
+        jira_comments_json=comments_json,
+    )
+
+    assert collect_case_module._expected_patch_urls(
+        request,
+        collect_case_module.FetchedEvidence(),
+    ) == (
+        "https://pkgs.devel.redhat.com/cgit/rpms/plexus-utils/patch/"
+        "?h=stream-maven-3.9-rhel-9.7.0&id=5932cc080162dcd3bf95468a07b66aa1a0351288",
+    )
+
+
+def test_historical_triage_expected_patch_urls_prefer_ymir_over_jt_triage(
+    tmp_path: Path,
+) -> None:
+    jt_patch_url = (
+        "https://pkgs.devel.redhat.com/cgit/rpms/perl-IO-Compress/commit/"
+        "?h=rhel-10.2&id=8d85f92f6dc021de618419575f9d4e6757d1b34a"
+    )
+    ymir_patch_url = (
+        "https://gitlab.com/redhat/rhel/rpms/perl-IO-Compress/-/commit/"
+        "8d85f92f6dc021de618419575f9d4e6757d1b34a.patch"
+    )
+    comments_json = _write_json(
+        tmp_path / "comments.json",
+        {
+            "comments": [
+                {
+                    "body": (
+                        "Patches in upstream commit(s):\n"
+                        f"{jt_patch_url}\n"
+                        "_This update created by jt-triage_"
+                    ),
+                    "author": {"displayName": "Package Maintainer"},
+                },
+                {
+                    "body": (
+                        "Output from Ymir Triage Agent:\n\n"
+                        "*Resolution*: backport\n"
+                        f"*Patch URL 1*: {ymir_patch_url}\n"
+                    ),
+                    "author": {"displayName": "Red Hat Comaintainer Ymir Agent"},
+                },
+            ]
+        },
+    )
+    request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-12345",
+        expected_basis="historical_jira_state",
+        mock_agent="triage",
+        jira_comments_json=comments_json,
+    )
+
+    assert collect_case_module._expected_patch_urls(
+        request,
+        collect_case_module.FetchedEvidence(),
+    ) == (ymir_patch_url,)
+
+
 def test_backport_expected_patch_urls_prefer_triage_result(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     triage_patch_url = "https://gitlab.example/redhat/rpms/pkg/-/commit/abc123.patch"
