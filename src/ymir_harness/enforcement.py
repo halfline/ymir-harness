@@ -45,6 +45,7 @@ MODEL_PROVIDER_HOSTS = {
         "oauth2.googleapis.com",
     ),
 }
+PACKAGE_MANAGER_COMMANDS = frozenset({"dnf", "dnf5", "microdnf", "yum"})
 
 
 @dataclass(frozen=True)
@@ -400,6 +401,11 @@ def _check_command(
         raise BenchmarkBoundaryViolation(f"unsafe operation blocked: {operation.detail}")
 
     if network_mode in {"replay_only", "network_denied"}:
+        if _is_package_manager_command(command_tokens or tokens):
+            raise BenchmarkBoundaryViolation(
+                "package-manager command blocked in offline benchmark: "
+                f"{_display_command(command_tokens or tokens)}"
+            )
         if network_mode == "replay_only" and _can_replay_subprocess(command, replay_cache):
             return
         external_urls = _external_urls(tokens)
@@ -937,6 +943,18 @@ def _split_shell_separators(tokens: Sequence[str]) -> list[str]:
 def _is_git_command(tokens: Sequence[str]) -> bool:
     command_tokens = _tokens_after_env(tokens)
     return bool(command_tokens) and PathName(command_tokens[0]).name == "git"
+
+
+def _is_package_manager_command(tokens: Sequence[str]) -> bool:
+    for segment in _shell_command_segments(tokens):
+        command_tokens = _tokens_after_env(segment)
+        if command_tokens and PathName(command_tokens[0]).name in PACKAGE_MANAGER_COMMANDS:
+            return True
+    return False
+
+
+def _display_command(tokens: Sequence[str]) -> str:
+    return shlex.join(str(token) for token in tokens)
 
 
 def _tokens_after_env(tokens: Sequence[str]) -> list[str]:
