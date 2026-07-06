@@ -47,6 +47,7 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
             "KEYTAB_FILE": "/etc/ymir/prod.keytab",
             "KRB5CCNAME": "/tmp/prod-krb5",
             "ANTHROPIC_API_KEY": "prod-anthropic-key",
+            "GEMINI_API_KEY": "prod-gemini-key",
             "OPENAI_API_TOKEN": "prod-openai-token",
             "FREEDESKTOP_API_KEY": "prod-freedesktop-key",
             "XDG_SESSION_ID": "desktop-session",
@@ -79,8 +80,9 @@ def test_build_no_write_environment_forces_safety_flags(tmp_path: Path) -> None:
     assert "JIRA_PASSWORD" not in env
     assert "KEYTAB_FILE" not in env
     assert "KRB5CCNAME" not in env
-    assert "ANTHROPIC_API_KEY" not in env
-    assert "OPENAI_API_TOKEN" not in env
+    assert env["ANTHROPIC_API_KEY"] == "prod-anthropic-key"
+    assert env["GEMINI_API_KEY"] == "prod-gemini-key"
+    assert env["OPENAI_API_TOKEN"] == "prod-openai-token"
     assert "FREEDESKTOP_API_KEY" not in env
     assert "XDG_SESSION_ID" not in env
     assert "YMIR_BENCHMARK_CASE_ID" not in env
@@ -122,6 +124,7 @@ def test_isolated_worker_environment_omits_build_only_and_sensitive_values(
             "EXTRA_PACKAGES": "python3-rpm",
             "YMIR_HARNESS_WORKER_IMAGE": "localhost/custom-worker:test",
             "ANTHROPIC_API_KEY": "prod-anthropic-key",
+            "GEMINI_API_KEY": "prod-gemini-key",
             "OPENAI_API_TOKEN": "prod-openai-token",
             "JIRA_TOKEN": "prod-jira-token",
         },
@@ -137,6 +140,7 @@ def test_isolated_worker_environment_omits_build_only_and_sensitive_values(
     assert "EXTRA_PACKAGES" not in env
     assert "YMIR_HARNESS_WORKER_IMAGE" not in env
     assert "ANTHROPIC_API_KEY" not in env
+    assert "GEMINI_API_KEY" not in env
     assert "OPENAI_API_TOKEN" not in env
     assert "JIRA_TOKEN" not in env
 
@@ -634,7 +638,7 @@ def test_filesystem_isolation_command_runs_container_without_harness_bind(
         results_dir=results_dir,
         expected_path=expected_path,
         actual_path=actual_path,
-        environment={"PATH": "/usr/bin"},
+        environment={"GEMINI_API_KEY": "prod-gemini-key", "PATH": "/usr/bin"},
         variant="baseline",
         features=(),
     )
@@ -649,6 +653,7 @@ def test_filesystem_isolation_command_runs_container_without_harness_bind(
     )
 
     volumes = _option_values(command, "--volume")
+    env_values = _option_values(command, "--env")
     harness_root = runner_module._harness_root()
     assert command[:4] == ["podman", "run", "--rm", "--pull=never"]
     assert command[command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
@@ -657,6 +662,8 @@ def test_filesystem_isolation_command_runs_container_without_harness_bind(
     assert f"{cases_dir}:{cases_dir}:ro" not in volumes
     assert f"{results_dir}:{runner_module.WORKER_CONTAINER_RESULTS_DIR}:rw" in volumes
     assert f"{results_dir}:{results_dir}:rw" not in volumes
+    assert "GEMINI_API_KEY" in env_values
+    assert "prod-gemini-key" not in command
     assert command[-2:] == [
         str(
             runner_module.WORKER_CONTAINER_RESULTS_DIR
@@ -2791,13 +2798,18 @@ def test_workflow_worker_serializes_timeout_exception_groups(tmp_path: Path, mon
         encoding="utf-8",
     )
 
+    monkeypatch.setenv("GEMINI_API_KEY", "prod-gemini-key")
+    captured_environment = {}
+
     def executor(_request):
+        captured_environment.update(_request.environment)
         raise ExceptionGroup("workflow failed", [TimeoutError()])
 
     monkeypatch.setattr(workflow_worker, "_executor_for_workflow", lambda _workflow: executor)
 
     assert workflow_worker.main([str(request_path), str(result_path)]) == 0
     payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert captured_environment["GEMINI_API_KEY"] == "prod-gemini-key"
     assert payload == {
         "actual_path": None,
         "actual_result": None,
