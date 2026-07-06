@@ -68,6 +68,7 @@ WORKER_CONTAINER_PATH = (
     "/opt/beeai-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 WORKER_CONTAINER_VERSIONS = frozenset({"c9s", "c10s"})
+PACKAGE_MANAGER_SHIM_NAMES = ("dnf", "dnf5", "microdnf", "yum")
 PATH_LIST_ENVIRONMENT_NAMES = frozenset(
     {
         "LD_LIBRARY_PATH",
@@ -329,6 +330,7 @@ def _install_dry_run_command_shims(
         "rpmbuild": _RPMBUILD_SHIM,
         "patch": _PATCH_SHIM,
     }
+    scripts.update({name: _PACKAGE_MANAGER_SHIM for name in PACKAGE_MANAGER_SHIM_NAMES})
     for name, script in scripts.items():
         path = shim_dir / name
         path.write_text(script, encoding="utf-8")
@@ -424,6 +426,19 @@ for arg in "$@"; do
 done
 printf '\\n' >&2
 exit 0
+"""
+
+
+_PACKAGE_MANAGER_SHIM = """#!/bin/sh
+set -eu
+
+printf 'ymir-harness offline mode blocked %s:' "$(basename "$0")" >&2
+for arg in "$@"; do
+    printf ' %s' "$arg" >&2
+done
+printf '\\n' >&2
+printf 'package-manager operations must use declared benchmark fixtures\\n' >&2
+exit 1
 """
 
 
@@ -1432,6 +1447,9 @@ def _filesystem_isolation_command(
         "--env",
         "PYTHONUNBUFFERED=1",
     ]
+    for volume in _package_manager_shim_volumes(request.environment):
+        command.extend(["--volume", volume])
+
     for name in sorted(MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_NAMES):
         if name in request.environment:
             command.extend(["--env", name])
@@ -1464,6 +1482,19 @@ def _filesystem_isolation_command(
         ]
     )
     return command
+
+
+def _package_manager_shim_volumes(environment: Mapping[str, str]) -> list[str]:
+    shim_dir_value = environment.get("YMIR_BENCHMARK_COMMAND_SHIMS")
+    if not shim_dir_value:
+        return []
+    shim_dir = Path(shim_dir_value)
+    volumes = []
+    for name in PACKAGE_MANAGER_SHIM_NAMES:
+        source = shim_dir / name
+        if source.is_file():
+            volumes.append(_container_volume(source, Path("/usr/bin") / name, "ro"))
+    return volumes
 
 
 def _materialize_worker_cases_view(request: RunCaseRequest, worker_dir: Path) -> Path:
