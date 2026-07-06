@@ -179,7 +179,6 @@ async def _run_ymir_triage(
                 True,
                 default_agent_factory,
                 auto_chain=False,
-                silent_run=True,
             ),
         )
 
