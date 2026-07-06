@@ -198,8 +198,38 @@ def test_build_no_write_environment_records_case_id(tmp_path: Path) -> None:
     assert env["PATH"].split(":")[0] == str(shim_dir)
     assert (shim_dir / "rhpkg").is_file()
     assert (shim_dir / "centpkg").is_file()
+    assert (shim_dir / "dnf").is_file()
+    assert (shim_dir / "dnf5").is_file()
+    assert (shim_dir / "microdnf").is_file()
     assert (shim_dir / "rpmbuild").is_file()
     assert (shim_dir / "patch").is_file()
+    assert (shim_dir / "yum").is_file()
+
+
+def test_package_manager_shims_block_runtime_installs(tmp_path: Path) -> None:
+    env = build_no_write_environment(
+        tmp_path / "cases",
+        tmp_path / "results",
+        base_env={"PATH": "/usr/bin:/bin"},
+        case_id="RHEL-12345",
+    )
+    shim_dir = Path(env["YMIR_BENCHMARK_COMMAND_SHIMS"])
+
+    for command in ("dnf", "dnf5", "microdnf", "yum"):
+        completed = subprocess.run(
+            [str(shim_dir / command), "-y", "install", "redis"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert completed.returncode == 1
+        assert f"ymir-harness offline mode blocked {command}: -y install redis" in (
+            completed.stderr
+        )
+        assert "package-manager operations must use declared benchmark fixtures" in (
+            completed.stderr
+        )
 
 
 def test_dry_run_patch_shim_does_not_apply_changes(tmp_path: Path) -> None:
@@ -681,6 +711,50 @@ def test_filesystem_isolation_command_runs_container_without_harness_bind(
     assert not any(str(harness_root) in volume for volume in volumes)
     assert not any(str(harness_root.parent) in volume for volume in volumes)
     assert "--unshare-pid" not in command
+
+
+def test_filesystem_isolation_command_mounts_package_manager_shims(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    worker_home = results_dir / "repeat-1" / "workflow-worker" / "home"
+    request_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.request.json"
+    result_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.result.json"
+    shim_dir = results_dir / ".ymir-harness-shims-RHEL-12345"
+    worker_home.mkdir(parents=True)
+    shim_dir.mkdir(parents=True)
+    for name in runner_module.PACKAGE_MANAGER_SHIM_NAMES:
+        shim = shim_dir / name
+        shim.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        shim.chmod(0o755)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
+
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        repetition=1,
+        cases_dir=cases_dir,
+        results_dir=results_dir,
+        expected_path=cases_dir / "expected" / "RHEL-12345.expected.json",
+        actual_path=results_dir / "repeat-1" / "actual-results" / "RHEL-12345.actual.json",
+        environment={"YMIR_BENCHMARK_COMMAND_SHIMS": str(shim_dir)},
+        variant="baseline",
+        features=(),
+    )
+
+    command = runner_module._filesystem_isolation_command(
+        request,
+        request_path=request_path,
+        result_path=result_path,
+        worker_home=worker_home,
+        worker_image="localhost/ymir-harness-worker:c10s",
+    )
+
+    volumes = _option_values(command, "--volume")
+    for name in runner_module.PACKAGE_MANAGER_SHIM_NAMES:
+        assert f"{shim_dir / name}:/usr/bin/{name}:ro" in volumes
 
 
 def test_container_worker_request_translates_result_paths(tmp_path: Path) -> None:
