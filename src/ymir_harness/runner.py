@@ -90,7 +90,7 @@ JSON_PATH_ENVIRONMENT_NAMES = frozenset(
         "YMIR_BENCHMARK_MOCK_REPOS",
     }
 )
-_BUILT_WORKER_IMAGES: set[tuple[str, str, str, str]] = set()
+_BUILT_WORKER_IMAGES: set[tuple[str, ...]] = set()
 NO_WRITE_ENVIRONMENT = {
     "DRY_RUN": "true",
     "MOCK_JIRA": "true",
@@ -1177,10 +1177,19 @@ def _ensure_worker_container_image(
         return worker_image
 
     if _requires_prebuilt_worker_images(version, environment):
-        _require_container_image(tool, base_image, f"local Ymir {version} base image")
-        _require_container_image(tool, worker_image, f"local ymir-harness {version} worker image")
-        _BUILT_WORKER_IMAGES.add(build_key)
-        return worker_image
+        source_image = _worker_source_image(version, environment)
+        source_build_key = (tool, version, worker_image, source_image)
+        if source_build_key in _BUILT_WORKER_IMAGES:
+            return source_image
+        if not _container_image_available(tool, source_image):
+            _require_container_image(
+                tool,
+                worker_image,
+                f"local ymir-harness {version} seed worker image",
+            )
+            _build_worker_source_image(tool, worker_image, source_image)
+        _BUILT_WORKER_IMAGES.add(source_build_key)
+        return source_image
 
     _build_worker_base_image(tool, version, base_image, environment)
     _build_worker_image(tool, base_image, worker_image)
