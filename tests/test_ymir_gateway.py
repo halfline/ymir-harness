@@ -93,6 +93,7 @@ def test_patch_ymir_jira_mock_remote_links_returns_link_list(
         async with session.get(
             "https://jira.example/rest/api/3/issue/RHEL-12345/remotelink"
         ) as response:
+            assert response.status == 200
             response.raise_for_status()
             return await response.json()
 
@@ -347,6 +348,7 @@ def test_patch_ymir_jira_mock_replays_cached_search(
             "https://jira.example/rest/api/3/search/jql",
             json=payload,
         ) as response:
+            assert response.status == 200
             response.raise_for_status()
             return await response.json()
 
@@ -390,6 +392,7 @@ def test_patch_ymir_jira_mock_reports_missing_issue(
     async def read_missing_issue() -> None:
         session = jira_module.aiohttpClientSession()
         async with session.get("https://jira.example/rest/api/3/issue/RHEL-99999") as response:
+            assert response.status == 200
             response.raise_for_status()
             with pytest.raises(FileNotFoundError):
                 await response.json()
@@ -478,6 +481,7 @@ def test_patch_ymir_jira_mock_serves_dev_status(
             "https://jira.example/rest/dev-status/1.0/issue/detail"
             "?issueId=10001&applicationType=GitLab&dataType=repository"
         ) as response:
+            assert response.status == 200
             response.raise_for_status()
             return await response.json()
 
