@@ -341,8 +341,8 @@ def _patch_ymir_jira_mock_remote_links() -> None:
                 and (match_data := issue_get_regex.fullmatch(url))
             ):
                 issue_key = match_data.group(1)
-                yield flexmock_factory(
-                    raise_for_status=lambda: None,
+                yield _aiohttp_mock_response(
+                    flexmock_factory,
                     json=partial(
                         _read_jira_mock_with_miss,
                         read_jira_mock,
@@ -354,8 +354,8 @@ def _patch_ymir_jira_mock_remote_links() -> None:
                 return
             if isinstance(url, str) and (match_data := self.remote_link_get_regex.fullmatch(url)):
                 issue_key = match_data.group(1)
-                yield flexmock_factory(
-                    raise_for_status=lambda: None,
+                yield _aiohttp_mock_response(
+                    flexmock_factory,
                     json=partial(
                         _read_jira_mock_with_miss,
                         read_jira_mock,
@@ -368,8 +368,8 @@ def _patch_ymir_jira_mock_remote_links() -> None:
             if isinstance(url, str) and "/rest/dev-status/1.0/issue/summary" in url:
                 query = parse_qs(urlparse(url).query)
                 issue_id = (query.get("issueId") or [""])[0]
-                yield flexmock_factory(
-                    raise_for_status=lambda: None,
+                yield _aiohttp_mock_response(
+                    flexmock_factory,
                     json=partial(_jira_dev_status_summary, issue_id),
                 )
                 return
@@ -378,8 +378,8 @@ def _patch_ymir_jira_mock_remote_links() -> None:
                 issue_id = (query.get("issueId") or [""])[0]
                 app_type = (query.get("applicationType") or [""])[0]
                 data_type = (query.get("dataType") or [""])[0]
-                yield flexmock_factory(
-                    raise_for_status=lambda: None,
+                yield _aiohttp_mock_response(
+                    flexmock_factory,
                     json=partial(_jira_dev_status_detail, issue_id, app_type, data_type),
                 )
                 return
@@ -393,8 +393,8 @@ def _patch_ymir_jira_mock_remote_links() -> None:
             if isinstance(url, str) and self.search_post_regex.fullmatch(url):
                 payload = kwargs.get("json") or {}
                 response = _jira_search_response(url, payload)
-                yield flexmock_factory(
-                    raise_for_status=lambda: None,
+                yield _aiohttp_mock_response(
+                    flexmock_factory,
                     json=partial(_async_payload, response),
                 )
                 return
@@ -403,6 +403,16 @@ def _patch_ymir_jira_mock_remote_links() -> None:
                 yield response
 
     jira_module.aiohttpClientSession = HarnessAiohttpClientSessionMock
+
+
+def _aiohttp_mock_response(flexmock_factory: Any, *, json: Any) -> Any:
+    return flexmock_factory(
+        status=200,
+        request_info=None,
+        history=(),
+        raise_for_status=lambda: None,
+        json=json,
+    )
 
 
 def _jira_search_response(url: str, payload: Mapping[str, Any] | dict[str, Any]) -> dict[str, Any]:
