@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -69,6 +70,14 @@ WORKER_CONTAINER_PATH = (
 )
 WORKER_CONTAINER_VERSIONS = frozenset({"c9s", "c10s"})
 PACKAGE_MANAGER_SHIM_NAMES = ("dnf", "dnf5", "microdnf", "yum")
+WORKER_SOURCE_FINGERPRINT_PATHS = (
+    Path("src"),
+    Path("VERSION"),
+    Path("pyproject.toml"),
+    Path("rhel-config.json"),
+    Path("Containerfile.ymir-harness-source-worker"),
+    Path("ai-workflows") / "ymir",
+)
 PATH_LIST_ENVIRONMENT_NAMES = frozenset(
     {
         "LD_LIBRARY_PATH",
@@ -1190,6 +1199,41 @@ def _worker_base_image(version: str, environment: Mapping[str, str]) -> str:
 def _worker_image(version: str, environment: Mapping[str, str]) -> str:
     prefix = environment.get(WORKER_IMAGE_PREFIX_ENV, "localhost/ymir-harness-worker").rstrip(":")
     return f"{prefix}:{version}"
+
+
+def _worker_source_image(version: str, environment: Mapping[str, str]) -> str:
+    prefix = environment.get(WORKER_IMAGE_PREFIX_ENV, "localhost/ymir-harness-worker").rstrip(":")
+    return f"{prefix}:{version}-source-{_worker_source_fingerprint()[:12]}"
+
+
+def _worker_source_fingerprint() -> str:
+    root = _harness_root()
+    digest = hashlib.sha256()
+    for relative_path in WORKER_SOURCE_FINGERPRINT_PATHS:
+        path = root / relative_path
+        if path.is_file():
+            _hash_worker_source_file(digest, root, path)
+            continue
+        if path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if _skip_worker_source_path(child):
+                    continue
+                if child.is_file():
+                    _hash_worker_source_file(digest, root, child)
+            continue
+        raise RuntimeError(f"worker source path is missing: {path}")
+    return digest.hexdigest()
+
+
+def _skip_worker_source_path(path: Path) -> bool:
+    return "__pycache__" in path.parts or path.name.endswith(".pyc")
+
+
+def _hash_worker_source_file(digest: Any, root: Path, path: Path) -> None:
+    digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
 
 
 def _requires_prebuilt_worker_images(
