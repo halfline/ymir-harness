@@ -770,6 +770,47 @@ def test_enforcement_blocks_unrecorded_git_subprocess_url(tmp_path: Path) -> Non
     assert str(exc_info.value) == f"external subprocess URL blocked: {url}"
 
 
+def test_enforcement_blocks_absolute_package_manager_subprocess(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        with pytest.raises(BenchmarkBoundaryViolation) as exc_info:
+            subprocess.run(
+                ["/usr/bin/dnf", "-y", "install", "redis"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+    assert str(exc_info.value) == (
+        "package-manager command blocked in offline benchmark: "
+        "/usr/bin/dnf -y install redis"
+    )
+
+
+def test_enforcement_blocks_shell_package_manager_subprocess(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_replay_manifest(tmp_path, {})
+
+    with enforce_benchmark_boundaries(_environment(manifest_path)):
+        with pytest.raises(BenchmarkBoundaryViolation) as exc_info:
+            subprocess.run(
+                "echo before && env FOO=bar /usr/bin/yum install redis",
+                shell=True,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+    assert "package-manager command blocked in offline benchmark:" in str(exc_info.value)
+    assert "/usr/bin/yum install redis" in str(exc_info.value)
+
+
 def test_enforcement_replays_recorded_git_subprocess_failure(tmp_path: Path) -> None:
     manifest_path = _write_replay_manifest(tmp_path, {})
     url = "https://example.invalid/repo.git"
