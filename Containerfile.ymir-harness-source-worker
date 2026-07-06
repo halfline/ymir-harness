@@ -1,0 +1,16 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+WORKDIR /opt/ymir-harness
+
+RUN rm -rf /opt/ymir-harness/src /opt/ymir-harness/ai-workflows/ymir
+
+COPY src /opt/ymir-harness/src
+COPY VERSION pyproject.toml rhel-config.json /opt/ymir-harness/
+COPY ai-workflows/ymir /opt/ymir-harness/ai-workflows/ymir
+
+RUN chgrp -R root /opt/ymir-harness \
+    && chmod -R g+rwX /opt/ymir-harness
+
+USER beeai
