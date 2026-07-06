@@ -1167,6 +1167,12 @@ def _ensure_worker_container_image(
     if build_key in _BUILT_WORKER_IMAGES:
         return worker_image
 
+    if _requires_prebuilt_worker_images(version, environment):
+        _require_container_image(tool, base_image, f"local Ymir {version} base image")
+        _require_container_image(tool, worker_image, f"local ymir-harness {version} worker image")
+        _BUILT_WORKER_IMAGES.add(build_key)
+        return worker_image
+
     _build_worker_base_image(tool, version, base_image, environment)
     _build_worker_image(tool, base_image, worker_image)
     _BUILT_WORKER_IMAGES.add(build_key)
@@ -1184,6 +1190,45 @@ def _worker_base_image(version: str, environment: Mapping[str, str]) -> str:
 def _worker_image(version: str, environment: Mapping[str, str]) -> str:
     prefix = environment.get(WORKER_IMAGE_PREFIX_ENV, "localhost/ymir-harness-worker").rstrip(":")
     return f"{prefix}:{version}"
+
+
+def _requires_prebuilt_worker_images(
+    version: str,
+    environment: Mapping[str, str],
+) -> bool:
+    network_mode = environment.get("YMIR_BENCHMARK_NETWORK_MODE")
+    return network_mode in {"replay_only", "network_denied"} and not _internal_repo_configured(
+        version, environment
+    )
+
+
+def _internal_repo_configured(version: str, environment: Mapping[str, str]) -> bool:
+    suffix = version.upper()
+    return bool(
+        environment.get(f"INTERNAL_REPO_URL_{suffix}") or environment.get("INTERNAL_REPO_URL")
+    )
+
+
+def _require_container_image(tool: str, image: str, description: str) -> None:
+    if _container_image_available(tool, image):
+        return
+    raise RuntimeError(
+        f"{description} {image!r} is required for replay/offline workflow runs; "
+        "prebuild it before running cases, set YMIR_HARNESS_WORKER_IMAGE to a "
+        "prebuilt worker image, or provide INTERNAL_REPO_URL for an explicit build"
+    )
+
+
+def _container_image_available(tool: str, image: str) -> bool:
+    completed = subprocess.run(
+        [tool, "image", "inspect", image, "--format", "{{.Id}}"],
+        cwd=str(_harness_root()),
+        env=_container_tool_environment(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
 
 
 def _build_worker_base_image(
