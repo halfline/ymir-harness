@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import ymir_harness.runner as runner_module
 import ymir_harness.workflow_worker as workflow_worker
 from ymir_harness.models import CaseValidationResult, ValidationReport
@@ -1057,6 +1059,95 @@ def test_ensure_worker_container_image_builds_from_local_ymir_submodule(
             str(root),
         ],
     ]
+
+
+def test_ensure_worker_container_image_requires_prebuilt_images_for_replay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "harness"
+    ymir_context = root / "ai-workflows"
+    ymir_context.mkdir(parents=True)
+    (ymir_context / "Containerfile.c10s").write_text("FROM scratch\n", encoding="utf-8")
+    (root / "Containerfile.ymir-harness-worker").write_text("FROM scratch\n", encoding="utf-8")
+    commands = []
+
+    monkeypatch.setattr(runner_module, "_harness_root", lambda: root)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
+    monkeypatch.setattr(
+        runner_module, "_run_container_tool", lambda command, _action: commands.append(command)
+    )
+    monkeypatch.setattr(runner_module, "_BUILT_WORKER_IMAGES", set())
+    monkeypatch.setattr(runner_module, "_container_image_available", lambda _tool, _image: False)
+
+    with pytest.raises(RuntimeError, match="required for replay/offline workflow runs"):
+        runner_module._ensure_worker_container_image(
+            "c10s",
+            {"YMIR_BENCHMARK_NETWORK_MODE": "replay_only"},
+        )
+
+    assert commands == []
+
+
+def test_ensure_worker_container_image_reuses_prebuilt_images_for_replay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "harness"
+    ymir_context = root / "ai-workflows"
+    ymir_context.mkdir(parents=True)
+    (ymir_context / "Containerfile.c10s").write_text("FROM scratch\n", encoding="utf-8")
+    (root / "Containerfile.ymir-harness-worker").write_text("FROM scratch\n", encoding="utf-8")
+    commands = []
+
+    monkeypatch.setattr(runner_module, "_harness_root", lambda: root)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
+    monkeypatch.setattr(
+        runner_module, "_run_container_tool", lambda command, _action: commands.append(command)
+    )
+    monkeypatch.setattr(runner_module, "_BUILT_WORKER_IMAGES", set())
+    monkeypatch.setattr(runner_module, "_container_image_available", lambda _tool, _image: True)
+
+    image = runner_module._ensure_worker_container_image(
+        "c10s",
+        {"YMIR_BENCHMARK_NETWORK_MODE": "network_denied"},
+    )
+
+    assert image == "localhost/ymir-harness-worker:c10s"
+    assert commands == []
+
+
+def test_ensure_worker_container_image_allows_internal_repo_build_for_replay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "harness"
+    ymir_context = root / "ai-workflows"
+    ymir_context.mkdir(parents=True)
+    (ymir_context / "Containerfile.c9s").write_text("FROM scratch\n", encoding="utf-8")
+    (root / "Containerfile.ymir-harness-worker").write_text("FROM scratch\n", encoding="utf-8")
+    commands = []
+
+    monkeypatch.setattr(runner_module, "_harness_root", lambda: root)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
+    monkeypatch.setattr(
+        runner_module, "_run_container_tool", lambda command, _action: commands.append(command)
+    )
+    monkeypatch.setattr(runner_module, "_BUILT_WORKER_IMAGES", set())
+    monkeypatch.setattr(runner_module, "_container_image_available", lambda _tool, _image: False)
+
+    image = runner_module._ensure_worker_container_image(
+        "c9s",
+        {
+            "YMIR_BENCHMARK_NETWORK_MODE": "replay_only",
+            "INTERNAL_REPO_URL_C9S": "https://repo.example/c9s",
+        },
+    )
+
+    assert image == "localhost/ymir-harness-worker:c9s"
+    assert commands[0][:4] == ["podman", "build", "--pull=missing", "-t"]
+    assert "--build-arg" in commands[0]
+    assert "INTERNAL_REPO_URL=https://repo.example/c9s" in commands[0]
 
 
 def test_ensure_worker_container_image_allows_debug_override(monkeypatch) -> None:
