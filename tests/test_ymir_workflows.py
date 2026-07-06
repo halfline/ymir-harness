@@ -523,7 +523,7 @@ def test_ymir_triage_executor_runs_workflow_with_no_write_environment(
             "jira_issue": "RHEL-12345",
             "dry_run": True,
             "agent_factory": agent_factory,
-            "kwargs": {"auto_chain": False, "silent_run": True},
+            "kwargs": {"auto_chain": False},
             "dry_run_env": "true",
             "feature_env": "true",
             "outer_only": None,
@@ -940,7 +940,7 @@ def test_ymir_triage_executor_starts_managed_gateway_by_default(
         {
             "jira_issue": "RHEL-12345",
             "dry_run": True,
-            "kwargs": {"auto_chain": False, "silent_run": True},
+            "kwargs": {"auto_chain": False},
             "gateway_url": "http://127.0.0.1:18080/sse",
         }
     ]
