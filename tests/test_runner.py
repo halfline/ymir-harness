@@ -1079,6 +1079,7 @@ def test_ensure_worker_container_image_requires_prebuilt_images_for_replay(
     )
     monkeypatch.setattr(runner_module, "_BUILT_WORKER_IMAGES", set())
     monkeypatch.setattr(runner_module, "_container_image_available", lambda _tool, _image: False)
+    monkeypatch.setattr(runner_module, "_worker_source_fingerprint", lambda: "abcdef1234567890")
 
     with pytest.raises(RuntimeError, match="required for replay/offline workflow runs"):
         runner_module._ensure_worker_container_image(
@@ -1089,7 +1090,59 @@ def test_ensure_worker_container_image_requires_prebuilt_images_for_replay(
     assert commands == []
 
 
-def test_ensure_worker_container_image_reuses_prebuilt_images_for_replay(
+def test_ensure_worker_container_image_builds_source_image_for_replay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "harness"
+    ymir_context = root / "ai-workflows"
+    ymir_context.mkdir(parents=True)
+    (ymir_context / "Containerfile.c10s").write_text("FROM scratch\n", encoding="utf-8")
+    (root / "Containerfile.ymir-harness-worker").write_text("FROM scratch\n", encoding="utf-8")
+    (root / "Containerfile.ymir-harness-source-worker").write_text(
+        "FROM scratch\n",
+        encoding="utf-8",
+    )
+    commands = []
+    available_images = {"localhost/ymir-harness-worker:c10s"}
+
+    def image_available(_tool: str, image: str) -> bool:
+        return image in available_images
+
+    def run_container_tool(command, _action) -> None:
+        commands.append(command)
+        available_images.add(command[command.index("-t") + 1])
+
+    monkeypatch.setattr(runner_module, "_harness_root", lambda: root)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
+    monkeypatch.setattr(runner_module, "_run_container_tool", run_container_tool)
+    monkeypatch.setattr(runner_module, "_BUILT_WORKER_IMAGES", set())
+    monkeypatch.setattr(runner_module, "_container_image_available", image_available)
+    monkeypatch.setattr(runner_module, "_worker_source_fingerprint", lambda: "abcdef1234567890")
+
+    image = runner_module._ensure_worker_container_image(
+        "c10s",
+        {"YMIR_BENCHMARK_NETWORK_MODE": "network_denied"},
+    )
+
+    assert image == "localhost/ymir-harness-worker:c10s-source-abcdef123456"
+    assert commands == [
+        [
+            "podman",
+            "build",
+            "--pull=never",
+            "-t",
+            "localhost/ymir-harness-worker:c10s-source-abcdef123456",
+            "--build-arg",
+            "BASE_IMAGE=localhost/ymir-harness-worker:c10s",
+            "-f",
+            str(root / "Containerfile.ymir-harness-source-worker"),
+            str(root),
+        ]
+    ]
+
+
+def test_ensure_worker_container_image_reuses_source_image_for_replay(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1106,14 +1159,19 @@ def test_ensure_worker_container_image_reuses_prebuilt_images_for_replay(
         runner_module, "_run_container_tool", lambda command, _action: commands.append(command)
     )
     monkeypatch.setattr(runner_module, "_BUILT_WORKER_IMAGES", set())
-    monkeypatch.setattr(runner_module, "_container_image_available", lambda _tool, _image: True)
+    monkeypatch.setattr(
+        runner_module,
+        "_container_image_available",
+        lambda _tool, image: image == "localhost/ymir-harness-worker:c10s-source-abcdef123456",
+    )
+    monkeypatch.setattr(runner_module, "_worker_source_fingerprint", lambda: "abcdef1234567890")
 
     image = runner_module._ensure_worker_container_image(
         "c10s",
         {"YMIR_BENCHMARK_NETWORK_MODE": "network_denied"},
     )
 
-    assert image == "localhost/ymir-harness-worker:c10s"
+    assert image == "localhost/ymir-harness-worker:c10s-source-abcdef123456"
     assert commands == []
 
 
