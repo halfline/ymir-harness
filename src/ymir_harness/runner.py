@@ -1338,6 +1338,27 @@ def _build_worker_image(tool: str, base_image: str, image: str) -> None:
     _run_container_tool(command, "building local ymir-harness worker image")
 
 
+def _build_worker_source_image(tool: str, seed_image: str, image: str) -> None:
+    root = _harness_root()
+    containerfile = root / "Containerfile.ymir-harness-source-worker"
+    if not containerfile.is_file():
+        raise RuntimeError(f"harness source worker container definition is missing: {containerfile}")
+
+    command = [
+        tool,
+        "build",
+        "--pull=never",
+        "-t",
+        image,
+        "--build-arg",
+        f"BASE_IMAGE={seed_image}",
+        "-f",
+        str(containerfile),
+        str(root),
+    ]
+    _run_container_tool(command, "building local ymir-harness source worker image")
+
+
 def _run_container_tool(command: Sequence[str], action: str) -> None:
     completed = subprocess.run(
         list(command),
