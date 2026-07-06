@@ -316,10 +316,19 @@ During `run`, the harness:
   modes
 - serves recorded responses to common Python HTTP clients when the URL is in the
   replay manifest
+- builds a source-specific isolated worker image from the local seed worker
+  image when replay modes need container isolation
 - records unsafe operations and replay violations as hard scoring failures
 
 Configured model-provider HTTPS calls are still allowed. The model can run; the
 case evidence should not drift.
+
+Replay and `network_denied` runs never cold-build the Ymir base image from
+external package repositories. They require a local seed worker image such as
+`localhost/ymir-harness-worker:c10s`, then automatically build a
+`*-source-*` worker image tagged from the current harness and `ai-workflows`
+source contents. Set `YMIR_HARNESS_WORKER_IMAGE` to bypass that automatic
+source image selection.
 
 ## Interception architecture
 
