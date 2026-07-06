@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from ymir_harness.enforcement import enforce_benchmark_boundaries
 from ymir_harness.runner import (
+    MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_NAMES,
     RunCaseExecution,
+    RunCaseRequest,
     execution_to_payload,
     request_from_payload,
     timeout_failure,
@@ -31,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     result_path = Path(args[1])
     payload = json.loads(request_path.read_text(encoding="utf-8"))
     workflow = str(payload["workflow"])
-    request = request_from_payload(payload["request"])
+    request = _request_with_model_credentials(request_from_payload(payload["request"]))
 
     executor = _executor_for_workflow(workflow)
     with enforce_benchmark_boundaries(request.environment):
@@ -51,6 +55,15 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     return 0
+
+
+def _request_with_model_credentials(request: RunCaseRequest) -> RunCaseRequest:
+    environment = dict(request.environment)
+    for name in MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_NAMES:
+        value = os.environ.get(name)
+        if value is not None:
+            environment[name] = value
+    return replace(request, environment=environment)
 
 
 def _executor_for_workflow(workflow: str) -> Any:

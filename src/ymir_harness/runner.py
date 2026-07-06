@@ -91,14 +91,18 @@ NO_WRITE_ENVIRONMENT = {
     "SILENT_RUN": "true",
     "GIT_TERMINAL_PROMPT": "0",
 }
-SENSITIVE_ENVIRONMENT_NAMES = frozenset(
+MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_NAMES = frozenset(
     {
         "ANTHROPIC_API_KEY",
-        "FREEDESKTOP_API_KEY",
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_API_TOKEN",
+    }
+)
+WRITE_CREDENTIAL_ENVIRONMENT_NAMES = frozenset(
+    {
+        "FREEDESKTOP_API_KEY",
         "JIRA_API_TOKEN",
         "JIRA_PASSWORD",
         "JIRA_TOKEN",
@@ -112,6 +116,9 @@ SENSITIVE_ENVIRONMENT_NAMES = frozenset(
         "LOOKASIDE_TOKEN",
         "UV_PUBLISH_TOKEN",
     }
+)
+SENSITIVE_ENVIRONMENT_NAMES = (
+    MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_NAMES | WRITE_CREDENTIAL_ENVIRONMENT_NAMES
 )
 PASSTHROUGH_ENVIRONMENT_NAMES = frozenset(
     {
@@ -158,7 +165,7 @@ PASSTHROUGH_ENVIRONMENT_NAMES = frozenset(
         WORKER_IMAGE_ENV,
         WORKER_IMAGE_PREFIX_ENV,
     }
-)
+) | MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_NAMES
 PASSTHROUGH_ENVIRONMENT_PREFIXES = (
     "INTERNAL_PACKAGES_",
     "INTERNAL_REPO_URL_",
@@ -293,9 +300,7 @@ def _passthrough_environment(base_env: Mapping[str, str] | None) -> dict[str, st
         for name, value in source.items()
         if _passes_environment_allowlist(str(name))
     }
-    for name in SENSITIVE_ENVIRONMENT_NAMES:
-        if env.get(name) != NO_WRITE_ENVIRONMENT.get(name):
-            env.pop(name, None)
+    _strip_environment_values(env, WRITE_CREDENTIAL_ENVIRONMENT_NAMES)
     return env
 
 
@@ -303,6 +308,12 @@ def _passes_environment_allowlist(name: str) -> bool:
     return name in PASSTHROUGH_ENVIRONMENT_NAMES or name.startswith(
         PASSTHROUGH_ENVIRONMENT_PREFIXES
     )
+
+
+def _strip_environment_values(env: dict[str, str], names: frozenset[str]) -> None:
+    for name in names:
+        if env.get(name) != NO_WRITE_ENVIRONMENT.get(name):
+            env.pop(name, None)
 
 
 def _install_dry_run_command_shims(
@@ -1236,9 +1247,16 @@ def _run_container_tool(command: Sequence[str], action: str) -> None:
         raise RuntimeError(f"{action} failed with status {completed.returncode}")
 
 
-def _container_tool_environment() -> dict[str, str]:
+def _container_tool_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     env = dict(os.environ)
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    if environment is not None:
+        for name in MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_NAMES:
+            value = environment.get(name)
+            if value is not None:
+                env[name] = value
     return env
 
 
@@ -1305,7 +1323,7 @@ def _execute_isolated_case_workflow(
     completed = subprocess.run(
         command,
         cwd=str(_harness_root()),
-        env=_container_tool_environment(),
+        env=_container_tool_environment(request.environment),
         stdout=sys.stdout,
         stderr=sys.stderr,
         check=False,
@@ -1334,9 +1352,7 @@ def _isolated_worker_environment(
         for name, value in environment.items()
         if not _build_only_environment_name(str(name))
     }
-    for name in SENSITIVE_ENVIRONMENT_NAMES:
-        if env.get(name) != NO_WRITE_ENVIRONMENT.get(name):
-            env.pop(name, None)
+    _strip_environment_values(env, SENSITIVE_ENVIRONMENT_NAMES)
     env["HOME"] = str(worker_home)
     env["PATH"] = _worker_container_path(env)
     env["PYTHONPATH"] = _container_pythonpath()
@@ -1416,6 +1432,9 @@ def _filesystem_isolation_command(
         "--env",
         "PYTHONUNBUFFERED=1",
     ]
+    for name in sorted(MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_NAMES):
+        if name in request.environment:
+            command.extend(["--env", name])
 
     adc_path = _google_application_credentials_path(request.environment)
     if adc_path is not None:
