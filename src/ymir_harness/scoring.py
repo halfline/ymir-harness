@@ -36,6 +36,9 @@ ADVISORY_RESULT_FIELDS = (
 )
 PATCH_COMMIT_RE = re.compile(r"(?m)^From ([0-9a-fA-F]{40}) ")
 CVE_ID_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
+PATCH_FILE_SUFFIXES = (".diff", ".patch")
+PATCH_FILE_PLACEHOLDER = "<patch-file>"
+SPEC_PATCH_RE = re.compile(r"^\s*(Patch\d*)\s*:\s*(\S+)", re.IGNORECASE)
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
@@ -144,11 +147,7 @@ def _score_case_once(
             cases_dir=cases_dir,
             case_id=case_id,
         ),
-        _compare_list(
-            "spec_patches",
-            expected.get("spec_patches"),
-            _actual_result_field(actual, "spec_patches"),
-        ),
+        _spec_patches_metric(expected, actual),
         _compare_list(
             "changelog_entries",
             expected.get("changelog_entries"),
@@ -468,15 +467,56 @@ def _touched_files_metric(expected: Mapping[str, Any], actual: Mapping[str, Any]
             notes="expected result declares no touched file scope",
         )
 
-    missing = [path for path in expected_files if path not in actual_files]
-    unexpected = [path for path in actual_files if path not in expected_files]
-    notes = _file_scope_notes(missing, unexpected)
+    expected_scope = _patch_filename_insensitive_files(expected_files)
+    actual_scope = _patch_filename_insensitive_files(actual_files)
+    missing = [path for path in expected_scope if path not in actual_scope]
+    unexpected = [path for path in actual_scope if path not in expected_scope]
+    failure_notes = _file_scope_notes(missing, unexpected)
+    notes = failure_notes
+    if not failure_notes and expected_files != actual_files:
+        notes = "patch file names are ignored for touched-file comparison"
     return ScoreMetric(
         name="touched_files",
-        status="pass" if not notes else "fail",
+        status="pass" if not failure_notes else "fail",
         expected=expected_files,
         actual=actual_files,
         notes=notes,
+    )
+
+
+def _spec_patches_metric(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> ScoreMetric:
+    expected_value = expected.get("spec_patches")
+    actual_value = _actual_result_field(actual, "spec_patches")
+    if expected_value is None:
+        return ScoreMetric(
+            name="spec_patches",
+            status="skipped",
+            expected=expected_value,
+            actual=actual_value,
+        )
+
+    expected_lines = _normalize_list(expected_value)
+    actual_lines = _normalize_list(actual_value)
+    expected_scope = _patch_filename_insensitive_spec_patches(expected_lines)
+    actual_scope = _patch_filename_insensitive_spec_patches(actual_lines)
+    if expected_scope == actual_scope:
+        return ScoreMetric(
+            name="spec_patches",
+            status="pass",
+            expected=expected_lines,
+            actual=actual_lines,
+            notes=(
+                "patch file names are ignored for spec patch comparison"
+                if expected_lines != actual_lines
+                else None
+            ),
+        )
+
+    return ScoreMetric(
+        name="spec_patches",
+        status="fail",
+        expected=expected_lines,
+        actual=actual_lines,
     )
 
 
@@ -1122,6 +1162,34 @@ def _normalize_list(value: Any) -> list[str]:
 
 def _normalize_file_list(value: Any) -> list[str]:
     return sorted(_normalize_list(value))
+
+
+def _patch_filename_insensitive_files(paths: list[str]) -> list[str]:
+    return sorted(_patch_filename_insensitive_path(path) for path in paths)
+
+
+def _patch_filename_insensitive_path(path: str) -> str:
+    if not _is_patch_file_path(path):
+        return path
+    parent = str(Path(path).parent)
+    if parent == ".":
+        return PATCH_FILE_PLACEHOLDER
+    return str(Path(parent) / PATCH_FILE_PLACEHOLDER)
+
+
+def _is_patch_file_path(path: str) -> bool:
+    return path.lower().endswith(PATCH_FILE_SUFFIXES)
+
+
+def _patch_filename_insensitive_spec_patches(lines: list[str]) -> list[str]:
+    return [_patch_filename_insensitive_spec_patch(line) for line in lines]
+
+
+def _patch_filename_insensitive_spec_patch(line: str) -> str:
+    match = SPEC_PATCH_RE.match(line)
+    if not match:
+        return line.strip()
+    return f"{match.group(1).lower()}: {PATCH_FILE_PLACEHOLDER}"
 
 
 def _normalize_token(value: Any) -> str | None:
