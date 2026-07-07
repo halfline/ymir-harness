@@ -11,7 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from ymir_harness.jira_replay import parse_jira_replay_misses, write_jira_search_fixture
+from ymir_harness.jira_replay import (
+    load_jira_search_response,
+    parse_jira_replay_misses,
+    write_jira_search_fixture,
+)
 from ymir_harness.ymir_gateway import (
     _install_optional_gateway_shims,
     _patch_no_write_gateway_tools,
@@ -353,6 +357,104 @@ def test_patch_ymir_jira_mock_replays_cached_search(
             return await response.json()
 
     assert asyncio.run(search()) == expected_response
+
+
+def test_jira_search_replay_synthesizes_from_issue_corpus(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    jira_dir = cases_dir / "jiras" / "RHEL-167675"
+    linked_dir = jira_dir / "linked" / "RHEL-169930"
+    linked_dir.mkdir(parents=True)
+    (jira_dir / "reconstruction.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "case_id": "RHEL-167675",
+                "as_of": "2026-04-27T17:13:39.101999Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (jira_dir / "issue.json").write_text(
+        json.dumps(
+            {
+                "id": "1",
+                "key": "RHEL-167675",
+                "fields": {
+                    "summary": "CVE-2026-32283 butane issue [rhel-9.8.z]",
+                    "components": [{"name": "butane"}],
+                    "fixVersions": [{"name": "rhel-9.8.z"}],
+                    "labels": ["CVE-2026-32283"],
+                    "created": "2026-04-13T11:08:58.333+0000",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (linked_dir / "issue.json").write_text(
+        json.dumps(
+            {
+                "id": "2",
+                "key": "RHEL-169930",
+                "fields": {
+                    "summary": "Update Go to version 1.26.2+2 [rhel-9.8.z]",
+                    "components": [{"name": "golang"}],
+                    "fixVersions": [{"name": "rhel-9.8.z"}],
+                    "issuetype": {"name": "Story"},
+                    "status": {"name": "Closed"},
+                    "customfield_10578": "golang-1.26.2-1.el9_8",
+                    "created": "2026-04-21T18:37:25.322+0000",
+                },
+                "changelog": {
+                    "histories": [
+                        {
+                            "created": "2026-05-01T10:00:00.000+0000",
+                            "items": [
+                                {
+                                    "field": "status",
+                                    "fieldId": "status",
+                                    "fromString": "New",
+                                    "toString": "Closed",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = load_jira_search_response(
+        cases_dir,
+        "RHEL-167675",
+        {
+            "jql": (
+                'project = RHEL AND component = "golang" '
+                'AND fixVersion in ("rhel-9.8.z", "rhel-9.9") '
+                'AND summary ~ "Go 1.26"'
+            ),
+            "fields": [
+                "key",
+                "summary",
+                "fixVersions",
+                "status",
+                "components",
+                "customfield_10578",
+            ],
+            "maxResults": 10,
+        },
+    )
+
+    assert response is not None
+    assert response["total"] == 1
+    assert response["issues"][0]["key"] == "RHEL-169930"
+    assert response["issues"][0]["fields"] == {
+        "summary": "Update Go to version 1.26.2+2 [rhel-9.8.z]",
+        "fixVersions": [{"name": "rhel-9.8.z"}],
+        "status": {"name": "New"},
+        "components": [{"name": "golang"}],
+        "customfield_10578": "golang-1.26.2-1.el9_8",
+    }
 
 
 def test_patch_ymir_jira_mock_reports_missing_issue(
