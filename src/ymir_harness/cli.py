@@ -82,6 +82,12 @@ from ymir_harness.ymir_workflows import (
 WORKFLOW_CHOICES = ("none", "ymir-triage", "ymir-backport", "ymir-rebase", "ymir-rebuild")
 MAX_PREPARE_AUTO_ALLOWED_HOSTS = 16
 DEFAULT_PREPARE_WORKFLOW_PROGRESS_INTERVAL_SECONDS = "2"
+PREPARE_REPLAY_WARNING_CATEGORIES = {
+    "jira_mock_invalid",
+    "source_cache_incomplete",
+    "timestamp_leakage",
+    "web_cache_incomplete",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1137,8 +1143,12 @@ def _prepare_case(
             args.cases,
             args.case_id,
         ):
-            payload["status"] = "succeeded"
-            exit_code = 0
+            if _prepare_run_has_validation_warnings(run_payload):
+                payload["status"] = "validation_warnings"
+                exit_code = 1
+            else:
+                payload["status"] = "succeeded"
+                exit_code = 0
             break
 
         capture_result, iteration_auto_allowed_hosts = _prepare_capture_missing(
@@ -1166,8 +1176,12 @@ def _prepare_case(
         if captured_count == 0:
             if _prepare_has_only_recorded_replay_candidates(capture_result):
                 if not report.has_failures:
-                    payload["status"] = "succeeded"
-                    exit_code = 0
+                    if _prepare_run_has_validation_warnings(run_payload):
+                        payload["status"] = "validation_warnings"
+                        exit_code = 1
+                    else:
+                        payload["status"] = "succeeded"
+                        exit_code = 0
                     break
                 payload["status"] = "blocked"
                 exit_code = run_exit_code or 1
@@ -1186,6 +1200,39 @@ def _prepare_case(
 
     payload["collected"] = collected
     return payload, exit_code
+
+
+def _prepare_run_has_validation_warnings(run_payload: Mapping[str, object]) -> bool:
+    validation = run_payload.get("validation")
+    if not isinstance(validation, Mapping):
+        return False
+    return any(
+        _prepare_validation_issue_is_replay_warning(issue)
+        for issue in _validation_issues(validation)
+    )
+
+
+def _validation_issues(validation: Mapping[str, object]) -> list[Mapping[str, object]]:
+    issues: list[Mapping[str, object]] = []
+    global_issues = validation.get("global_issues")
+    if isinstance(global_issues, list):
+        issues.extend(issue for issue in global_issues if isinstance(issue, Mapping))
+    cases = validation.get("cases")
+    if isinstance(cases, list):
+        for case in cases:
+            if not isinstance(case, Mapping):
+                continue
+            case_issues = case.get("issues")
+            if isinstance(case_issues, list):
+                issues.extend(issue for issue in case_issues if isinstance(issue, Mapping))
+    return issues
+
+
+def _prepare_validation_issue_is_replay_warning(issue: Mapping[str, object]) -> bool:
+    return (
+        issue.get("severity") == "warning"
+        and issue.get("category") in PREPARE_REPLAY_WARNING_CATEGORIES
+    )
 
 
 def _prepare_backport_triage_result(
