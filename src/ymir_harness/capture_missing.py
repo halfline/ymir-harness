@@ -1248,7 +1248,7 @@ def _fetch_search_issue_details(
     issues = response.get("issues")
     if not isinstance(issues, list):
         return details
-    needs_temporal_fields = as_of is not None and _jql_has_empty_predicates(jql)
+    needs_historical_detail = as_of is not None
 
     for issue in issues:
         if not isinstance(issue, Mapping):
@@ -1256,11 +1256,11 @@ def _fetch_search_issue_details(
         key = issue.get("key")
         if not isinstance(key, str) or not key:
             continue
-        if not needs_temporal_fields and _has_field(issue, "created"):
+        if not needs_historical_detail and _has_field(issue, "created"):
             continue
         url = (
             _jira_issue_with_changelog_url(search_url, key)
-            if needs_temporal_fields
+            if needs_historical_detail
             else _jira_issue_detail_url(search_url, key)
         )
         try:
@@ -1488,10 +1488,6 @@ def _capture_dev_status(
 def _has_field(issue: Mapping[str, Any], field: str) -> bool:
     fields = issue.get("fields")
     return isinstance(fields, Mapping) and fields.get(field) is not None
-
-
-def _jql_has_empty_predicates(jql: str) -> bool:
-    return bool(re.search(r"(?i)\bis\s+(?:not\s+)?empty\b", jql))
 
 
 def _jira_issue_url(search_url: str, issue_key: str) -> str:
