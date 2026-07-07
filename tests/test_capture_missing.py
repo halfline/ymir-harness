@@ -916,7 +916,7 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
     search_url = "https://redhat.atlassian.net/rest/api/3/search/jql"
     payload = {
         "jql": 'component = "glib2"',
-        "fields": ["fixVersions", "created"],
+        "fields": ["fixVersions", "created", "status"],
         "maxResults": 50,
     }
     _write_expected(cases_dir, "RHEL-114059")
@@ -938,6 +938,20 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
                             "created": "2025-09-01T00:00:00.000+0000",
                             "summary": "Fixed glib issue",
                             "status": {"name": "Closed"},
+                        },
+                        "changelog": {
+                            "histories": [
+                                {
+                                    "created": "2025-09-20T00:00:00.000+0000",
+                                    "items": [
+                                        {
+                                            "field": "status",
+                                            "fromString": "New",
+                                            "toString": "Closed",
+                                        }
+                                    ],
+                                }
+                            ]
                         },
                     }
                 ).encode("utf-8"),
@@ -1015,7 +1029,7 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
                 "application/json",
             )
         if request.full_url == (
-            "https://redhat.atlassian.net/rest/api/3/issue/RHEL-999999?fields=created,updated"
+            "https://redhat.atlassian.net/rest/api/2/issue/RHEL-999999?expand=changelog"
         ):
             assert request.get_method() == "GET"
             return _Response(
@@ -1040,6 +1054,7 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
                             "fields": {
                                 "created": "2025-09-01T00:00:00.000+0000",
                                 "fixVersions": [{"name": "rhel-9.8"}],
+                                "status": {"name": "Closed"},
                             },
                         },
                         {
@@ -1073,6 +1088,7 @@ def test_capture_missing_records_jira_search_with_as_of_filter(
     )
     assert fixture["reconstruction"]["as_of"] == "2025-09-12T09:46:42Z"
     assert [issue["key"] for issue in fixture["response"]["issues"]] == ["RHEL-4139"]
+    assert fixture["response"]["issues"][0]["fields"]["status"] == {"name": "New"}
     linked_dir = cases_dir / "jiras" / "RHEL-114059" / "linked" / "RHEL-4139"
     linked_comments = json.loads((linked_dir / "comments.json").read_text(encoding="utf-8"))
     linked_starting = json.loads((linked_dir / "starting-issue.json").read_text(encoding="utf-8"))
