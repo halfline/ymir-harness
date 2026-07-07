@@ -955,9 +955,8 @@ def _scrub_embedded_issue_links(fields: dict[str, Any], as_of: datetime) -> None
                 for field_name in JIRA_EMBEDDED_LINK_VOLATILE_FIELDS:
                     field_payload.pop(field_name, None)
                 for field_name in list(field_payload):
-                    if (
-                        field_name.startswith("customfield_")
-                        and _value_contains_timestamp_after(field_payload[field_name], as_of)
+                    if field_name.startswith("customfield_") and _value_contains_timestamp_after(
+                        field_payload[field_name], as_of
                     ):
                         field_payload.pop(field_name, None)
                 issue_payload["fields"] = field_payload

@@ -1767,8 +1767,7 @@ def _run_text_artifacts(run_path: Path) -> tuple[Path, ...]:
         sorted(
             path
             for path in run_path.rglob("*")
-            if _looks_like_text_artifact(path)
-            and not _is_worker_case_view_artifact(run_path, path)
+            if _looks_like_text_artifact(path) and not _is_worker_case_view_artifact(run_path, path)
         )
     )
 

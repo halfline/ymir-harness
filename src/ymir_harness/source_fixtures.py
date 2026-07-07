@@ -515,15 +515,11 @@ def source_cache_git_aliases(remote_url: str) -> tuple[str, ...]:
             aliases.extend(remote_git_aliases(fedora_url))
             if parsed.hostname == "gitlab.com" and len(parts) >= 4 and parts[0] == "redhat":
                 aliases.extend(
-                    remote_git_aliases(
-                        f"https://pkgs.devel.redhat.com/git/rpms/{package}"
-                    )
+                    remote_git_aliases(f"https://pkgs.devel.redhat.com/git/rpms/{package}")
                 )
                 aliases.extend(remote_git_aliases(f"git://pkgs.devel.redhat.com/rpms/{package}"))
                 aliases.extend(
-                    remote_git_aliases(
-                        f"https://pkgs.devel.redhat.com/cgit/rpms/{package}"
-                    )
+                    remote_git_aliases(f"https://pkgs.devel.redhat.com/cgit/rpms/{package}")
                 )
                 for namespace in ("centos-stream", "rhel"):
                     gitlab_url = f"https://gitlab.com/redhat/{namespace}/rpms/{package}.git"
