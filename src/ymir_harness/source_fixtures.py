@@ -304,6 +304,10 @@ def materialize_source_fixture_repository(
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
+    if fixture.replay_as_of is not None:
+        _initialize_historical_source_fixture_repository(submodule, fixture, destination)
+        return destination
+
     _run_git(
         ["clone", "--bare", "--no-hardlinks", str(submodule), str(destination)],
         cwd=destination.parent,
@@ -332,6 +336,61 @@ def materialize_source_fixture_repository(
         )
 
     return destination
+
+
+def _initialize_historical_source_fixture_repository(
+    submodule: Path,
+    fixture: SourceFixtureRepository,
+    destination: Path,
+) -> None:
+    _run_git(["init", "--bare", str(destination)], cwd=destination.parent)
+    _run_git(
+        ["--git-dir", str(destination), "config", "remote.origin.url", fixture.remote_url],
+        cwd=destination.parent,
+    )
+
+    refspecs = [f"{ref.object}:{ref.name}" for ref in fixture.refs]
+    if refspecs:
+        _run_git(
+            [
+                "--git-dir",
+                str(destination),
+                "fetch",
+                "--no-tags",
+                str(submodule),
+                *refspecs,
+            ],
+            cwd=destination.parent,
+        )
+
+    if fixture.head and any(ref.name == fixture.head for ref in fixture.refs):
+        _run_git(
+            ["--git-dir", str(destination), "symbolic-ref", "HEAD", fixture.head],
+            cwd=destination.parent,
+        )
+    elif fixture.head_object:
+        head_ref = "refs/heads/ymir-harness-head"
+        if git_object_exists(destination, fixture.head_object):
+            _run_git(
+                ["--git-dir", str(destination), "update-ref", head_ref, fixture.head_object],
+                cwd=destination.parent,
+            )
+        else:
+            _run_git(
+                [
+                    "--git-dir",
+                    str(destination),
+                    "fetch",
+                    "--no-tags",
+                    str(submodule),
+                    f"{fixture.head_object}:{head_ref}",
+                ],
+                cwd=destination.parent,
+            )
+        _run_git(
+            ["--git-dir", str(destination), "symbolic-ref", "HEAD", head_ref],
+            cwd=destination.parent,
+        )
 
 
 def _delete_git_refs(repository: Path) -> None:
