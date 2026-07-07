@@ -400,6 +400,56 @@ def test_strict_validation_reports_future_koji_candidate_build(tmp_path: Path) -
     )
 
 
+def test_validation_warns_when_historical_source_fixture_lacks_as_of(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        requires_source_cache=True,
+    )
+    subprocess.run(["git", "init", str(cases_dir)], check=True, stdout=subprocess.DEVNULL)
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    expected["backport_source"] = "distgit"
+    _write_json(expected_path, expected)
+    _write_source_fixture(
+        cases_dir,
+        tmp_path,
+        "RHEL-12345",
+        repo_path,
+        str(repo_path),
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "reconstruction.json",
+        {
+            "schema_version": 1,
+            "case_id": "RHEL-12345",
+            "as_of": "2026-05-31T07:21:36Z",
+            "method": "first_historical_result_comment",
+        },
+    )
+    _write_json(
+        cases_dir / "jiras" / "RHEL-12345" / "starting-issue.json",
+        {
+            "key": "RHEL-12345",
+            "fields": {},
+        },
+    )
+
+    report = validate_case_directory(cases_dir)
+
+    assert not report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.severity == "warning"
+        and issue.category == "timestamp_leakage"
+        and "source fixture does not declare replay_as_of" in issue.message
+        for issue in issues
+    )
+
+
 def test_strict_validation_reports_network_denied_patch_urls(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
