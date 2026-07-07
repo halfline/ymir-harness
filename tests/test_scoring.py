@@ -614,6 +614,43 @@ def test_score_case_reports_touched_file_scope_failures() -> None:
     assert failed["touched_files"].notes == "unexpected touched files: README.md"
 
 
+def test_score_case_ignores_generated_patch_file_names() -> None:
+    expected = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "qt6-qtdeclarative",
+        "patch_touched_files": ["src/qml/jsruntime/qv4regexp.cpp"],
+        "spec_patches": ["Patch1: RHEL-12345.patch"],
+        "touched_files": ["RHEL-12345.patch", "qt6-qtdeclarative.spec"],
+    }
+    actual = {
+        "case_id": "RHEL-12345",
+        "case_type": "cve_backport",
+        "resolution": "backport",
+        "package": "qt6-qtdeclarative",
+        "patch_touched_files": ["src/qml/jsruntime/qv4regexp.cpp"],
+        "spec_patches": ["Patch1: qt6-qtdeclarative-6.10.1-CVE-2025-14576.patch"],
+        "touched_files": [
+            "qt6-qtdeclarative-6.10.1-CVE-2025-14576.patch",
+            "qt6-qtdeclarative.spec",
+        ],
+    }
+
+    report = score_case(expected, actual)
+
+    assert report.passed
+    metrics = {metric.name: metric for metric in report.metrics}
+    assert metrics["touched_files"].status == "pass"
+    assert metrics["touched_files"].notes == (
+        "patch file names are ignored for touched-file comparison"
+    )
+    assert metrics["spec_patches"].status == "pass"
+    assert metrics["spec_patches"].notes == (
+        "patch file names are ignored for spec patch comparison"
+    )
+
+
 def test_score_case_derives_patch_scope_from_reference_patch(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     _write_text(
