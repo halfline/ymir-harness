@@ -2825,13 +2825,7 @@ def test_prepare_has_replay_candidates_detects_unrecorded_lookaside_source(
 
     assert cli_module._prepare_has_replay_candidates(run_dir, cases_dir, case_id)
 
-    cached_source = (
-        cases_dir
-        / "source_cache"
-        / case_id
-        / "lookaside"
-        / "redis-6.2.22.tar.gz"
-    )
+    cached_source = cases_dir / "source_cache" / case_id / "lookaside" / "redis-6.2.22.tar.gz"
     cached_source.parent.mkdir(parents=True)
     cached_source.write_bytes(b"cached")
 
