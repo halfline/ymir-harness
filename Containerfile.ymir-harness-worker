@@ -15,6 +15,7 @@ RUN python -m pip install --no-cache-dir \
         "copr>=1.129" \
         "flexmock>=0.12.2" \
         "ogr>=0.55.0" \
+        "rpkg==1.69" \
         "rpm>=0.4.0" \
         "tomli-w>=1.2.0" \
     && chgrp -R root /opt/ymir-harness \
