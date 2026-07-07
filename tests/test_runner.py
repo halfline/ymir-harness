@@ -1014,6 +1014,42 @@ def test_workflow_container_version_follows_target_branch(tmp_path: Path) -> Non
     assert runner_module._workflow_container_version("ymir-triage", request) == "c10s"
 
 
+def test_worker_source_fingerprint_includes_worker_image_definitions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "harness"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "runner.py").write_text("print('runner')\n", encoding="utf-8")
+    (root / "ai-workflows" / "ymir").mkdir(parents=True)
+    (root / "ai-workflows" / "ymir" / "workflow.py").write_text(
+        "print('ymir')\n",
+        encoding="utf-8",
+    )
+    for relative_path in (
+        "VERSION",
+        "pyproject.toml",
+        "rhel-config.json",
+        "Containerfile.ymir-harness-worker",
+        "Containerfile.ymir-harness-source-worker",
+        "ai-workflows/Containerfile.c9s",
+        "ai-workflows/Containerfile.c10s",
+    ):
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{relative_path}\n", encoding="utf-8")
+
+    monkeypatch.setattr(runner_module, "_harness_root", lambda: root)
+
+    original = runner_module._worker_source_fingerprint()
+    (root / "ai-workflows" / "Containerfile.c9s").write_text(
+        "updated c9s image\n",
+        encoding="utf-8",
+    )
+
+    assert runner_module._worker_source_fingerprint() != original
+
+
 def test_ensure_worker_container_image_builds_from_local_ymir_submodule(
     tmp_path: Path,
     monkeypatch,
