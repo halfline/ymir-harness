@@ -54,6 +54,8 @@ EMPTY_JQL_PATTERN = re.compile(
 JIRA_TIMESTAMP_PATTERN = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})"
 )
+JIRA_KEY_PATTERN = re.compile(r"(?i)^([A-Z][A-Z0-9]+)-(\d+)$")
+JQL_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,30 @@ class JiraReplayMiss:
             "url": self.url,
             "payload": dict(self.payload),
         }
+
+
+@dataclass(frozen=True)
+class _JqlAnd:
+    terms: tuple["_JqlNode", ...]
+
+
+@dataclass(frozen=True)
+class _JqlOr:
+    terms: tuple["_JqlNode", ...]
+
+
+@dataclass(frozen=True)
+class _JqlPredicate:
+    field: str
+    operator: str
+    values: tuple[str, ...] = ()
+
+
+_JqlNode = _JqlAnd | _JqlOr | _JqlPredicate
+
+
+class _UnsupportedJql(ValueError):
+    pass
 
 
 def jira_search_fixture_path(cases_dir: Path, case_id: str, payload: Mapping[str, Any]) -> Path:
@@ -99,6 +125,41 @@ def load_jira_search_response(
     data = load_json_file(path)
     response = data.get("response") if isinstance(data, Mapping) else None
     return copy.deepcopy(dict(response)) if isinstance(response, Mapping) else None
+
+
+def _synthesize_jira_search_response(
+    cases_dir: Path,
+    case_id: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    normalized = _normalized_search_payload(payload)
+    jql = normalized["jql"].strip()
+    try:
+        query = _parse_jql(jql) if jql else None
+    except _UnsupportedJql:
+        return None
+
+    as_of = derive_as_of(cases_dir, case_id)
+    matched_issues = []
+    for issue in _load_jira_issue_corpus(cases_dir, case_id):
+        candidate = reconstruct_issue_as_of(issue, as_of=as_of)
+        if _issue_created_after_as_of(candidate, as_of):
+            continue
+        try:
+            if query is None or _jql_matches(query, candidate):
+                matched_issues.append(_project_search_issue(candidate, normalized["fields"]))
+        except _UnsupportedJql:
+            return None
+
+    matched_issues.sort(key=_issue_sort_key)
+    start_at = int(payload.get("startAt") or payload.get("start_at") or 0)
+    max_results = normalized["maxResults"]
+    return {
+        "issues": matched_issues[start_at : start_at + max_results],
+        "maxResults": max_results,
+        "startAt": start_at,
+        "total": len(matched_issues),
+    }
 
 
 def write_jira_search_fixture(
@@ -420,6 +481,401 @@ def _normalized_search_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "fields": [str(field) for field in normalized_fields if isinstance(field, str)],
         "maxResults": int(payload.get("maxResults") or payload.get("max_results") or 50),
     }
+
+
+def _load_jira_issue_corpus(cases_dir: Path, case_id: str) -> list[dict[str, Any]]:
+    jira_dir = cases_dir / "jiras" / case_id
+    issue_paths = []
+    root_issue_path = jira_dir / "issue.json"
+    starting_issue_path = jira_dir / "starting-issue.json"
+    if root_issue_path.is_file():
+        issue_paths.append(root_issue_path)
+    elif starting_issue_path.is_file():
+        issue_paths.append(starting_issue_path)
+
+    linked_dir = jira_dir / "linked"
+    if linked_dir.is_dir():
+        issue_paths.extend(sorted(linked_dir.glob("*/issue.json")))
+
+    issues = []
+    for path in issue_paths:
+        data = load_json_file(path)
+        if isinstance(data, Mapping):
+            issues.append(copy.deepcopy(dict(data)))
+    return issues
+
+
+def _parse_jql(jql: str) -> _JqlNode:
+    tokens = _tokenize_jql(jql)
+    parser = _JqlParser(tokens)
+    return parser.parse()
+
+
+def _tokenize_jql(jql: str) -> list[str]:
+    tokens = []
+    index = 0
+    while index < len(jql):
+        char = jql[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char == '"':
+            value, index = _read_jql_quoted_value(jql, index + 1)
+            tokens.append(value)
+            continue
+        two_char_operator = jql[index : index + 2]
+        if two_char_operator in {"!=", ">=", "<="}:
+            tokens.append(two_char_operator)
+            index += 2
+            continue
+        if char in {"(", ")", ",", "=", "~", "<", ">"}:
+            tokens.append(char)
+            index += 1
+            continue
+
+        match = re.match(r"[^\s(),=!~<>]+", jql[index:])
+        if match is None:
+            raise _UnsupportedJql(jql)
+        tokens.append(match.group(0))
+        index += len(match.group(0))
+    return tokens
+
+
+def _read_jql_quoted_value(jql: str, index: int) -> tuple[str, int]:
+    value = []
+    while index < len(jql):
+        char = jql[index]
+        if char == "\\" and index + 1 < len(jql):
+            value.append(jql[index + 1])
+            index += 2
+            continue
+        if char == '"':
+            return "".join(value), index + 1
+        value.append(char)
+        index += 1
+    raise _UnsupportedJql(jql)
+
+
+class _JqlParser:
+    def __init__(self, tokens: list[str]) -> None:
+        self._tokens = tokens
+        self._index = 0
+
+    def parse(self) -> _JqlNode:
+        if not self._tokens:
+            raise _UnsupportedJql("")
+        node = self._parse_or()
+        if self._peek() is not None:
+            raise _UnsupportedJql(" ".join(self._tokens))
+        return node
+
+    def _parse_or(self) -> _JqlNode:
+        terms = [self._parse_and()]
+        while self._match_keyword("OR"):
+            terms.append(self._parse_and())
+        return terms[0] if len(terms) == 1 else _JqlOr(tuple(terms))
+
+    def _parse_and(self) -> _JqlNode:
+        terms = [self._parse_term()]
+        while self._match_keyword("AND"):
+            terms.append(self._parse_term())
+        return terms[0] if len(terms) == 1 else _JqlAnd(tuple(terms))
+
+    def _parse_term(self) -> _JqlNode:
+        if self._match("("):
+            node = self._parse_or()
+            self._expect(")")
+            return node
+        return self._parse_predicate()
+
+    def _parse_predicate(self) -> _JqlPredicate:
+        field = self._expect_value()
+        if self._match_keyword("IS"):
+            operator = "is not empty" if self._match_keyword("NOT") else "is empty"
+            self._expect_keyword("EMPTY")
+            return _JqlPredicate(field=field, operator=operator)
+        if self._match_keyword("IN"):
+            return _JqlPredicate(field=field, operator="in", values=tuple(self._parse_list()))
+
+        operator = self._next()
+        if operator not in {"=", "!=", "~", ">=", "<=", ">", "<"}:
+            raise _UnsupportedJql(operator or field)
+        value = self._expect_value()
+        return _JqlPredicate(field=field, operator=operator, values=(value,))
+
+    def _parse_list(self) -> list[str]:
+        values = []
+        self._expect("(")
+        while True:
+            values.append(self._expect_value())
+            if self._match(","):
+                continue
+            self._expect(")")
+            return values
+
+    def _expect_value(self) -> str:
+        value = self._next()
+        if value is None or value in {"(", ")", ","}:
+            raise _UnsupportedJql(value or "")
+        if value.upper() in {"AND", "OR", "IN", "IS", "NOT", "EMPTY"}:
+            raise _UnsupportedJql(value)
+        return value
+
+    def _expect(self, value: str) -> None:
+        if not self._match(value):
+            raise _UnsupportedJql(value)
+
+    def _expect_keyword(self, value: str) -> None:
+        if not self._match_keyword(value):
+            raise _UnsupportedJql(value)
+
+    def _match(self, value: str) -> bool:
+        if self._peek() != value:
+            return False
+        self._index += 1
+        return True
+
+    def _match_keyword(self, value: str) -> bool:
+        token = self._peek()
+        if token is None or token.casefold() != value.casefold():
+            return False
+        self._index += 1
+        return True
+
+    def _next(self) -> str | None:
+        token = self._peek()
+        if token is not None:
+            self._index += 1
+        return token
+
+    def _peek(self) -> str | None:
+        if self._index >= len(self._tokens):
+            return None
+        return self._tokens[self._index]
+
+
+def _jql_matches(node: _JqlNode, issue: Mapping[str, Any]) -> bool:
+    if isinstance(node, _JqlAnd):
+        return all(_jql_matches(term, issue) for term in node.terms)
+    if isinstance(node, _JqlOr):
+        return any(_jql_matches(term, issue) for term in node.terms)
+    return _predicate_matches(node, issue)
+
+
+def _predicate_matches(predicate: _JqlPredicate, issue: Mapping[str, Any]) -> bool:
+    values = _issue_jql_values(issue, predicate.field)
+    wanted = predicate.values
+    operator = predicate.operator
+    if operator == "=":
+        return any(
+            _jql_value_equals(value, wanted_value) for value in values for wanted_value in wanted
+        )
+    if operator == "!=":
+        return bool(values) and all(
+            not _jql_value_equals(value, wanted_value)
+            for value in values
+            for wanted_value in wanted
+        )
+    if operator == "in":
+        return any(
+            _jql_value_equals(value, wanted_value) for value in values for wanted_value in wanted
+        )
+    if operator == "~":
+        return any(
+            _jql_text_matches(value, wanted_value) for value in values for wanted_value in wanted
+        )
+    if operator == "is empty":
+        return not values or all(_empty_jira_value(value) for value in values)
+    if operator == "is not empty":
+        return any(not _empty_jira_value(value) for value in values)
+    if operator in {">=", "<=", ">", "<"}:
+        return any(
+            _jql_compare(value, wanted_value, operator)
+            for value in values
+            for wanted_value in wanted
+        )
+    raise _UnsupportedJql(operator)
+
+
+def _issue_jql_values(issue: Mapping[str, Any], field: str) -> list[Any]:
+    normalized = _normalize_field_name(field)
+    fields = issue.get("fields")
+    if not isinstance(fields, Mapping):
+        fields = {}
+    if normalized == "key":
+        return [issue.get("key")]
+    if normalized == "project":
+        project = fields.get("project")
+        values = []
+        if isinstance(project, Mapping):
+            values.extend([project.get("key"), project.get("name")])
+        key = issue.get("key")
+        if isinstance(key, str) and "-" in key:
+            values.append(key.split("-", 1)[0])
+        return [value for value in values if value is not None]
+    if normalized in {"component", "components"}:
+        return _jira_named_values(fields.get("components"))
+    if normalized in {"fixversion", "fixversions", "fix version", "fix versions"}:
+        return _jira_named_values(fields.get("fixVersions"))
+    if normalized == "labels":
+        labels = fields.get("labels")
+        return list(labels) if isinstance(labels, list) else []
+    if normalized in {"issuetype", "issue type", "type"}:
+        return _jira_named_values(fields.get("issuetype"))
+    if normalized in {"status", "resolution"}:
+        return _jira_named_values(fields.get(normalized))
+    if normalized in {"summary", "description", "created", "updated"}:
+        value = fields.get(normalized)
+        return [] if value is None else [value]
+    if normalized == "text":
+        return _issue_text_values(issue)
+    if normalized and normalized.startswith("customfield_"):
+        return _flatten_jira_value(fields.get(normalized))
+    raise _UnsupportedJql(field)
+
+
+def _jira_named_values(value: Any) -> list[Any]:
+    if isinstance(value, Mapping):
+        return [item for item in (value.get("name"), value.get("value"), value.get("key")) if item]
+    if isinstance(value, list):
+        values = []
+        for item in value:
+            values.extend(_jira_named_values(item))
+        return values
+    return [] if value is None else [value]
+
+
+def _issue_text_values(issue: Mapping[str, Any]) -> list[Any]:
+    fields = issue.get("fields")
+    if not isinstance(fields, Mapping):
+        return []
+    values = [fields.get("summary"), fields.get("description")]
+    comments = fields.get("comment")
+    comment_items = comments.get("comments") if isinstance(comments, Mapping) else None
+    if isinstance(comment_items, list):
+        values.extend(
+            comment.get("body") for comment in comment_items if isinstance(comment, Mapping)
+        )
+    values.extend(_jira_named_values(fields.get("components")))
+    labels = fields.get("labels")
+    if isinstance(labels, list):
+        values.extend(labels)
+    return [value for value in values if value is not None]
+
+
+def _flatten_jira_value(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        flattened = []
+        for item in value:
+            flattened.extend(_flatten_jira_value(item))
+        return flattened
+    if isinstance(value, Mapping):
+        named = _jira_named_values(value)
+        return named or list(value.values())
+    return [value]
+
+
+def _jql_value_equals(left: Any, right: str) -> bool:
+    if left is None:
+        return False
+    return str(left).casefold() == right.casefold()
+
+
+def _jql_text_matches(value: Any, query: str) -> bool:
+    if value is None:
+        return False
+    haystack = str(value).casefold()
+    needle = query.casefold()
+    if needle in haystack:
+        return True
+    terms = re.findall(r"[a-z0-9]+(?:\.[a-z0-9]+)?", needle)
+    return bool(terms) and all(term in haystack for term in terms)
+
+
+def _jql_compare(left: Any, right: str, operator: str) -> bool:
+    key_left = _parse_jira_key(left)
+    key_right = _parse_jira_key(right)
+    if key_left is not None and key_right is not None and key_left[0] == key_right[0]:
+        comparison = (key_left[1] > key_right[1]) - (key_left[1] < key_right[1])
+        return _comparison_matches(comparison, operator)
+
+    date_left = _parse_jql_datetime(left, end_of_day=False)
+    date_right = _parse_jql_datetime(right, end_of_day=operator in {"<=", ">"})
+    if date_left is not None and date_right is not None:
+        comparison = (date_left > date_right) - (date_left < date_right)
+        return _comparison_matches(comparison, operator)
+
+    comparison = (str(left).casefold() > right.casefold()) - (
+        str(left).casefold() < right.casefold()
+    )
+    return _comparison_matches(comparison, operator)
+
+
+def _comparison_matches(comparison: int, operator: str) -> bool:
+    if operator == ">=":
+        return comparison >= 0
+    if operator == "<=":
+        return comparison <= 0
+    if operator == ">":
+        return comparison > 0
+    if operator == "<":
+        return comparison < 0
+    raise _UnsupportedJql(operator)
+
+
+def _parse_jira_key(value: Any) -> tuple[str, int] | None:
+    if not isinstance(value, str):
+        return None
+    match = JIRA_KEY_PATTERN.fullmatch(value)
+    if match is None:
+        return None
+    return match.group(1).upper(), int(match.group(2))
+
+
+def _parse_jql_datetime(value: Any, *, end_of_day: bool) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    if JQL_DATE_PATTERN.fullmatch(value):
+        suffix = "T23:59:59.999999Z" if end_of_day else "T00:00:00Z"
+        return _parse_jira_timestamp(f"{value}{suffix}")
+    return _parse_jira_timestamp(value)
+
+
+def _issue_created_after_as_of(issue: Mapping[str, Any], as_of: str | None) -> bool:
+    if as_of is None:
+        return False
+    as_of_timestamp = _parse_jira_timestamp(as_of)
+    created_timestamp = _parse_jira_timestamp(_issue_field(issue, "created"))
+    return (
+        as_of_timestamp is not None
+        and created_timestamp is not None
+        and created_timestamp > as_of_timestamp
+    )
+
+
+def _project_search_issue(issue: Mapping[str, Any], requested_fields: list[str]) -> dict[str, Any]:
+    fields = issue.get("fields")
+    if not isinstance(fields, Mapping):
+        fields = {}
+    projected = {
+        key: copy.deepcopy(value)
+        for key, value in issue.items()
+        if key in {"expand", "id", "key", "self"}
+    }
+    projected["fields"] = {
+        field: copy.deepcopy(fields.get(field)) for field in requested_fields if field != "key"
+    }
+    return projected
+
+
+def _issue_sort_key(issue: Mapping[str, Any]) -> tuple[int, str]:
+    key = issue.get("key")
+    parsed = _parse_jira_key(key)
+    if parsed is None:
+        return (0, str(key or ""))
+    return (-parsed[1], parsed[0])
 
 
 def _load_comments(path: Path) -> list[Mapping[str, Any]]:
