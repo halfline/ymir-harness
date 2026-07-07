@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from ymir_harness.jira_mock import (
     JiraMockMaterializationError,
@@ -56,6 +57,7 @@ SOURCE_ARCHIVE_SUFFIXES = (
     ".tzst",
     ".zip",
 )
+URL_PATTERN = re.compile(r"https?://[^\s<>()\"']+")
 
 
 @dataclass(frozen=True)
@@ -1649,6 +1651,136 @@ def _validate_case_consistency(
             _require_equal(
                 data.get("case_type"), expected.get("case_type"), "case_type", json_path, result
             )
+    _validate_backport_triage_patch_urls(cases_dir, expected, result)
+
+
+def _validate_backport_triage_patch_urls(
+    cases_dir: Path,
+    expected: Mapping[str, Any],
+    result: CaseValidationResult,
+) -> None:
+    if expected.get("resolution") != "backport":
+        return
+    if expected.get("expected_basis") != "historical_jira_state":
+        return
+
+    triage_path = cases_dir / "triage_results" / f"{result.case_id}.actual.json"
+    triage_result = _load_json_object(triage_path, result, required=False)
+    if triage_result is None:
+        return
+
+    triage_patch_urls = _patch_urls_from_triage_result(triage_result)
+    expected_patch_urls = _expected_patch_urls(expected)
+    if triage_patch_urls and expected_patch_urls and triage_patch_urls != expected_patch_urls:
+        result.issues.append(
+            ValidationIssue(
+                severity="error",
+                category="fixture_inconsistent",
+                message=(
+                    "expected patch_urls must match triage_results patch_urls for "
+                    "ymir-backport runs"
+                ),
+                case_id=result.case_id,
+                path=str(triage_path),
+            )
+        )
+
+    mr_patch_urls = _gitlab_mr_description_patch_urls(cases_dir, result.case_id)
+    if not triage_patch_urls or not mr_patch_urls:
+        return
+    unexpected_patch_urls = _unexpected_triage_patch_urls(triage_patch_urls, mr_patch_urls)
+    if not unexpected_patch_urls:
+        return
+
+    result.issues.append(
+        ValidationIssue(
+            severity="error",
+            category="fixture_inconsistent",
+            message=(
+                "historical backport triage patch URLs include URLs not present in cached "
+                "GitLab MR upstream patches: " + ", ".join(unexpected_patch_urls)
+            ),
+            case_id=result.case_id,
+            path=str(triage_path),
+        )
+    )
+
+
+def _patch_urls_from_triage_result(triage_result: Mapping[str, Any]) -> list[str]:
+    data = triage_result.get("data") if isinstance(triage_result.get("data"), Mapping) else {}
+    assert isinstance(data, Mapping)
+    return (
+        _string_list(data.get("patch_urls"))
+        or _string_list(triage_result.get("patch_urls"))
+        or _string_list(data.get("fix_sources"))
+        or _string_list(triage_result.get("fix_sources"))
+    )
+
+
+def _gitlab_mr_description_patch_urls(cases_dir: Path, case_id: str) -> list[str]:
+    mr_path = cases_dir / "web_cache" / case_id / "gitlab" / "merge_request.json"
+    try:
+        payload = json.loads(mr_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, Mapping):
+        return []
+    description = payload.get("description")
+    return _patch_urls_from_text(description) if isinstance(description, str) else []
+
+
+def _patch_urls_from_text(text: str) -> list[str]:
+    urls = []
+    for match in URL_PATTERN.finditer(text):
+        url = match.group(0).rstrip(".,;:)]}\"'")
+        if patch_url := _patch_url_candidate(url):
+            urls.append(patch_url)
+    return list(dict.fromkeys(urls))
+
+
+def _patch_url_candidate(url: str) -> str | None:
+    parsed = urlparse(url)
+    path = parsed.path
+    if path.lower().endswith((".patch", ".diff")):
+        return url
+    if _is_pkgs_devel_cgit_commit_url(parsed):
+        return urlunparse(parsed._replace(path=path.replace("/commit", "/patch", 1)))
+    if "/-/merge_requests/" in path or "/-/commit/" in path:
+        return url.rstrip("/") + ".patch"
+    return None
+
+
+def _is_pkgs_devel_cgit_commit_url(parsed_url: Any) -> bool:
+    hostname = (parsed_url.hostname or "").lower()
+    path = parsed_url.path
+    return (
+        hostname == "pkgs.devel.redhat.com"
+        and path.startswith("/cgit/")
+        and (path.endswith("/commit") or "/commit/" in path)
+    )
+
+
+def _unexpected_triage_patch_urls(
+    triage_patch_urls: list[str],
+    mr_patch_urls: list[str],
+) -> list[str]:
+    mr_identities = {_patch_url_identity(url) for url in mr_patch_urls}
+    return [url for url in triage_patch_urls if _patch_url_identity(url) not in mr_identities]
+
+
+def _patch_url_identity(url: str) -> str:
+    parsed = urlparse(url)
+    query_ids = parse_qs(parsed.query).get("id")
+    if query_ids:
+        commit_id = query_ids[0].strip().lower()
+        if re.fullmatch(r"[0-9a-f]{7,40}", commit_id):
+            return f"commit:{commit_id}"
+
+    path = parsed.path.rstrip("/")
+    match = re.search(r"(?:/|^)([0-9a-fA-F]{7,40})(?:\.(?:patch|diff))?$", path)
+    if match:
+        return f"commit:{match.group(1).lower()}"
+    return url.rstrip("/")
 
 
 def _case_json_paths(cases_dir: Path, case_id: str) -> Iterable[Path]:
@@ -1802,3 +1934,9 @@ def _string_or_none(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
