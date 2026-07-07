@@ -165,6 +165,49 @@ def test_historical_source_fixture_materialization_prunes_future_objects(
     assert not source_fixtures_module.git_object_exists(repository, future_commit)
 
 
+def test_historical_source_fixture_materialization_batches_ref_fetches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def fake_run_git(command, *, cwd: Path, env=None) -> None:
+        calls.append(list(command))
+
+    monkeypatch.setattr(source_fixtures_module, "_run_git", fake_run_git)
+    monkeypatch.setattr(source_fixtures_module, "git_object_exists", lambda _repo, _obj: True)
+
+    refs = tuple(
+        source_fixtures_module.SourceFixtureRef(
+            name=f"refs/heads/branch-{index}",
+            object=f"{index:040x}",
+        )
+        for index in range(513)
+    )
+    fixture = source_fixtures_module.SourceFixtureRepository(
+        name="large-repo",
+        remote_url="https://github.com/example/large-repo",
+        manifest_path=tmp_path / "large-repo.json",
+        path="source_cache/RHEL-12345/upstream/large-repo",
+        refs=refs,
+        head_object=refs[0].object,
+        replay_as_of="2026-04-27T17:13:39Z",
+    )
+
+    source_fixtures_module._initialize_historical_source_fixture_repository(
+        tmp_path / "large-repo",
+        fixture,
+        tmp_path / "materialized.git",
+    )
+
+    fetches = [command for command in calls if "fetch" in command]
+
+    assert len(fetches) == 2
+    assert len(fetches[0]) == 517
+    assert len(fetches[1]) == 6
+    assert all("ymir-harness-head" not in " ".join(fetch) for fetch in fetches)
+
+
 def _create_dated_source_repo(repository: Path) -> tuple[str, str]:
     repository.mkdir()
     subprocess.run(
