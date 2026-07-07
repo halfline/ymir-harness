@@ -475,7 +475,13 @@ Deterministic comparisons include:
 | Implementation scope | `touched_files`, reference-patch touched files, spec patches, changelog entries |
 | Build behavior | `prep_result`, `build_result`, reference-patch parse/apply status |
 | Issue handling | dependency issues and sibling issues |
-| Artifacts | generated files, patch filename patterns, semantic artifact kinds |
+| Artifacts | generated files, semantic artifact kinds |
+
+Patch filenames inside `touched_files` and `spec_patches` are treated as
+implementation details. The scorer still reports the concrete filenames for
+debugging, but pass/fail is based on whether patch files were wired into the
+same spec slots and whether the generated patches touch the expected source
+files.
 
 Advisory metrics such as runtime, token usage, tool-call count, retry count,
 cost, diff similarity, and LLM judge notes are carried in reports. They do not
