@@ -1795,9 +1795,7 @@ def _prepare_has_replay_candidates(
             cases_dir,
             case_id,
         )
-        return bool(
-            blocked_urls or jira_requests_from_run_path(results_dir) or lookaside_sources
-        )
+        return bool(blocked_urls or jira_requests_from_run_path(results_dir) or lookaside_sources)
     except CaptureMissingError:
         return False
 
