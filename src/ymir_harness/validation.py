@@ -1023,6 +1023,58 @@ def _validate_source_fixture_submodule(
             )
         )
 
+    _validate_source_fixture_as_of(cases_dir, repository, result)
+
+
+def _validate_source_fixture_as_of(
+    cases_dir: Path,
+    repository: Any,
+    result: CaseValidationResult,
+) -> None:
+    case_as_of = _case_as_of(cases_dir, result.case_id)
+    if case_as_of is None:
+        return
+
+    replay_as_of = getattr(repository, "replay_as_of", None)
+    if not replay_as_of:
+        result.issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="timestamp_leakage",
+                message="historical source fixture does not declare replay_as_of",
+                case_id=result.case_id,
+                path=str(repository.manifest_path),
+            )
+        )
+        return
+
+    parsed_replay_as_of = _parse_timestamp(replay_as_of)
+    if parsed_replay_as_of is None:
+        result.issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="timestamp_leakage",
+                message=f"historical source fixture replay_as_of is invalid: {replay_as_of}",
+                case_id=result.case_id,
+                path=str(repository.manifest_path),
+            )
+        )
+        return
+
+    if parsed_replay_as_of != case_as_of:
+        result.issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="timestamp_leakage",
+                message=(
+                    "historical source fixture replay_as_of does not match case as_of: "
+                    f"{replay_as_of}"
+                ),
+                case_id=result.case_id,
+                path=str(repository.manifest_path),
+            )
+        )
+
 
 def _validate_lookaside_artifacts(
     lookaside_dir: Path,
