@@ -17,7 +17,13 @@ from ymir_harness.capture_missing import (
 import ymir_harness.cli as cli_module
 from ymir_harness.cli import main
 from ymir_harness.collect_case import CollectCaseResult
-from ymir_harness.models import CaseValidationResult, RunCaseResult, RunReport, ValidationReport
+from ymir_harness.models import (
+    CaseValidationResult,
+    RunCaseResult,
+    RunReport,
+    ValidationIssue,
+    ValidationReport,
+)
 from ymir_harness.runner import AGENT_TIMEOUT_ENV, RunCaseExecution
 from ymir_harness.source_fixtures import write_source_fixture_from_repository
 
@@ -1208,6 +1214,91 @@ def test_cli_prepare_case_collects_until_run_succeeds(
     assert collect_requests[0].jira_url == "https://redhat.atlassian.net/browse/RHEL-12345"
     assert collect_requests[0].mock_agent == "triage"
     assert collect_requests[0].gitlab_token_env == "GITLAB_API_TOKEN"
+
+
+def test_cli_prepare_case_blocks_passing_run_with_validation_warnings(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    capture_requests = []
+
+    def fake_validate_case_directory(cases_dir_arg, *, workflow=None):
+        return ValidationReport(
+            cases_dir=cases_dir_arg,
+            cases=[
+                CaseValidationResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    case_status="active",
+                    status="warning-only",
+                    issues=[
+                        ValidationIssue(
+                            severity="warning",
+                            category="timestamp_leakage",
+                            message="historical source fixture does not declare replay_as_of",
+                            case_id="RHEL-12345",
+                        )
+                    ],
+                )
+            ],
+        )
+
+    def fake_build_run_report(cases_dir_arg, results_dir, **kwargs):
+        return RunReport(
+            cases_dir=cases_dir_arg,
+            results_dir=results_dir,
+            entries=[
+                RunCaseResult(
+                    case_id="RHEL-12345",
+                    case_type="cve_backport",
+                    status="passed",
+                )
+            ],
+            run_id=kwargs["run_id"],
+            variant=kwargs["variant"],
+        )
+
+    def fake_capture_missing(request):
+        capture_requests.append(request)
+        return CaptureMissingResult(
+            case_id=request.case_id,
+            cases_dir=request.cases_dir,
+            run_path=request.run_path,
+        )
+
+    monkeypatch.setattr(cli_module, "validate_case_directory", fake_validate_case_directory)
+    monkeypatch.setattr(cli_module, "load_case_manifest", lambda _cases_dir: ([], []))
+    monkeypatch.setattr(cli_module, "write_validation_reports", lambda _report, _reports_dir: [])
+    monkeypatch.setattr(cli_module, "build_run_report", fake_build_run_report)
+    monkeypatch.setattr(cli_module, "capture_missing", fake_capture_missing)
+    monkeypatch.setattr(cli_module, "_prepare_has_replay_candidates", lambda *_args: False)
+    monkeypatch.setattr(cli_module, "_run_executor", lambda _workflow: None)
+
+    assert (
+        main(
+            [
+                "prepare-case",
+                "--cases",
+                str(cases_dir),
+                "--case",
+                "RHEL-12345",
+                "--workflow",
+                "ymir-triage",
+                "--variant",
+                "baseline",
+                "--json",
+            ]
+        )
+        == 1
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "validation_warnings"
+    assert output["iterations"][0]["run"]["validation"]["summary"]["warning-only"] == 1
+    assert output["iterations"][0]["run"]["validation_reports_dir"] == str(cases_dir / "reports")
+    assert capture_requests == []
 
 
 def test_cli_prepare_backport_runs_triage_when_result_is_missing(
