@@ -101,7 +101,7 @@ def test_git_submodule_update_preserves_existing_git_config_environment(
     assert env["GIT_CONFIG_VALUE_1"].startswith("Authorization: Basic ")
 
 
-def test_historical_source_fixture_object_lookup_prunes_future_objects(
+def test_historical_source_fixture_materialization_prunes_future_objects(
     tmp_path: Path,
 ) -> None:
     cases_dir = tmp_path / "cases"
@@ -152,6 +152,17 @@ def test_historical_source_fixture_object_lookup_prunes_future_objects(
         )
         is None
     )
+
+    source_cache_dir = source_fixtures_module.materialize_case_source_cache(
+        cases_dir,
+        "RHEL-12345",
+        tmp_path / "materialized-source-cache",
+    )
+    repository = source_fixtures_module.find_source_cache_repository(source_cache_dir, remote_url)
+
+    assert repository is not None
+    assert source_fixtures_module.git_object_exists(repository, old_commit)
+    assert not source_fixtures_module.git_object_exists(repository, future_commit)
 
 
 def _create_dated_source_repo(repository: Path) -> tuple[str, str]:
