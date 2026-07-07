@@ -313,6 +313,66 @@ def test_capture_missing_records_lookaside_sources_from_logged_cache_miss(
     ]
 
 
+def test_capture_missing_records_lookaside_source_from_mock_repo_when_clone_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    run_dir = tmp_path / "run"
+    archive_body = b"source archive\n"
+    archive_hash = capture_missing_module.hashlib.sha512(archive_body).hexdigest()
+    _write_expected(cases_dir, "RHEL-12345")
+    _write_text(
+        run_dir / "repeat-1" / "mock-repos" / "RHEL-12345" / "00-redis" / "sources",
+        f"SHA512 (redis-6.2.22.tar.gz) = {archive_hash}\n",
+    )
+    _write_text(
+        run_dir / "repeat-1" / "mcp-gateway" / "RHEL-12345.debug.log",
+        "\n".join(
+            [
+                "Tool arguments: input=HarnessLookasideToolInput("
+                "dist_git_path=PosixPath('/ymir-harness-results/applicability/RHEL-12345/redis'), "
+                "package='redis', dist_git_branch='rhel-9.6.0') options=None",
+                "ToolError('Failed to download sources from replay cache: "
+                "lookaside source cache is missing: "
+                "/ymir-harness-results/repeat-1/source-cache/RHEL-12345/lookaside')",
+                "",
+            ]
+        ),
+    )
+    expected_url = (
+        "https://lookaside.example/sources/rpms/redis/redis-6.2.22.tar.gz/"
+        f"sha512/{archive_hash}/redis-6.2.22.tar.gz"
+    )
+
+    def fake_urlopen(request, timeout: float):
+        assert request.full_url == expected_url
+        assert timeout == 30.0
+        return _Response(archive_body, "application/gzip")
+
+    monkeypatch.setattr(
+        capture_missing_module,
+        "_lookaside_base_url",
+        lambda _branch: "https://lookaside.example/sources",
+    )
+    monkeypatch.setattr(capture_missing_module, "urlopen", fake_urlopen)
+
+    result = capture_missing(
+        CaptureMissingRequest(
+            cases_dir=cases_dir,
+            run_path=run_dir,
+            case_id="RHEL-12345",
+            allowed_hosts=("lookaside.example",),
+        )
+    )
+
+    cached_archive = cases_dir / "source_cache" / "RHEL-12345" / "lookaside" / "redis-6.2.22.tar.gz"
+    assert cached_archive.read_bytes() == archive_body
+    assert [(capture.kind, capture.url) for capture in result.captured_source] == [
+        ("lookaside", expected_url)
+    ]
+
+
 def test_capture_missing_mirrors_replay_miss_project_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
