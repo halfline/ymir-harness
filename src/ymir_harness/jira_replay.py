@@ -120,11 +120,11 @@ def load_jira_search_response(
     payload: Mapping[str, Any],
 ) -> dict[str, Any] | None:
     path = jira_search_fixture_path(cases_dir, case_id, payload)
-    if not path.is_file():
-        return None
-    data = load_json_file(path)
-    response = data.get("response") if isinstance(data, Mapping) else None
-    return copy.deepcopy(dict(response)) if isinstance(response, Mapping) else None
+    if path.is_file():
+        data = load_json_file(path)
+        response = data.get("response") if isinstance(data, Mapping) else None
+        return copy.deepcopy(dict(response)) if isinstance(response, Mapping) else None
+    return _synthesize_jira_search_response(cases_dir, case_id, payload)
 
 
 def _synthesize_jira_search_response(
