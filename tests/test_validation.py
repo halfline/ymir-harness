@@ -299,6 +299,94 @@ def test_strict_validation_uses_backport_triage_result_branch_for_mock_fixture(
     assert not report.has_blocking_errors
 
 
+def test_strict_validation_reports_backport_expected_triage_patch_url_drift(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    expected_patch_url = "https://example.invalid/expected.patch"
+    triage_patch_url = "https://example.invalid/triage.patch"
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        patch_urls=[expected_patch_url],
+        reference_patch_mode="semantic_reference",
+    )
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    expected["expected_basis"] = "historical_jira_state"
+    _write_json(expected_path, expected)
+    _write_json(
+        cases_dir / "triage_results" / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "data": {
+                "package": "dnsmasq",
+                "patch_urls": [triage_patch_url],
+            },
+            "resolution": "backport",
+        },
+    )
+
+    report = validate_case_directory(cases_dir, workflow="ymir-backport")
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "fixture_inconsistent"
+        and "expected patch_urls must match triage_results patch_urls" in issue.message
+        for issue in issues
+    )
+
+
+def test_strict_validation_reports_historical_backport_triage_mr_patch_drift(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    triage_patch_url = "https://github.example/upstream/pkg/commit/triage.patch"
+    mr_patch_url = "https://github.example/upstream/pkg/commit/production.patch"
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        patch_urls=[triage_patch_url],
+        reference_patch_mode="semantic_reference",
+    )
+    expected_path = cases_dir / "expected" / "RHEL-12345.expected.json"
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    expected["expected_basis"] = "historical_jira_state"
+    expected["fix_sources"] = ["https://gitlab.example/group/pkg/-/merge_requests/7"]
+    _write_json(expected_path, expected)
+    _write_json(
+        cases_dir / "triage_results" / "RHEL-12345.actual.json",
+        {
+            "case_id": "RHEL-12345",
+            "data": {
+                "package": "dnsmasq",
+                "patch_urls": [triage_patch_url],
+            },
+            "resolution": "backport",
+        },
+    )
+    _write_json(
+        cases_dir / "web_cache" / "RHEL-12345" / "gitlab" / "merge_request.json",
+        {"description": (f"Backport production fix.\n\nUpstream patches:\n - {mr_patch_url}\n")},
+    )
+
+    report = validate_case_directory(cases_dir, workflow="ymir-backport")
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "fixture_inconsistent"
+        and "GitLab MR upstream patches" in issue.message
+        and triage_patch_url in issue.message
+        for issue in issues
+    )
+
+
 def test_strict_validation_reports_web_cache_missing_expected_patch_url(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
