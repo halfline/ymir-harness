@@ -1723,18 +1723,39 @@ def _lookaside_cache_misses_from_run_path(
             continue
         for match in LOOKASIDE_TOOL_INPUT_PATTERN.finditer(text):
             clone_path = _host_run_path(Path(match.group("clone_path")), run_path)
-            if not clone_path.is_dir():
-                continue
             package = match.group("package")
             branch = match.group("branch")
-            key = (package, branch, clone_path)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append(
-                _LookasideCacheMiss(package=package, branch=branch, clone_path=clone_path)
+            clone_paths = (
+                (clone_path,)
+                if clone_path.is_dir()
+                else _mock_repo_lookaside_clone_paths(run_path, case_id, package)
             )
+            for candidate_path in clone_paths:
+                key = (package, branch, candidate_path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    _LookasideCacheMiss(package=package, branch=branch, clone_path=candidate_path)
+                )
     return tuple(candidates)
+
+
+def _mock_repo_lookaside_clone_paths(
+    run_path: Path,
+    case_id: str,
+    package: str,
+) -> tuple[Path, ...]:
+    return tuple(
+        source_path.parent
+        for source_path in sorted(run_path.glob(f"repeat-*/mock-repos/{case_id}/*/sources"))
+        if _mock_repo_dir_matches_package(source_path.parent, package)
+    )
+
+
+def _mock_repo_dir_matches_package(path: Path, package: str) -> bool:
+    safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in package)
+    return path.name == safe or path.name.endswith(f"-{safe}")
 
 
 def _run_text_artifacts(run_path: Path) -> tuple[Path, ...]:
