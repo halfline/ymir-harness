@@ -75,7 +75,10 @@ WORKER_SOURCE_FINGERPRINT_PATHS = (
     Path("VERSION"),
     Path("pyproject.toml"),
     Path("rhel-config.json"),
+    Path("Containerfile.ymir-harness-worker"),
     Path("Containerfile.ymir-harness-source-worker"),
+    Path("ai-workflows") / "Containerfile.c9s",
+    Path("ai-workflows") / "Containerfile.c10s",
     Path("ai-workflows") / "ymir",
 )
 PATH_LIST_ENVIRONMENT_NAMES = frozenset(
