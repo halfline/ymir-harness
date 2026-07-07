@@ -457,6 +457,29 @@ def test_jira_search_replay_synthesizes_from_issue_corpus(tmp_path: Path) -> Non
     }
 
 
+def test_jira_search_replay_leaves_unsupported_jql_uncached(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    jira_dir = cases_dir / "jiras" / "RHEL-167675"
+    jira_dir.mkdir(parents=True)
+    (jira_dir / "issue.json").write_text(
+        json.dumps({"id": "1", "key": "RHEL-167675", "fields": {"summary": "issue"}}),
+        encoding="utf-8",
+    )
+
+    assert (
+        load_jira_search_response(
+            cases_dir,
+            "RHEL-167675",
+            {
+                "jql": "project = RHEL ORDER BY created",
+                "fields": ["key", "summary"],
+                "maxResults": 10,
+            },
+        )
+        is None
+    )
+
+
 def test_patch_ymir_jira_mock_reports_missing_issue(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
