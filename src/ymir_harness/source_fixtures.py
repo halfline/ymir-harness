@@ -37,6 +37,7 @@ class SourceFixtureRepository:
     refs: tuple[SourceFixtureRef, ...]
     head: str | None = None
     head_object: str | None = None
+    replay_as_of: str | None = None
 
     def ref_object(self, ref_name: str) -> str | None:
         return next((ref.object for ref in self.refs if ref.name == ref_name), None)
@@ -235,7 +236,7 @@ def source_cache_repo_for_object(
     submodule = source_fixture_path(cases_dir, case_id, fixture)
     if not is_git_checkout(submodule):
         return None
-    if obj is None or git_object_exists(submodule, obj):
+    if obj is None or _source_fixture_has_object(cases_dir, case_id, fixture, obj):
         return submodule
     return None
 
@@ -248,6 +249,8 @@ def _source_fixture_has_object(
 ) -> bool:
     if fixture.contains_object(obj):
         return True
+    if fixture.replay_as_of is not None:
+        return False
     submodule = source_fixture_path(cases_dir, case_id, fixture)
     return submodule.exists() and is_git_checkout(submodule) and git_object_exists(submodule, obj)
 
@@ -692,6 +695,7 @@ def _load_source_fixture_repository(path: Path) -> SourceFixtureRepository:
         refs=tuple(refs),
         head=_optional_string(data, "head"),
         head_object=_optional_string(data, "head_object"),
+        replay_as_of=_optional_string(data, "replay_as_of"),
     )
 
 
