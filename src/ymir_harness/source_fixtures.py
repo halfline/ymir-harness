@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 SOURCE_FIXTURE_SCHEMA_VERSION = 1
 TRAILING_ESCAPED_URL_GARBAGE_RE = re.compile(r"(?:\\+[nrt]|\\+)+$", re.IGNORECASE)
+GIT_FETCH_REFS_BATCH_SIZE = 512
 
 
 class SourceFixtureError(RuntimeError):
@@ -350,7 +351,7 @@ def _initialize_historical_source_fixture_repository(
     )
 
     refspecs = [f"{ref.object}:{ref.name}" for ref in fixture.refs]
-    if refspecs:
+    for refspec_batch in _batched(refspecs, GIT_FETCH_REFS_BATCH_SIZE):
         _run_git(
             [
                 "--git-dir",
@@ -358,7 +359,7 @@ def _initialize_historical_source_fixture_repository(
                 "fetch",
                 "--no-tags",
                 str(submodule),
-                *refspecs,
+                *refspec_batch,
             ],
             cwd=destination.parent,
         )
@@ -391,6 +392,10 @@ def _initialize_historical_source_fixture_repository(
             ["--git-dir", str(destination), "symbolic-ref", "HEAD", head_ref],
             cwd=destination.parent,
         )
+
+
+def _batched(values: Sequence[str], size: int) -> tuple[tuple[str, ...], ...]:
+    return tuple(tuple(values[index : index + size]) for index in range(0, len(values), size))
 
 
 def _delete_git_refs(repository: Path) -> None:
