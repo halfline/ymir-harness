@@ -222,6 +222,7 @@ class CollectCaseRequest:
     jira_email: str | None = None
     gitlab_mr_url: str | None = None
     gitlab_token_env: str = "GITLAB_TOKEN"
+    gitlab_token_file: Path | None = None
     http_timeout: float = 30.0
     jira_issue_json: Path | None = None
     jira_comments_json: Path | None = None
@@ -396,7 +397,11 @@ def _fetch_evidence(
     if (
         gitlab_mr_url
         and auto_gitlab_mr_url
-        and _private_gitlab_url_without_token(gitlab_mr_url, request.gitlab_token_env)
+        and _private_gitlab_url_without_token(
+            gitlab_mr_url,
+            request.gitlab_token_env,
+            request.gitlab_token_file,
+        )
     ):
         result.warnings.append(
             f"skipped auto-discovered GitLab MR {gitlab_mr_url}: "
@@ -448,7 +453,11 @@ def _fetch_evidence(
     for index, patch_url in enumerate(patch_urls_to_fetch, start=1):
         if patch_url in recorded_patch_urls:
             continue
-        if _private_gitlab_url_without_token(patch_url, request.gitlab_token_env):
+        if _private_gitlab_url_without_token(
+            patch_url,
+            request.gitlab_token_env,
+            request.gitlab_token_file,
+        ):
             result.warnings.append(
                 f"skipped Jira patch URL {patch_url}: {request.gitlab_token_env} is not configured"
             )
@@ -542,7 +551,7 @@ def _fetch_gitlab_mr_evidence(
     result: CollectCaseResult,
 ) -> tuple[Mapping[str, Any], Any, str, bytes, list[FetchedRecord]]:
     gitlab_urls = _gitlab_mr_urls(gitlab_mr_url)
-    gitlab_headers = _gitlab_headers(request.gitlab_token_env)
+    gitlab_headers = _gitlab_headers(request.gitlab_token_env, request.gitlab_token_file)
     gitlab_mr: Mapping[str, Any] | None = None
     gitlab_commits: Any = None
     gitlab_records: list[FetchedRecord] = []
@@ -966,7 +975,7 @@ def _gitlab_commit_api_diff_patch_body(
     url = f"https://gitlab.com/api/v4/projects/{project}/repository/commits/{commit_id}/diff"
     body = _fetch_bytes(
         url,
-        headers=_gitlab_headers(request.gitlab_token_env),
+        headers=_gitlab_headers(request.gitlab_token_env, request.gitlab_token_file),
         request=request,
         result=result,
     )
@@ -1144,26 +1153,33 @@ def _jira_authorization(token: str, email: str | None) -> str:
     return f"Bearer {token}"
 
 
-def _gitlab_headers(token_env: str) -> dict[str, str]:
+def _gitlab_headers(token_env: str, token_file: Path | None = None) -> dict[str, str]:
     headers = {"Accept": "application/json"}
-    token = _gitlab_token(token_env)
+    token = _gitlab_token(token_env, token_file)
     if token:
         headers["PRIVATE-TOKEN"] = token
     return headers
 
 
-def _private_gitlab_url_without_token(url: str, token_env: str) -> bool:
-    if _gitlab_token(token_env):
+def _private_gitlab_url_without_token(
+    url: str,
+    token_env: str,
+    token_file: Path | None = None,
+) -> bool:
+    if _gitlab_token(token_env, token_file):
         return False
     parsed = urlparse(url)
     return parsed.hostname == "gitlab.com" and parsed.path.startswith("/redhat/rhel/rpms/")
 
 
 @lru_cache(maxsize=None)
-def _gitlab_token(token_env: str) -> str | None:
+def _gitlab_token(token_env: str, token_file: Path | None = None) -> str | None:
     token = os.environ.get(token_env)
     if token and token.strip():
         return token.strip()
+    token = _gitlab_token_from_file(token_file)
+    if token:
+        return token
 
     try:
         completed = subprocess.run(
@@ -1184,6 +1200,16 @@ def _gitlab_token(token_env: str) -> str | None:
         if separator and key == "password" and value:
             return value
     return None
+
+
+def _gitlab_token_from_file(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        token = path.expanduser().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return token or None
 
 
 def _fetch_json(
@@ -1231,7 +1257,11 @@ def _fetch_maintainer_rules_record(
     result: CollectCaseResult,
 ) -> FetchedRecord:
     url = _maintainer_rules_url(package)
-    http_request = Request(url, headers=_gitlab_headers(request.gitlab_token_env), method="GET")
+    http_request = Request(
+        url,
+        headers=_gitlab_headers(request.gitlab_token_env, request.gitlab_token_file),
+        method="GET",
+    )
     try:
         with urlopen(http_request, timeout=request.http_timeout) as response:
             body = response.read()
@@ -1270,7 +1300,7 @@ def _fetch_internal_rhel_branch_records(
     project_url = _internal_rhel_project_url(package)
     project_request = Request(
         project_url,
-        headers=_gitlab_headers(request.gitlab_token_env),
+        headers=_gitlab_headers(request.gitlab_token_env, request.gitlab_token_file),
         method="GET",
     )
     try:
@@ -1294,7 +1324,7 @@ def _fetch_internal_rhel_branch_records(
     branches_url = f"https://gitlab.com/api/v4/projects/{project_id}/repository/branches"
     branches_body = _fetch_bytes(
         branches_url,
-        headers=_gitlab_headers(request.gitlab_token_env),
+        headers=_gitlab_headers(request.gitlab_token_env, request.gitlab_token_file),
         request=request,
         result=result,
     )
@@ -1457,12 +1487,19 @@ def _localize_mock_repo_cache(request: CollectCaseRequest) -> CollectCaseRequest
                 source,
                 ["-C", str(destination), "remote", "update", "--prune"],
                 request.gitlab_token_env,
+                request.gitlab_token_file,
             ),
             destination,
         )
     else:
         _run_git(
-            _git_clone_command(source, str(destination), request.gitlab_token_env), destination
+            _git_clone_command(
+                source,
+                str(destination),
+                request.gitlab_token_env,
+                request.gitlab_token_file,
+            ),
+            destination,
         )
 
     _run_git(
@@ -1496,22 +1533,33 @@ def _run_git(command: Sequence[str], cwd: Path) -> None:
         raise CollectCaseError(f"git {' '.join(_redacted_git_command(command))} failed{detail}")
 
 
-def _git_clone_command(source: str, destination: str, gitlab_token_env: str) -> list[str]:
+def _git_clone_command(
+    source: str,
+    destination: str,
+    gitlab_token_env: str,
+    gitlab_token_file: Path | None,
+) -> list[str]:
     command = ["clone", "--mirror", "--quiet", source, destination]
-    return _git_authenticated_command(source, command, gitlab_token_env)
+    return _git_authenticated_command(source, command, gitlab_token_env, gitlab_token_file)
 
 
-def _git_worktree_clone_command(source: str, destination: str, gitlab_token_env: str) -> list[str]:
+def _git_worktree_clone_command(
+    source: str,
+    destination: str,
+    gitlab_token_env: str,
+    gitlab_token_file: Path | None,
+) -> list[str]:
     command = ["clone", "--quiet", source, destination]
-    return _git_authenticated_command(source, command, gitlab_token_env)
+    return _git_authenticated_command(source, command, gitlab_token_env, gitlab_token_file)
 
 
 def _git_authenticated_command(
     source: str,
     command: list[str],
     gitlab_token_env: str,
+    gitlab_token_file: Path | None,
 ) -> list[str]:
-    token = _gitlab_token(gitlab_token_env)
+    token = _gitlab_token(gitlab_token_env, gitlab_token_file)
     if token and _is_gitlab_https_url(source):
         authorization = base64.b64encode(f"oauth2:{token}".encode("utf-8")).decode("ascii")
         return [
@@ -2622,15 +2670,31 @@ def _auto_source_project_urls(
         project_url = _gitlab_project_url_from_evidence_url(url)
         if project_url is not None and not _is_reserved_source_host(project_url):
             projects.append(project_url)
-    projects.extend(_auto_package_source_project_urls(request))
+    if not projects:
+        projects.extend(_auto_package_source_project_urls(request, fetched))
     return tuple(dict.fromkeys(projects))
 
 
-def _auto_package_source_project_urls(request: CollectCaseRequest) -> tuple[str, ...]:
-    if request.mock_repo_cache is None or request.package is None:
+def _auto_package_source_project_urls(
+    request: CollectCaseRequest,
+    fetched: FetchedEvidence,
+) -> tuple[str, ...]:
+    package = request.package or _derive_package(fetched.jira_issue)
+    if package is None:
         return ()
-    package = quote(request.package, safe="._+-")
-    return (f"https://gitlab.com/redhat/centos-stream/rpms/{package}",)
+    encoded_package = quote(package, safe="._+-")
+    projects = []
+    fix_version = request.fix_version or request.target_branch or _derive_fix_version(
+        fetched.jira_issue
+    )
+    if _is_rhel_source_branch(fix_version):
+        projects.append(f"https://gitlab.com/redhat/rhel/rpms/{encoded_package}")
+    projects.append(f"https://gitlab.com/redhat/centos-stream/rpms/{encoded_package}")
+    return tuple(projects)
+
+
+def _is_rhel_source_branch(value: str | None) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"rhel-\d+(?:\.\d+)*(?:\.z)?", value) is not None
 
 
 def _gitlab_project_url_from_evidence_url(url: str) -> str | None:
@@ -2679,12 +2743,17 @@ def _cache_upstream_source_repo(
             return
 
         if not is_git_worktree(cases_dir):
-            raise CollectCaseError(f"cases directory is not a git worktree: {cases_dir}")
+            return
 
         with tempfile.TemporaryDirectory(prefix="ymir-harness-source-fixture-") as tmp:
             mirror = Path(tmp) / _mock_repo_cache_name(remote_url)
             _run_git(
-                _git_clone_command(remote_url, str(mirror), request.gitlab_token_env),
+                _git_clone_command(
+                    remote_url,
+                    str(mirror),
+                    request.gitlab_token_env,
+                    request.gitlab_token_file,
+                ),
                 Path(tmp),
             )
             manifest_path = write_source_fixture_from_repository(
@@ -2717,7 +2786,12 @@ def _cache_mock_repo_lookaside_sources(
         checkout = Path(tmp) / "distgit"
         try:
             _run_git(
-                _git_worktree_clone_command(source, str(checkout), request.gitlab_token_env),
+                _git_worktree_clone_command(
+                    source,
+                    str(checkout),
+                    request.gitlab_token_env,
+                    request.gitlab_token_file,
+                ),
                 checkout,
             )
             _run_git(["-C", str(checkout), "checkout", request.mock_repo.pre_fix_ref], checkout)

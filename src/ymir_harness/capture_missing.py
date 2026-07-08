@@ -131,6 +131,7 @@ class CaptureMissingRequest:
     case_id: str
     allowed_hosts: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
     gitlab_token_env: str = "GITLAB_TOKEN"
+    gitlab_token_file: Path | None = None
     jira_token_env: str = "JIRA_TOKEN"
     jira_token_file: Path | None = None
     jira_email: str | None = None
@@ -854,7 +855,7 @@ def _run_git_ls_remote(
         stderr=subprocess.PIPE,
         text=True,
         timeout=request.http_timeout,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env=_git_auth_environment(url, request),
     )
     return _CapturedCommand(
         returncode=completed.returncode,
@@ -871,7 +872,11 @@ def _run_git_ls_remote_as_of(
 ) -> _CapturedCommand:
     with tempfile.TemporaryDirectory(prefix="ymir-harness-ls-remote-") as tmp:
         mirror = Path(tmp) / _git_source_cache_name(url)
-        _run_git(["clone", "--mirror", "--quiet", url, str(mirror)], Path(tmp))
+        _run_git(
+            ["clone", "--mirror", "--quiet", url, str(mirror)],
+            Path(tmp),
+            env=_git_auth_environment(url, request),
+        )
         refs = git_refs(mirror, as_of=as_of)
         refs_by_name = dict(refs)
         lines = []
@@ -1543,7 +1548,7 @@ def _headers_for_url(url: str, request: CaptureMissingRequest) -> dict[str, str]
     headers = {"Accept": "*/*"}
     hostname = (urlparse(url).hostname or "").lower()
     if "gitlab" in hostname:
-        token = os.environ.get(request.gitlab_token_env)
+        token = _gitlab_token(request)
         if token:
             headers["PRIVATE-TOKEN"] = token
     if "jira" in hostname or "atlassian" in hostname:
@@ -1552,6 +1557,69 @@ def _headers_for_url(url: str, request: CaptureMissingRequest) -> dict[str, str]
             headers["Authorization"] = _jira_authorization(token, request.jira_email)
             headers["Accept"] = "application/json"
     return headers
+
+
+def _git_auth_environment(url: str, request: CaptureMissingRequest) -> dict[str, str]:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != "gitlab.com":
+        return env
+    token = _gitlab_token(request)
+    if not token:
+        return env
+    authorization = base64.b64encode(f"oauth2:{token}".encode("utf-8")).decode("ascii")
+    return _git_config_environment(
+        (
+            (
+                "http.https://gitlab.com/.extraHeader",
+                f"Authorization: Basic {authorization}",
+            ),
+        ),
+        env,
+    )
+
+
+def _gitlab_token(request: CaptureMissingRequest) -> str | None:
+    token = os.environ.get(request.gitlab_token_env)
+    if token and token.strip():
+        return token.strip()
+    token = _gitlab_token_from_file(request.gitlab_token_file)
+    if token:
+        return token
+    return None
+
+
+def _gitlab_token_from_file(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        token = path.expanduser().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def _git_config_environment(
+    entries: Sequence[tuple[str, str]],
+    base_environment: Mapping[str, str],
+) -> dict[str, str]:
+    output = dict(base_environment)
+    start = _git_config_count(output)
+    output["GIT_CONFIG_COUNT"] = str(start + len(entries))
+    for offset, (key, value) in enumerate(entries, start=start):
+        output[f"GIT_CONFIG_KEY_{offset}"] = key
+        output[f"GIT_CONFIG_VALUE_{offset}"] = value
+    return output
+
+
+def _git_config_count(environment: Mapping[str, str]) -> int:
+    value = environment.get("GIT_CONFIG_COUNT")
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        return 0
 
 
 def _jira_token(request: CaptureMissingRequest) -> str | None:
@@ -1970,7 +2038,11 @@ def _capture_git_source_repo(
 
     with tempfile.TemporaryDirectory(prefix="ymir-harness-source-fixture-") as tmp:
         mirror = Path(tmp) / _git_source_cache_name(remote_url)
-        _run_git(["clone", "--mirror", "--quiet", remote_url, str(mirror)], Path(tmp))
+        _run_git(
+            ["clone", "--mirror", "--quiet", remote_url, str(mirror)],
+            Path(tmp),
+            env=_git_auth_environment(remote_url, request),
+        )
         manifest_path = write_source_fixture_from_repository(
             cases_dir,
             request.case_id,
@@ -2070,7 +2142,7 @@ def _git_source_cache_name(remote_url: str) -> str:
     return f"{safe or 'repo'}-{digest}.git"
 
 
-def _run_git(command: Sequence[str], cwd: Path) -> None:
+def _run_git(command: Sequence[str], cwd: Path, *, env: Mapping[str, str] | None = None) -> None:
     completed = subprocess.run(
         ["git", *command],
         cwd=cwd if cwd.is_dir() else None,
@@ -2078,6 +2150,7 @@ def _run_git(command: Sequence[str], cwd: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env={**os.environ, **env} if env is not None else None,
     )
     if completed.returncode == 0:
         return

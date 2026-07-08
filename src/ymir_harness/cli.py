@@ -288,6 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="GITLAB_TOKEN",
         help="environment variable containing a GitLab private token",
     )
+    collect.add_argument("--gitlab-token-file", type=Path, help="file containing a GitLab token")
     collect.add_argument(
         "--http-timeout",
         type=float,
@@ -349,6 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="GITLAB_TOKEN",
         help="environment variable containing a GitLab private token",
     )
+    capture.add_argument("--gitlab-token-file", type=Path, help="file containing a GitLab token")
     capture.add_argument(
         "--jira-token-env",
         default="JIRA_TOKEN",
@@ -467,6 +469,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="GITLAB_TOKEN",
         help="environment variable containing a GitLab private token",
     )
+    prepare.add_argument("--gitlab-token-file", type=Path, help="file containing a GitLab token")
     prepare.add_argument(
         "--as-of",
         help=(
@@ -864,6 +867,7 @@ def _collect_case_request(args: argparse.Namespace) -> CollectCaseRequest:
         jira_email=args.jira_email,
         gitlab_mr_url=args.gitlab_mr_url,
         gitlab_token_env=args.gitlab_token_env,
+        gitlab_token_file=args.gitlab_token_file,
         http_timeout=args.http_timeout,
         jira_issue_json=args.jira_issue_json,
         jira_comments_json=args.jira_comments_json,
@@ -914,6 +918,7 @@ def _cmd_capture_missing(args: argparse.Namespace) -> int:
         case_id=args.case_id,
         allowed_hosts=allowed_hosts,
         gitlab_token_env=args.gitlab_token_env,
+        gitlab_token_file=args.gitlab_token_file,
         jira_token_env=args.jira_token_env,
         jira_token_file=args.jira_token_file,
         jira_email=args.jira_email,
@@ -2046,6 +2051,7 @@ def _prepare_collect_request(args: argparse.Namespace) -> CollectCaseRequest:
         jira_email=args.jira_email,
         gitlab_mr_url=args.gitlab_mr_url,
         gitlab_token_env=args.gitlab_token_env,
+        gitlab_token_file=args.gitlab_token_file,
         http_timeout=args.http_timeout,
         overwrite=args.overwrite,
     )
@@ -2066,6 +2072,7 @@ def _prepare_capture_request(
         case_id=args.case_id,
         allowed_hosts=allowed_hosts,
         gitlab_token_env=args.gitlab_token_env,
+        gitlab_token_file=args.gitlab_token_file,
         jira_token_env=args.jira_token_env,
         jira_token_file=args.jira_token_file,
         jira_email=args.jira_email,
