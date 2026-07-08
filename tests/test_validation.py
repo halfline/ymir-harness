@@ -442,6 +442,56 @@ def test_strict_validation_reports_web_cache_recorded_file_escape(tmp_path: Path
     )
 
 
+def test_strict_validation_reports_unexpected_empty_recorded_file(tmp_path: Path) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+    )
+    recorded_path = cases_dir / "web_cache" / "RHEL-12345" / "commits" / "fix.patch"
+    recorded_path.write_bytes(b"")
+
+    report = validate_case_directory(cases_dir)
+
+    assert report.has_blocking_errors
+    issues = report.cases[0].issues
+    assert any(
+        issue.category == "web_cache_incomplete" and "recorded file is empty" in issue.message
+        for issue in issues
+    )
+
+
+def test_strict_validation_accepts_empty_recorded_file_for_recorded_empty_status(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    repo_path, pre_fix_ref = _create_git_repo(tmp_path)
+    _write_replay_case(
+        cases_dir,
+        repo_path,
+        pre_fix_ref,
+        zstream_override={"8": "rhel-8.10.z"},
+    )
+    manifest_path = cases_dir / "web_cache" / "RHEL-12345" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["response_metadata"] = {
+        "https://example.invalid/fix.patch": {
+            "status": 202,
+            "headers": {"Content-Type": "text/html; charset=UTF-8"},
+        },
+    }
+    _write_json(manifest_path, manifest)
+    recorded_path = cases_dir / "web_cache" / "RHEL-12345" / "commits" / "fix.patch"
+    recorded_path.write_bytes(b"")
+
+    report = validate_case_directory(cases_dir)
+
+    assert not report.has_blocking_errors
+
+
 def test_strict_validation_reports_future_koji_candidate_build(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     repo_path, pre_fix_ref = _create_git_repo(tmp_path)
