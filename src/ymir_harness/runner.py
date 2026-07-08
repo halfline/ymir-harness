@@ -238,6 +238,10 @@ def actual_result_path(results_dir: Path, case_id: str, repetition: int) -> Path
     return results_dir / f"repeat-{repetition}" / "actual-results" / f"{case_id}.actual.json"
 
 
+def written_actual_result_path(path: Path) -> Path | None:
+    return path if path.is_file() else None
+
+
 def workflow_trace_dir(results_dir: Path, repetition: int) -> Path:
     return results_dir / f"repeat-{repetition}" / "workflow-trace"
 
@@ -833,7 +837,7 @@ def _run_case_result(
                     status="timeout",
                     repetition=repetition,
                     expected_path=expected_path if expected_path.is_file() else None,
-                    actual_path=actual_path,
+                    actual_path=written_actual_result_path(actual_path),
                     reason=workflow_timeout_reason(
                         getattr(executor, "ymir_workflow", None),
                         request.environment,
@@ -861,7 +865,7 @@ def _run_case_result(
                 status="timeout",
                 repetition=repetition,
                 expected_path=expected_path if expected_path.is_file() else None,
-                actual_path=actual_path,
+                actual_path=written_actual_result_path(actual_path),
                 reason=workflow_timeout_reason(
                     getattr(executor, "ymir_workflow", None),
                     request.environment,
