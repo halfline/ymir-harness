@@ -2450,10 +2450,36 @@ def _artifact_blocked_urls(
     artifact_root = results_dir / f"repeat-{repetition}"
     if not artifact_root.exists():
         return []
-    try:
-        return blocked_urls_from_run_path(artifact_root)
-    except CaptureMissingError:
-        return []
+    blocked = []
+    for path in _case_artifact_paths(results_dir, case_id, repetition):
+        try:
+            blocked.extend(blocked_urls_from_run_path(path))
+        except CaptureMissingError:
+            continue
+    return list({entry.to_replay_violation(): entry for entry in blocked}.values())
+
+
+def _case_artifact_paths(
+    results_dir: Path,
+    case_id: str,
+    repetition: int,
+) -> list[Path]:
+    artifact_root = results_dir / f"repeat-{repetition}"
+    paths = [
+        workflow_stdout_path(results_dir, case_id, repetition),
+        workflow_stderr_path(results_dir, case_id, repetition),
+        artifact_root / "mcp-gateway" / f"{case_id}.stdout.log",
+        artifact_root / "mcp-gateway" / f"{case_id}.stderr.log",
+        artifact_root / "mcp-gateway" / f"{case_id}.debug.log",
+        artifact_root / "artifacts" / case_id,
+        artifact_root / "jira-mock" / case_id,
+    ]
+
+    worker_dir = artifact_root / "workflow-worker"
+    if worker_dir.is_dir():
+        paths.extend(sorted(worker_dir.glob(f"{case_id}.*")))
+
+    return [path for path in paths if path.exists()]
 
 
 def _actual_result_events(actual_result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
