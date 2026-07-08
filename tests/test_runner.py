@@ -3024,6 +3024,7 @@ def test_build_run_report_records_timeout_exception_groups_as_timeout(tmp_path: 
     entry = report.entries[0]
     assert entry.status == "timeout"
     assert entry.reason == "ymir-backport workflow timed out after 300s"
+    assert entry.actual_path is None
 
 
 def test_build_run_report_records_chained_timeout_groups_as_timeout(tmp_path: Path) -> None:
@@ -3062,6 +3063,7 @@ def test_build_run_report_records_chained_timeout_groups_as_timeout(tmp_path: Pa
     entry = report.entries[0]
     assert entry.status == "timeout"
     assert entry.reason == "ymir-backport workflow timed out after 300s"
+    assert entry.actual_path is None
 
 
 def test_build_run_report_records_configured_timeout_cancellations_as_timeout(
@@ -3101,6 +3103,7 @@ def test_build_run_report_records_configured_timeout_cancellations_as_timeout(
     entry = report.entries[0]
     assert entry.status == "timeout"
     assert entry.reason == "ymir-backport workflow timed out after 10s"
+    assert entry.actual_path is None
 
 
 def test_workflow_worker_serializes_timeout_exception_groups(tmp_path: Path, monkeypatch) -> None:
