@@ -1412,6 +1412,7 @@ def _execute_isolated_case_workflow(
     worker_home.mkdir(parents=True, exist_ok=True)
     request_path = worker_dir / f"{request.case_id}.request.json"
     result_path = worker_dir / f"{request.case_id}.result.json"
+    cidfile_path = worker_dir / f"{request.case_id}.container.cid"
     cases_view = _materialize_worker_cases_view(request, worker_dir)
     container_results_dir = WORKER_CONTAINER_RESULTS_DIR
 
@@ -1452,6 +1453,7 @@ def _execute_isolated_case_workflow(
         worker_image=worker_image,
         cases_mount_source=cases_view,
         container_results_dir=container_results_dir,
+        cidfile_path=cidfile_path,
     )
     _write_worker_container_artifacts(
         worker_dir,
@@ -1461,13 +1463,11 @@ def _execute_isolated_case_workflow(
         worker_image=worker_image,
         command=command,
     )
-    completed = subprocess.run(
+    completed = _run_worker_container(
         command,
-        cwd=str(_harness_root()),
-        env=_container_tool_environment(request.environment),
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        check=False,
+        request=request,
+        workflow=workflow,
+        cidfile_path=cidfile_path,
     )
     if completed.returncode != 0:
         raise RuntimeError(f"isolated {workflow} worker exited with status {completed.returncode}")
@@ -1547,6 +1547,7 @@ def _filesystem_isolation_command(
     worker_image: str,
     cases_mount_source: Path | None = None,
     container_results_dir: Path = WORKER_CONTAINER_RESULTS_DIR,
+    cidfile_path: Path | None = None,
 ) -> list[str]:
     tool = _container_tool(request.environment)
     if shutil.which(tool) is None:
@@ -1573,6 +1574,8 @@ def _filesystem_isolation_command(
         "--env",
         "PYTHONUNBUFFERED=1",
     ]
+    if cidfile_path is not None:
+        command.extend(["--cidfile", str(cidfile_path)])
     for volume in _package_manager_shim_volumes(request.environment):
         command.extend(["--volume", volume])
 
@@ -1608,6 +1611,68 @@ def _filesystem_isolation_command(
         ]
     )
     return command
+
+
+def _run_worker_container(
+    command: Sequence[str],
+    *,
+    request: RunCaseRequest,
+    workflow: str,
+    cidfile_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    timeout = _positive_float_environment(request.environment, AGENT_TIMEOUT_ENV)
+    environment = _container_tool_environment(request.environment)
+    cidfile_path.unlink(missing_ok=True)
+    process = subprocess.Popen(
+        list(command),
+        cwd=str(_harness_root()),
+        env=environment,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        text=True,
+    )
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _remove_worker_container(command[0], cidfile_path, environment)
+        _terminate_worker_process(process)
+        raise TimeoutError(workflow_timeout_reason(workflow, request.environment, exc)) from exc
+    finally:
+        cidfile_path.unlink(missing_ok=True)
+    return subprocess.CompletedProcess(list(command), returncode)
+
+
+def _remove_worker_container(
+    tool: str,
+    cidfile_path: Path,
+    environment: Mapping[str, str],
+) -> None:
+    try:
+        container_id = cidfile_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if not container_id:
+        return
+    subprocess.run(
+        [tool, "rm", "-f", container_id],
+        cwd=str(_harness_root()),
+        env=dict(environment),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=30,
+    )
+
+
+def _terminate_worker_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def _package_manager_shim_volumes(environment: Mapping[str, str]) -> list[str]:
