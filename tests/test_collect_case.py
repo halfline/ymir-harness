@@ -368,7 +368,7 @@ def test_collect_case_warns_when_auto_discovered_gitlab_mr_is_private(
     )
     responses: dict[str, object] = {}
     seen_urls: list[str] = []
-    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: None)
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env, token_file=None: None)
     monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
 
     result = collect_case(
@@ -404,7 +404,7 @@ def test_collect_case_fails_when_explicit_gitlab_mr_is_private(
     api_url = "https://gitlab.com/api/v4/projects/redhat%2Frhel%2Frpms%2Fredis/merge_requests/6"
     responses = {api_url: HTTPError(api_url, 404, "Not Found", None, None)}
     seen_urls: list[str] = []
-    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: None)
+    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env, token_file=None: None)
     monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
 
     with pytest.raises(CollectCaseError, match="failed to fetch"):
@@ -465,7 +465,11 @@ def test_collect_case_uses_gitlab_api_diff_when_mr_patch_is_forbidden(
         ],
     }
     seen_urls: list[str] = []
-    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: "token")
+    monkeypatch.setattr(
+        collect_case_module,
+        "_gitlab_token",
+        lambda token_env, token_file=None: "token",
+    )
     monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
 
     result = collect_case(
@@ -530,7 +534,11 @@ def test_collect_case_uses_gitlab_api_diff_for_jira_commit_patch(
         ],
     }
     seen_urls: list[str] = []
-    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: "token")
+    monkeypatch.setattr(
+        collect_case_module,
+        "_gitlab_token",
+        lambda token_env, token_file=None: "token",
+    )
     monkeypatch.setattr(collect_case_module, "urlopen", _fake_urlopen(responses, seen_urls))
 
     result = collect_case(
@@ -698,6 +706,26 @@ def test_collect_case_auto_caches_package_distgit_when_cache_is_requested(
         request,
         collect_case_module.FetchedEvidence(),
     ) == ("https://gitlab.com/redhat/centos-stream/rpms/rpm-ostree",)
+
+
+def test_collect_case_auto_caches_rhel_distgit_for_rhel_fix_versions(
+    tmp_path: Path,
+) -> None:
+    request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-12345",
+        package="runc",
+        fix_version="rhel-9.8.z",
+        network_mode="replay_only",
+    )
+
+    assert collect_case_module._auto_source_project_urls(  # noqa: SLF001
+        request,
+        collect_case_module.FetchedEvidence(),
+    ) == (
+        "https://gitlab.com/redhat/rhel/rpms/runc",
+        "https://gitlab.com/redhat/centos-stream/rpms/runc",
+    )
 
 
 def test_collect_case_rejects_network_denied_external_records(tmp_path: Path) -> None:
@@ -2458,7 +2486,11 @@ def test_localize_mock_repo_cache_authenticates_existing_gitlab_cache(
     destination.mkdir(parents=True)
     commands: list[list[str]] = []
 
-    monkeypatch.setattr(collect_case_module, "_gitlab_token", lambda token_env: "token")
+    monkeypatch.setattr(
+        collect_case_module,
+        "_gitlab_token",
+        lambda token_env, token_file=None: "token",
+    )
 
     def fake_run_git(command, cwd):
         commands.append(list(command))
@@ -2497,6 +2529,42 @@ def test_localize_mock_repo_cache_authenticates_existing_gitlab_cache(
     ]
     assert localized.mock_repo is not None
     assert localized.mock_repo.source_url == str(destination)
+
+
+def test_localize_mock_repo_cache_authenticates_with_gitlab_token_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_dir = tmp_path / "repo-cache"
+    commands: list[list[str]] = []
+    token_path = tmp_path / "gitlab-token.txt"
+    token_path.write_text("file-token\n", encoding="utf-8")
+
+    def fake_run_git(command, cwd):
+        commands.append(list(command))
+
+    monkeypatch.setattr(collect_case_module, "_run_git", fake_run_git)
+
+    request = CollectCaseRequest(
+        cases_dir=tmp_path / "benchmark_cases",
+        case_id="RHEL-178383",
+        mock_repo=MockRepoInput(
+            remote_url="https://gitlab.com/redhat/rhel/rpms/redis.git",
+            pre_fix_ref="abc123",
+            branch="rhel-9.4.0",
+        ),
+        mock_repo_cache=cache_dir,
+        gitlab_token_file=token_path,
+    )
+
+    collect_case_module._localize_mock_repo_cache(request)  # noqa: SLF001
+
+    authorization = base64.b64encode(b"oauth2:file-token").decode("ascii")
+    assert commands[0][:3] == [
+        "-c",
+        f"http.https://gitlab.com/.extraHeader=Authorization: Basic {authorization}",
+        "clone",
+    ]
 
 
 def test_collect_case_caches_lookaside_sources_from_prefixed_mock_repo(

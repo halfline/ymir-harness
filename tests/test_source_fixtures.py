@@ -48,6 +48,7 @@ def test_git_submodule_update_disables_gitlab_prompt_without_token(
     monkeypatch,
 ) -> None:
     cases_dir = tmp_path / "cases"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     cases_dir.mkdir()
     subprocess.run(["git", "init"], cwd=cases_dir, check=True, stdout=subprocess.DEVNULL)
     calls = []

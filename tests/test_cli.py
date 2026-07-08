@@ -1191,6 +1191,8 @@ def test_cli_prepare_case_collects_until_run_succeeds(
                 str(tmp_path / "jira-token.txt"),
                 "--gitlab-token-env",
                 "GITLAB_API_TOKEN",
+                "--gitlab-token-file",
+                str(tmp_path / "gitlab-token.txt"),
                 "--workflow",
                 "ymir-triage",
                 "--variant",
@@ -1211,9 +1213,11 @@ def test_cli_prepare_case_collects_until_run_succeeds(
     assert run_ids == ["baseline-RHEL-12345-iter-1", "baseline-RHEL-12345-iter-2"]
     assert len(capture_requests) == 1
     assert capture_requests[0].case_id == "RHEL-12345"
+    assert capture_requests[0].gitlab_token_file == tmp_path / "gitlab-token.txt"
     assert collect_requests[0].jira_url == "https://redhat.atlassian.net/browse/RHEL-12345"
     assert collect_requests[0].mock_agent == "triage"
     assert collect_requests[0].gitlab_token_env == "GITLAB_API_TOKEN"
+    assert collect_requests[0].gitlab_token_file == tmp_path / "gitlab-token.txt"
 
 
 def test_cli_prepare_case_blocks_passing_run_with_validation_warnings(

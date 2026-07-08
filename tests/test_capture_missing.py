@@ -1363,7 +1363,7 @@ def test_capture_missing_records_git_source_failure_for_replay(
         f"BenchmarkBoundaryViolation: external subprocess URL blocked: {url}\n",
     )
 
-    def fake_run(command, check, stdout, stderr, text, cwd=None):
+    def fake_run(command, check, stdout, stderr, text, cwd=None, env=None):
         if command[:4] == ["git", "-C", str(cases_dir), "rev-parse"]:
             return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
         assert command[:4] == ["git", "clone", "--mirror", "--quiet"]
