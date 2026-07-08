@@ -905,6 +905,71 @@ def test_translate_worker_gitconfig_result_paths(tmp_path: Path) -> None:
     assert gateway_gitconfig_path.read_text(encoding="utf-8") == expected
 
 
+def test_generated_gitconfig_allows_fixture_fetching_master(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    fixture = tmp_path / "fixture.git"
+    checkout = tmp_path / "checkout"
+    gitconfig_path = tmp_path / "gitconfig"
+
+    subprocess.run(["git", "init", str(source)], check=True, stdout=subprocess.DEVNULL)
+    (source / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Ymir Harness",
+            "-c",
+            "user.email=ymir-harness@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(["git", "-C", str(source), "branch", "-M", "master"], check=True)
+    subprocess.run(
+        ["git", "clone", "--bare", str(source), str(fixture)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+    runner_module._append_gitconfig_rewrites(
+        gitconfig_path,
+        (("https://github.com/example/project", fixture.resolve().as_uri()),),
+    )
+
+    subprocess.run(
+        ["git", "init", str(checkout)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": str(gitconfig_path)},
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "fetch",
+            "https://github.com/example/project",
+            "master:refs/heads/master",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": str(gitconfig_path)},
+    )
+
+    assert "defaultBranch = main" in gitconfig_path.read_text(encoding="utf-8")
+    assert subprocess.run(
+        ["git", "-C", str(checkout), "show-ref", "--verify", "refs/heads/master"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
 def test_materialize_worker_cases_view_excludes_reports_and_other_cases(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
