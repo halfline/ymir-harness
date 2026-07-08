@@ -2206,6 +2206,8 @@ def _append_gitconfig_rewrites(path: Path, rewrites: Sequence[tuple[str, str]]) 
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     existing_instead_of = _existing_gitconfig_instead_of_values(existing)
     lines = []
+    if not _gitconfig_sets_init_default_branch(existing):
+        lines.append("[init]\n\tdefaultBranch = main\n")
     for original_url, local_url in dict.fromkeys(rewrites):
         if original_url in existing_instead_of:
             continue
@@ -2229,6 +2231,20 @@ def _existing_gitconfig_instead_of_values(content: str) -> set[str]:
         if value:
             values.add(value)
     return values
+
+
+def _gitconfig_sets_init_default_branch(content: str) -> bool:
+    in_init_section = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_init_section = stripped == "[init]"
+            continue
+        if in_init_section and stripped.startswith("defaultBranch = "):
+            return True
+    return False
 
 
 def _jira_mock_directory(
