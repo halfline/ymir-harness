@@ -759,6 +759,115 @@ def test_filesystem_isolation_command_mounts_package_manager_shims(
         assert f"{shim_dir / name}:/usr/bin/{name}:ro" in volumes
 
 
+def test_filesystem_isolation_command_records_container_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    worker_home = results_dir / "repeat-1" / "workflow-worker" / "home"
+    request_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.request.json"
+    result_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.result.json"
+    cidfile_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.container.cid"
+    worker_home.mkdir(parents=True)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: "/usr/bin/podman")
+
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        repetition=1,
+        cases_dir=cases_dir,
+        results_dir=results_dir,
+        expected_path=cases_dir / "expected" / "RHEL-12345.expected.json",
+        actual_path=results_dir / "repeat-1" / "actual-results" / "RHEL-12345.actual.json",
+        environment={},
+        variant="baseline",
+        features=(),
+    )
+
+    command = runner_module._filesystem_isolation_command(
+        request,
+        request_path=request_path,
+        result_path=result_path,
+        worker_home=worker_home,
+        worker_image="localhost/ymir-harness-worker:c10s",
+        cidfile_path=cidfile_path,
+    )
+
+    assert _option_values(command, "--cidfile") == [str(cidfile_path)]
+
+
+def test_run_worker_container_removes_timed_out_container(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    cidfile_path = results_dir / "repeat-1" / "workflow-worker" / "RHEL-12345.container.cid"
+    cidfile_path.parent.mkdir(parents=True)
+    cidfile_path.write_text("stuck-container\n", encoding="utf-8")
+    popen_calls = []
+    removed = []
+
+    class TimedOutProcess:
+        returncode = None
+
+        def __init__(self, command, **kwargs):
+            popen_calls.append((command, kwargs))
+
+        def wait(self, timeout=None):
+            if self.returncode is not None:
+                return self.returncode
+            raise subprocess.TimeoutExpired(["podman", "run"], timeout)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    def fake_remove(tool, path, environment):
+        removed.append((tool, path, environment))
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", TimedOutProcess)
+    monkeypatch.setattr(runner_module, "_remove_worker_container", fake_remove)
+    monkeypatch.setattr(runner_module, "_harness_root", lambda: tmp_path)
+
+    request = runner_module.RunCaseRequest(
+        case_id="RHEL-12345",
+        case_type="not_affected",
+        repetition=1,
+        cases_dir=cases_dir,
+        results_dir=results_dir,
+        expected_path=cases_dir / "expected" / "RHEL-12345.expected.json",
+        actual_path=results_dir / "repeat-1" / "actual-results" / "RHEL-12345.actual.json",
+        environment={
+            "PATH": "/usr/bin",
+            "YMIR_HARNESS_AGENT_TIMEOUT_SECONDS": "7",
+        },
+        variant="baseline",
+        features=(),
+    )
+
+    with pytest.raises(TimeoutError, match="ymir-backport workflow timed out after 7s"):
+        runner_module._run_worker_container(
+            ["podman", "run", "--cidfile", str(cidfile_path), "worker"],
+            request=request,
+            workflow="ymir-backport",
+            cidfile_path=cidfile_path,
+        )
+
+    assert popen_calls[0][0] == ["podman", "run", "--cidfile", str(cidfile_path), "worker"]
+    assert len(removed) == 1
+    assert removed[0][0] == "podman"
+    assert removed[0][1] == cidfile_path
+    assert isinstance(removed[0][2], dict)
+    assert not cidfile_path.exists()
+
+
 def test_container_worker_request_translates_result_paths(tmp_path: Path) -> None:
     cases_dir = tmp_path / "benchmark_cases"
     results_dir = tmp_path / "results"
