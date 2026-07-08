@@ -35,6 +35,7 @@ from ymir_harness.models import (
     ValidationIssue,
     ValidationReport,
 )
+from ymir_harness.replay import allows_empty_recorded_body
 from ymir_harness.source_fixtures import (
     source_cache_contains_object,
     source_cache_repo_for_object,
@@ -419,6 +420,7 @@ def _validate_web_cache_manifest(
 
     required_urls = manifest.get("required_urls")
     recorded_files = manifest.get("recorded_files")
+    response_metadata = manifest.get("response_metadata")
     if not isinstance(required_urls, list):
         result.issues.append(
             ValidationIssue(
@@ -441,6 +443,8 @@ def _validate_web_cache_manifest(
             )
         )
         recorded_files = {}
+    if not isinstance(response_metadata, Mapping):
+        response_metadata = {}
 
     required_url_set = {url for url in required_urls if isinstance(url, str)}
     for url in _expected_patch_urls(expected):
@@ -504,7 +508,9 @@ def _validate_web_cache_manifest(
                 )
             )
             continue
-        if recorded_path.stat().st_size == 0:
+        if recorded_path.stat().st_size == 0 and not allows_empty_recorded_body(
+            _recorded_response_status(response_metadata, url)
+        ):
             result.issues.append(
                 ValidationIssue(
                     severity="error",
@@ -516,6 +522,13 @@ def _validate_web_cache_manifest(
             )
 
     _validate_koji_candidate_builds_as_of(cases_dir, manifest, manifest_path, result)
+
+
+def _recorded_response_status(response_metadata: Mapping[str, Any], url: str) -> Any:
+    metadata = response_metadata.get(url)
+    if not isinstance(metadata, Mapping):
+        return 200
+    return metadata.get("status", 200)
 
 
 def _validate_koji_candidate_builds_as_of(

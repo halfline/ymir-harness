@@ -19,6 +19,12 @@ class ReplayCacheError(RuntimeError):
     """Raised when replay cache data cannot satisfy a requested URL."""
 
 
+def allows_empty_recorded_body(status: Any) -> bool:
+    if isinstance(status, bool) or not isinstance(status, int):
+        return False
+    return 100 <= status < 200 or status in {202, 204, 205, 304}
+
+
 class ReplayResponse:
     def __init__(
         self,
@@ -261,7 +267,7 @@ class ReplayCache:
             raise ReplayCacheError(f"recorded file escapes cache directory for URL {url}") from exc
         if not path.is_file():
             raise ReplayCacheError(f"recorded file is missing for URL {url}: {path}")
-        if path.stat().st_size == 0:
+        if path.stat().st_size == 0 and not allows_empty_recorded_body(self.status_code(url)):
             raise ReplayCacheError(f"recorded file is empty for URL {url}: {path}")
         return path
 
