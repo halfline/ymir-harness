@@ -1689,6 +1689,78 @@ def test_build_run_report_captures_workflow_output_replay_violations(
     ).read_text(encoding="utf-8")
 
 
+def test_build_run_report_scopes_artifact_replay_violations_to_case(
+    tmp_path: Path,
+) -> None:
+    cases_dir = tmp_path / "benchmark_cases"
+    results_dir = tmp_path / "results"
+    for case_id in ("RHEL-12345", "RHEL-23456"):
+        _write_expected(
+            cases_dir,
+            case_id,
+            {
+                "case_id": case_id,
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+                "network_mode": "replay_only",
+            },
+        )
+        _write_web_manifest(cases_dir, case_id, [])
+    validation_report = ValidationReport(
+        cases_dir=cases_dir,
+        cases=[
+            CaseValidationResult(
+                case_id="RHEL-12345",
+                case_type="cve_backport",
+                status="valid",
+            ),
+            CaseValidationResult(
+                case_id="RHEL-23456",
+                case_type="cve_backport",
+                status="valid",
+            ),
+        ],
+    )
+
+    def executor(request):
+        if request.case_id == "RHEL-12345":
+            print(
+                "BenchmarkBoundaryViolation: external subprocess URL blocked: "
+                "https://gitlab.example/group/pkg.git"
+            )
+        return RunCaseExecution(
+            status="passed",
+            actual_result={
+                "case_id": request.case_id,
+                "case_type": "cve_backport",
+                "resolution": "backport",
+                "package": "dnsmasq",
+            },
+        )
+
+    report = build_run_report(
+        cases_dir,
+        results_dir,
+        validation_report=validation_report,
+        run_id="baseline-1",
+        variant="baseline",
+        executor=executor,
+    )
+
+    entries = {entry.case_id: entry for entry in report.entries}
+    first = entries["RHEL-12345"]
+    second = entries["RHEL-23456"]
+    assert first.status == "failed"
+    assert second.status == "passed"
+    first_actual = json.loads(first.actual_path.read_text(encoding="utf-8"))
+    second_actual = json.loads(second.actual_path.read_text(encoding="utf-8"))
+    assert first_actual["replay_violations"] == [
+        "external subprocess URL blocked: https://gitlab.example/group/pkg.git"
+    ]
+    assert "replay_violations" not in second_actual
+
+
 def test_build_run_report_records_workflow_output_replay_misses_without_failing(
     tmp_path: Path,
 ) -> None:
